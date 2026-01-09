@@ -1,0 +1,20 @@
+#!/bin/bash
+set -e
+
+echo "Building docker image..."
+docker build -t service-portal:latest -f images/service-portal/Dockerfile .
+
+echo "Deploying to Kubernetes..."
+# Ensure the secret exists or warn
+if ! kubectl get secret service-portal-secret > /dev/null 2>&1; then
+    echo "Warning: Secret 'service-portal-secret' not found."
+    echo "Creating a dummy secret. Please update it with the actual token."
+    kubectl create secret generic service-portal-secret --from-literal=token="REPLACE_ME"
+fi
+
+kubectl apply -f k8s/manifests.yaml
+
+echo "Deployment complete."
+echo "You may need to load the image into your cluster if using Kind/Minikube:"
+echo "  kind load docker-image service-portal:latest"
+echo "  minikube image load service-portal:latest"

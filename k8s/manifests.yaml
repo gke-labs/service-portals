@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-portal
+  labels:
+    app: service-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-portal
+  template:
+    metadata:
+      labels:
+        app: service-portal
+    spec:
+      containers:
+      - name: service-portal
+        image: service-portal:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        env:
+        - name: TARGET_URL
+          value: "https://generativelanguage.googleapis.com"
+        - name: UPSTREAM_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: service-portal-secret
+              key: token
+              optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-portal
+spec:
+  selector:
+    app: service-portal
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
