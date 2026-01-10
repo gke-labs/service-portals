@@ -24,6 +24,20 @@ func main() {
 		log.Fatalf("Invalid TARGET_URL: %v", err)
 	}
 
+	proxy := newProxy(targetURL, upstreamAuthToken)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Starting proxy on :%s forwarding to %s", port, target)
+	if err := http.ListenAndServe(":"+port, proxy); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
+}
+
+func newProxy(targetURL *url.URL, upstreamAuthToken string) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
 	originalDirector := proxy.Director
@@ -47,13 +61,5 @@ func main() {
 		return nil
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Printf("Starting proxy on :%s forwarding to %s", port, target)
-	if err := http.ListenAndServe(":"+port, proxy); err != nil {
-		log.Fatalf("Server failed: %v", err)
-	}
+	return proxy
 }
