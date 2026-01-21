@@ -1,20 +1,26 @@
 package e2e
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestServicePortal(t *testing.T) {
+	if os.Getenv("E2E") == "" {
+		t.Skip("E2E env var not set, skipping")
+	}
+
 	h := NewHarness(t, "service-portal-e2e")
 	h.Setup()
-	//defer h.Teardown() // Keep it running for debugging if it fails, or uncomment to clean up
 
-	// Paths relative to tests/e2e
-	// Context is ../../ (repo root) because Dockerfile copies go.mod from root
-	h.DockerBuild("service-portal:e2e", "../../images/service-portal/Dockerfile", "../../")
-	h.DockerBuild("toolbox:e2e", "../toolbox/Dockerfile", "../toolbox")
+	gitRoot := h.GetGitRoot()
+
+	// Paths relative to git root
+	h.DockerBuild("service-portal:e2e", filepath.Join(gitRoot, "images/service-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 
 	h.KindLoad("service-portal:e2e")
 	h.KindLoad("toolbox:e2e")

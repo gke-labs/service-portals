@@ -35,6 +35,29 @@ func (h *Harness) Setup() {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		h.t.Fatalf("Failed to create cluster: %v\nOutput: %s", err, out)
 	}
+
+	h.t.Cleanup(func() {
+		h.Teardown()
+	})
+}
+
+func (h *Harness) Teardown() {
+	h.t.Helper()
+	h.t.Logf("Deleting cluster %s", h.ClusterName)
+	cmd := exec.Command("kind", "delete", "cluster", "--name", h.ClusterName)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Logf("Failed to delete cluster: %v\nOutput: %s", err, out)
+	}
+}
+
+func (h *Harness) GetGitRoot() string {
+	h.t.Helper()
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		h.t.Fatalf("Failed to find git root: %v", err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (h *Harness) RunCommand(name string, args ...string) {
