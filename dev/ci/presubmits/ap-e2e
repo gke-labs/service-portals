@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,12 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.25-alpine AS builder
-WORKDIR /app
-COPY main.go .
-RUN go build -o toolbox main.go
+set -o errexit
+set -o nounset
+set -o pipefail
 
-FROM alpine:latest
-WORKDIR /app
-COPY --from=builder /app/toolbox .
-ENTRYPOINT ["./toolbox"]
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "${REPO_ROOT}"
+
+# Run e2e tests
+go run github.com/gke-labs/gke-labs-infra/ap@latest e2e

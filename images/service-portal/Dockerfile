@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Use the official Golang image to create a build artifact.
-FROM golang:1.23 as builder
+FROM golang:1.25 AS builder
 
 WORKDIR /app
 
