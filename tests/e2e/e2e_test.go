@@ -80,46 +80,25 @@ spec:
 	h.WaitForDeployment("backend", 2*time.Minute)
 
 	// Deploy Service Portal
-	portalManifest := `
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: service-portal
-  labels:
-    app: service-portal
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: service-portal
-  template:
-    metadata:
-      labels:
-        app: service-portal
-    spec:
-      containers:
-      - name: service-portal
-        image: service-portal:e2e
-        imagePullPolicy: Never
-        env:
-        - name: TARGET_URL
-          value: "http://backend"
-        - name: UPSTREAM_AUTH_TOKEN
-          value: "e2e-secret-token"
-        ports:
-        - containerPort: 8080
----
+	h.KubectlApplyContent(`
 apiVersion: v1
-kind: Service
+kind: Secret
 metadata:
-  name: service-portal
-spec:
-  selector:
-    app: service-portal
-  ports:
-  - port: 80
-    targetPort: 8080
-`
+  name: service-portal-secret
+stringData:
+  token: e2e-secret-token
+`)
+
+	portalManifestPath := filepath.Join(gitRoot, "k8s/manifests.yaml")
+	b, err := os.ReadFile(portalManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to read portal manifest: %v", err)
+	}
+	portalManifest := string(b)
+	portalManifest = strings.ReplaceAll(portalManifest, "service-portal:latest", "service-portal:e2e")
+	portalManifest = strings.ReplaceAll(portalManifest, "imagePullPolicy: IfNotPresent", "imagePullPolicy: Never")
+	portalManifest = strings.ReplaceAll(portalManifest, "value: \"https://generativelanguage.googleapis.com\"", "value: \"http://backend\"")
+
 	h.KubectlApplyContent(portalManifest)
 	h.WaitForDeployment("service-portal", 2*time.Minute)
 
