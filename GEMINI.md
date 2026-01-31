@@ -10,6 +10,10 @@ The project consists of the following components:
     - Source: `cmd/service-portal/`
     - Functionality: Authenticates incoming requests and proxies them to a configured upstream service (e.g., `https://generativelanguage.googleapis.com`), injecting necessary authentication headers (e.g., API keys).
 
+- **Git Proxy**: A Git-aware pull-through cache proxy.
+    - Source: `cmd/git-proxy/`
+    - Functionality: Proxies Git HTTP requests to an upstream (e.g., `https://github.com`) and caches Git objects locally to accelerate subsequent clones.
+
 - **Deployment**:
     - Dockerfile: `images/service-portal/Dockerfile`
     - Kubernetes Manifests: `k8s/manifests.yaml` (Deployment and Service definitions)

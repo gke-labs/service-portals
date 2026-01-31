@@ -41,3 +41,49 @@ spec:
   - port: 80
     targetPort: 8080
     protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-proxy
+  labels:
+    app: git-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: git-proxy
+  template:
+    metadata:
+      labels:
+        app: git-proxy
+    spec:
+      containers:
+      - name: git-proxy
+        image: git-proxy:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        env:
+        - name: UPSTREAM_URL
+          value: "https://github.com"
+        - name: CACHE_DIR
+          value: "/cache"
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /cache
+      volumes:
+      - name: cache-volume
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-proxy
+spec:
+  selector:
+    app: git-proxy
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP

@@ -136,3 +136,114 @@ spec:
 		t.Error("Logs do not contain correct token")
 	}
 }
+
+func TestGitProxy(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "git-proxy-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	h.DockerBuild("git-proxy:e2e", filepath.Join(gitRoot, "images/git-proxy/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("git-proxy:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend (Toolbox Server)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+
+	// Deploy Git Proxy
+	portalManifestPath := filepath.Join(gitRoot, "k8s/manifests.yaml")
+	b, err := os.ReadFile(portalManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to read portal manifest: %v", err)
+	}
+	// We want only the git-proxy part. We can split by ---
+	manifests := strings.Split(string(b), "---")
+	var gitProxyManifest strings.Builder
+	for _, m := range manifests {
+		if strings.Contains(m, "name: git-proxy") {
+			gitProxyManifest.WriteString("---")
+			gitProxyManifest.WriteString(m)
+		}
+	}
+
+	portalManifest := gitProxyManifest.String()
+	portalManifest = strings.ReplaceAll(portalManifest, "git-proxy:latest", "git-proxy:e2e")
+	portalManifest = strings.ReplaceAll(portalManifest, "imagePullPolicy: IfNotPresent", "imagePullPolicy: Never")
+	portalManifest = strings.ReplaceAll(portalManifest, "value: \"https://github.com\"", "value: \"http://backend\"")
+
+	h.KubectlApplyContent(portalManifest)
+	h.WaitForDeployment("git-proxy", 2*time.Minute)
+
+	// Run Client
+	clientPodName := "test-client-git"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-git
+  labels:
+    app: test-client-git
+spec:
+  containers:
+  - name: toolbox
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/app/toolbox", "client", "http://git-proxy/google/re2.git/info/refs"]
+  restartPolicy: Never
+`
+	h.KubectlApplyContent(clientManifest)
+
+	h.WaitForPodSuccess(clientPodName, 1*time.Minute)
+
+	logs := h.GetPodLogs(clientPodName)
+	t.Logf("Client logs: %s", logs)
+
+	if !strings.Contains(logs, "Status: 200 OK") {
+		t.Errorf("Expected status 200 OK, got: %s", logs)
+	}
+}
