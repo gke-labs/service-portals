@@ -1,3 +1,3 @@
 module github.com/gke-labs/service-portals
 
-go 1.25
+go 1.24

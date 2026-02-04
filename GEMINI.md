@@ -10,6 +10,11 @@ The project consists of the following components:
     - Source: `cmd/service-portal/`
     - Functionality: Authenticates incoming requests and proxies them to a configured upstream service (e.g., `https://generativelanguage.googleapis.com`), injecting necessary authentication headers (e.g., API keys).
 
+- **Artifact Portal Proxy**: A Go-based caching forward proxy.
+    - Source: `cmd/artifact-portal/`
+    - Functionality: Caches artifact downloads (like Python wheels) to speed up repeated operations, especially in CI/CD and Docker builds.
+    - Shared logic: Uses `pkg/proxy/` for common proxying functionality.
+
 - **Deployment**:
     - Dockerfile: `images/service-portal/Dockerfile`
     - Kubernetes Manifests: `k8s/manifests.yaml` (Deployment and Service definitions)
