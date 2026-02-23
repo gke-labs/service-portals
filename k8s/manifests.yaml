@@ -17,7 +17,6 @@ spec:
       containers:
       - name: service-portal
         image: service-portal:latest
-        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
         env:
