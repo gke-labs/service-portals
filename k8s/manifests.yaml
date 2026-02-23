@@ -29,6 +29,8 @@ spec:
               name: service-portal-secret
               key: token
               optional: true
+        - name: UPSTREAM_AUTH_HEADER
+          value: "Authorization"
 ---
 apiVersion: v1
 kind: Service

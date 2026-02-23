@@ -33,12 +33,18 @@ func main() {
 		log.Println("Warning: UPSTREAM_AUTH_TOKEN is not set. No Authorization header will be injected.")
 	}
 
+	upstreamAuthHeader := os.Getenv("UPSTREAM_AUTH_HEADER")
+	if upstreamAuthHeader == "" {
+		upstreamAuthHeader = "Authorization"
+	}
+	upstreamAuthHeader = http.CanonicalHeaderKey(upstreamAuthHeader)
+
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		log.Fatalf("Invalid TARGET_URL: %v", err)
 	}
 
-	proxy := newProxy(targetURL, upstreamAuthToken)
+	proxy := newProxy(targetURL, upstreamAuthToken, upstreamAuthHeader)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -51,7 +57,7 @@ func main() {
 	}
 }
 
-func newProxy(targetURL *url.URL, upstreamAuthToken string) *httputil.ReverseProxy {
+func newProxy(targetURL *url.URL, upstreamAuthToken string, upstreamAuthHeader string) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 
 	originalDirector := proxy.Director
@@ -63,7 +69,11 @@ func newProxy(targetURL *url.URL, upstreamAuthToken string) *httputil.ReversePro
 		originalDirector(req)
 		req.Host = targetURL.Host
 		if upstreamAuthToken != "" {
-			req.Header.Set("Authorization", "Bearer "+upstreamAuthToken)
+			if upstreamAuthHeader == "Authorization" {
+				req.Header.Set(upstreamAuthHeader, "Bearer "+upstreamAuthToken)
+			} else {
+				req.Header.Set(upstreamAuthHeader, upstreamAuthToken)
+			}
 		}
 		// Remove headers that might interfere or reveal the proxy's identity if desired
 		req.Header.Del("X-Forwarded-For")
