@@ -30,6 +30,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
 func TestConnectHonorsHost(t *testing.T) {
@@ -69,20 +71,18 @@ func TestConnectHonorsHost(t *testing.T) {
 	generateCA(t, caCertPath, caKeyPath)
 
 	// 4. Create the proxy
-	proxy := newProxy(targetURL, "secret-token", "Authorization")
+	p, err := proxy.NewHTTPProxy(targetURL, "secret-token", "Authorization", caCertPath, caKeyPath)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
 	// Use a custom transport to handle http/https backends correctly in tests
-	proxy.Transport = &http.Transport{
+	p.Transport = &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
 	}
 
-	mitm, err := newMITMHandler(proxy, caCertPath, caKeyPath)
-	if err != nil {
-		t.Fatalf("Failed to create mitm handler: %v", err)
-	}
-
-	proxyServer := httptest.NewServer(mitm)
+	proxyServer := httptest.NewServer(p)
 	defer proxyServer.Close()
 
 	proxyURL, _ := url.Parse(proxyServer.URL)
