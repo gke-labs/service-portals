@@ -96,8 +96,7 @@ stringData:
 		t.Fatalf("Failed to read portal manifest: %v", err)
 	}
 	portalManifest := string(b)
-	portalManifest = strings.ReplaceAll(portalManifest, "service-portal:latest", "service-portal:e2e")
-	portalManifest = strings.ReplaceAll(portalManifest, "imagePullPolicy: IfNotPresent", "imagePullPolicy: Never")
+	portalManifest = strings.ReplaceAll(portalManifest, "image: service-portal:latest", "image: service-portal:e2e\n        imagePullPolicy: Never")
 	portalManifest = strings.ReplaceAll(portalManifest, "value: \"https://generativelanguage.googleapis.com\"", "value: \"http://backend\"")
 
 	// Install cert-manager
