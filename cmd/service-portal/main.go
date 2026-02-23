@@ -118,22 +118,52 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-func newProxy(targetURL *url.URL, upstreamAuthToken string, upstreamAuthHeader string) *httputil.ReverseProxy {
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+type mitmContextKey struct{}
 
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = targetURL.Host
-		if upstreamAuthToken != "" {
-			if upstreamAuthHeader == "Authorization" {
-				req.Header.Set(upstreamAuthHeader, "Bearer "+upstreamAuthToken)
-			} else {
-				req.Header.Set(upstreamAuthHeader, upstreamAuthToken)
+func newProxy(targetURL *url.URL, upstreamAuthToken string, upstreamAuthHeader string) *httputil.ReverseProxy {
+	targetProxy := httputil.NewSingleHostReverseProxy(targetURL)
+	targetDirector := targetProxy.Director
+
+	proxy := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			host := req.Host
+			if host == "" {
+				host = req.URL.Host
 			}
-		}
-		// Remove headers that might interfere or reveal the proxy's identity if desired
-		req.Header.Del("X-Forwarded-For")
+
+			isMITM, _ := req.Context().Value(mitmContextKey{}).(bool)
+
+			// We force the target host if:
+			// 1. The requested host matches the target host
+			// 2. This is a direct request to the proxy (not MITM and not an absolute URL)
+			forceTarget := false
+			if host == targetURL.Host {
+				forceTarget = true
+			} else if !isMITM && req.URL.Host == "" {
+				forceTarget = true
+			}
+
+			if forceTarget {
+				targetDirector(req)
+				req.Host = targetURL.Host
+				if upstreamAuthToken != "" {
+					if upstreamAuthHeader == "Authorization" {
+						req.Header.Set(upstreamAuthHeader, "Bearer "+upstreamAuthToken)
+					} else {
+						req.Header.Set(upstreamAuthHeader, upstreamAuthToken)
+					}
+				}
+			} else {
+				if req.URL.Scheme == "" {
+					req.URL.Scheme = "https"
+				}
+				if req.URL.Host == "" {
+					req.URL.Host = req.Host
+				}
+			}
+			// Remove headers that might interfere or reveal the proxy's identity if desired
+			req.Header.Del("X-Forwarded-For")
+		},
 	}
 
 	// Simple logging
@@ -233,7 +263,10 @@ func (h *mitmHandler) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Create a simple server to handle the decrypted requests
 	server := &http.Server{
-		Handler: h.proxy,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), mitmContextKey{}, true)
+			h.proxy.ServeHTTP(w, r.WithContext(ctx))
+		}),
 	}
 
 	// We use a custom listener that just returns our tlsConn once
@@ -285,7 +318,12 @@ func (h *mitmHandler) signCert(host string) (*tls.Certificate, error) {
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		DNSNames:              []string{host},
+	}
+
+	if ip := net.ParseIP(host); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{host}
 	}
 
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)

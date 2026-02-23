@@ -50,7 +50,7 @@ func TestProxyInjectsAuthToken(t *testing.T) {
 	proxy.Transport = backend.Client().Transport
 
 	// 3. Create a request to the proxy
-	req := httptest.NewRequest("GET", "http://localhost:8080/some/path", nil)
+	req := httptest.NewRequest("GET", "/some/path", nil)
 	w := httptest.NewRecorder()
 
 	// 4. Serve the request
@@ -93,7 +93,7 @@ func TestProxyInjectsCustomHeader(t *testing.T) {
 	proxy := newProxy(backendURL, expectedToken, expectedHeader)
 
 	// 3. Create a request to the proxy
-	req := httptest.NewRequest("GET", "http://localhost:8080/some/path", nil)
+	req := httptest.NewRequest("GET", "/some/path", nil)
 	w := httptest.NewRecorder()
 
 	// 4. Serve the request
