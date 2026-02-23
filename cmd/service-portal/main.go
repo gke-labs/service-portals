@@ -15,14 +15,29 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
 	target := os.Getenv("TARGET_URL")
 	if target == "" {
 		target = "https://generativelanguage.googleapis.com"
@@ -41,7 +56,7 @@ func main() {
 
 	targetURL, err := url.Parse(target)
 	if err != nil {
-		log.Fatalf("Invalid TARGET_URL: %v", err)
+		return fmt.Errorf("invalid TARGET_URL: %w", err)
 	}
 
 	proxy := newProxy(targetURL, upstreamAuthToken, upstreamAuthHeader)
@@ -51,10 +66,32 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("Starting proxy on :%s forwarding to %s", port, target)
-	if err := http.ListenAndServe(":"+port, proxy); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: proxy,
 	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		log.Printf("Starting proxy on :%s forwarding to %s", port, target)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("server failed: %w", err)
+		}
+	}()
+
+	select {
+	case err := <-errChan:
+		return err
+	case <-ctx.Done():
+		log.Println("Shutting down server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("server shutdown failed: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func newProxy(targetURL *url.URL, upstreamAuthToken string, upstreamAuthHeader string) *httputil.ReverseProxy {
