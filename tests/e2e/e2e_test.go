@@ -147,7 +147,7 @@ spec:
     command: ["/app/toolbox", "client", "https://backend"]
     env:
     - name: HTTPS_PROXY
-      value: "http://service-portal"
+      value: "http://service-portal:80"
     - name: SSL_CERT_FILE
       value: "/etc/ssl/certs/service-portal-ca.crt"
     volumeMounts:
