@@ -20,6 +20,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
 func TestProxyInjectsAuthToken(t *testing.T) {
@@ -44,17 +46,20 @@ func TestProxyInjectsAuthToken(t *testing.T) {
 	}
 
 	// 2. Create the proxy
-	proxy := newProxy(backendURL, expectedToken, "Authorization")
+	p, err := proxy.NewHTTPProxy(backendURL, expectedToken, "Authorization", "", "")
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
 
 	// Configure the proxy to trust the test server's certificate
-	proxy.Transport = backend.Client().Transport
+	p.Transport = backend.Client().Transport
 
 	// 3. Create a request to the proxy
 	req := httptest.NewRequest("GET", "/some/path", nil)
 	w := httptest.NewRecorder()
 
 	// 4. Serve the request
-	proxy.ServeHTTP(w, req)
+	p.ServeHTTP(w, req)
 
 	// 5. Verify the response
 	resp := w.Result()
@@ -90,14 +95,17 @@ func TestProxyInjectsCustomHeader(t *testing.T) {
 	}
 
 	// 2. Create the proxy with custom header
-	proxy := newProxy(backendURL, expectedToken, expectedHeader)
+	p, err := proxy.NewHTTPProxy(backendURL, expectedToken, expectedHeader, "", "")
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
 
 	// 3. Create a request to the proxy
 	req := httptest.NewRequest("GET", "/some/path", nil)
 	w := httptest.NewRecorder()
 
 	// 4. Serve the request
-	proxy.ServeHTTP(w, req)
+	p.ServeHTTP(w, req)
 
 	// 5. Verify the response
 	resp := w.Result()
