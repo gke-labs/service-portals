@@ -23,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/gke-labs/service-portals/pkg/cache"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
@@ -30,6 +31,7 @@ type Config struct {
 	DefaultTargetURL  string
 	DefaultAuthHeader string
 	SetupProxy        func(*proxy.HTTPProxy)
+	CacheTTL          time.Duration
 }
 
 func Run(ctx context.Context, config Config) error {
@@ -66,6 +68,30 @@ func Run(ctx context.Context, config Config) error {
 	p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy: %w", err)
+	}
+
+	cacheTTL := config.CacheTTL
+	if cacheTTLEnv := os.Getenv("CACHE_TTL"); cacheTTLEnv != "" {
+		if d, err := time.ParseDuration(cacheTTLEnv); err == nil {
+			cacheTTL = d
+		} else {
+			log.Printf("Warning: invalid CACHE_TTL %q: %v", cacheTTLEnv, err)
+		}
+	}
+
+	if cacheTTL > 0 {
+		cleanupInterval := 1 * time.Minute
+		if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
+			if d, err := time.ParseDuration(cleanupEnv); err == nil {
+				cleanupInterval = d
+			} else {
+				log.Printf("Warning: invalid CACHE_CLEANUP_INTERVAL %q: %v", cleanupEnv, err)
+			}
+		}
+
+		c := cache.NewInMemoryCache(cleanupInterval)
+		p.Transport = proxy.NewCachingTransport(c, p.Transport, cacheTTL)
+		log.Printf("Enabled caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
 	}
 
 	if config.SetupProxy != nil {

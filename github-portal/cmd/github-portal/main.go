@@ -41,7 +41,7 @@ func main() {
 		DefaultAuthHeader: "Authorization",
 		SetupProxy: func(p *proxy.HTTPProxy) {
 			p.Transport = &loggingTransport{
-				underlying: http.DefaultTransport,
+				underlying: p.Transport,
 			}
 		},
 	}
