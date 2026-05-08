@@ -70,18 +70,23 @@ func main() {
 		host := os.Getenv(prefix + "HOST") // e.g. gemini.portal
 
 		if target == "" || host == "" {
-			continue
+			fmt.Fprintf(os.Stderr, "missing configuration for service %q (TARGET_URL or HOST)\n", name)
+			os.Exit(1)
 		}
 
 		targetURL, err := url.Parse(target)
 		if err != nil {
-			continue
+			fmt.Fprintf(os.Stderr, "invalid TARGET_URL for service %q: %v\n", name, err)
+			os.Exit(1)
 		}
 
 		p, err := proxy.NewHTTPProxy(targetURL, authToken, authHeader, "", "")
-		if err == nil {
-			routes[host] = p
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create proxy for service %q: %v\n", name, err)
+			os.Exit(1)
 		}
+		routes[host] = p
+		fmt.Printf("Configured service %q for host %q\n", name, host)
 	}
 
 	router := &Router{routes: routes}
