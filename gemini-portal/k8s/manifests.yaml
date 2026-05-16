@@ -74,11 +74,3 @@ spec:
     name: gemini-portal-selfsigned-issuer
     kind: Issuer
     group: cert-manager.io
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: gemini-portal-issuer
-spec:
-  ca:
-    secretName: gemini-portal-ca
