@@ -74,11 +74,3 @@ spec:
     name: anthropic-portal-selfsigned-issuer
     kind: Issuer
     group: cert-manager.io
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: anthropic-portal-issuer
-spec:
-  ca:
-    secretName: anthropic-portal-ca

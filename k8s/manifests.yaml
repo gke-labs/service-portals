@@ -74,11 +74,3 @@ spec:
     name: service-portal-selfsigned-issuer
     kind: Issuer
     group: cert-manager.io
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: service-portal-issuer
-spec:
-  ca:
-    secretName: service-portal-ca

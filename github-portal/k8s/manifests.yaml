@@ -74,11 +74,3 @@ spec:
     name: github-portal-selfsigned-issuer
     kind: Issuer
     group: cert-manager.io
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: github-portal-issuer
-spec:
-  ca:
-    secretName: github-portal-ca
