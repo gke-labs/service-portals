@@ -174,3 +174,202 @@ spec:
 		t.Error("Logs do not contain correct token")
 	}
 }
+
+func TestAllInOnePortal(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "all-in-one-portal-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Paths relative to git root
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend (Toolbox Server)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+
+	// Deploy All-In-One Portal
+	h.KubectlApplyContent(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: all-in-one-portal-secret
+stringData:
+  gemini-token: gemini-e2e-token
+  github-token: github-e2e-token
+`)
+
+	portalManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: all-in-one-portal
+  labels:
+    app: all-in-one-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: all-in-one-portal
+  template:
+    metadata:
+      labels:
+        app: all-in-one-portal
+    spec:
+      containers:
+      - name: all-in-one-portal
+        image: all-in-one-portal:e2e
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        env:
+        - name: SERVICE_NAMES
+          value: "gemini,github"
+        - name: GEMINI_TARGET_URL
+          value: "http://backend"
+        - name: GEMINI_HOST
+          value: "gemini.backend"
+        - name: GEMINI_AUTH_HEADER
+          value: "Authorization"
+        - name: GEMINI_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: all-in-one-portal-secret
+              key: gemini-token
+        - name: GITHUB_TARGET_URL
+          value: "http://backend"
+        - name: GITHUB_HOST
+          value: "github.backend"
+        - name: GITHUB_AUTH_HEADER
+          value: "Authorization"
+        - name: GITHUB_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: all-in-one-portal-secret
+              key: github-token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: all-in-one-portal
+spec:
+  selector:
+    app: all-in-one-portal
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+`
+	h.KubectlApplyContent(portalManifest)
+	h.WaitForDeployment("all-in-one-portal", 2*time.Minute)
+
+	// Run Client 1: Gemini
+	clientPodNameGemini := "test-client-gemini"
+	h.DeletePod(clientPodNameGemini)
+
+	clientManifestGemini := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-gemini
+  labels:
+    app: test-client-gemini
+spec:
+  containers:
+  - name: toolbox
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/bin/sh", "-c", "wget -qO- --header='Host: gemini.backend' http://all-in-one-portal:80"]
+  restartPolicy: Never
+`
+	h.KubectlApplyContent(clientManifestGemini)
+	h.WaitForPodSuccess(clientPodNameGemini, 1*time.Minute)
+
+	logsGemini := h.GetPodLogs(clientPodNameGemini)
+	t.Logf("Gemini Client logs: %s", logsGemini)
+
+	// Verify
+	if !strings.Contains(logsGemini, "Authorization") {
+		t.Error("Gemini Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logsGemini, "Bearer gemini-e2e-token") {
+		t.Error("Gemini Logs do not contain correct token")
+	}
+
+	// Run Client 2: GitHub
+	clientPodNameGithub := "test-client-github"
+	h.DeletePod(clientPodNameGithub)
+
+	clientManifestGithub := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-github
+  labels:
+    app: test-client-github
+spec:
+  containers:
+  - name: toolbox
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/bin/sh", "-c", "wget -qO- --header='Host: github.backend' http://all-in-one-portal:80"]
+  restartPolicy: Never
+`
+	h.KubectlApplyContent(clientManifestGithub)
+	h.WaitForPodSuccess(clientPodNameGithub, 1*time.Minute)
+
+	logsGithub := h.GetPodLogs(clientPodNameGithub)
+	t.Logf("Github Client logs: %s", logsGithub)
+
+	// Verify
+	if !strings.Contains(logsGithub, "Authorization") {
+		t.Error("Github Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logsGithub, "Bearer github-e2e-token") {
+		t.Error("Github Logs do not contain correct token")
+	}
+}
