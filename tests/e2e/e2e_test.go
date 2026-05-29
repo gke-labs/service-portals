@@ -373,3 +373,162 @@ spec:
 		t.Error("Github Logs do not contain correct token")
 	}
 }
+
+func TestSidecarPortal(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "sidecar-portal-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Paths relative to git root
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("init-iptables:e2e", filepath.Join(gitRoot, "images/init-iptables/Dockerfile"), filepath.Join(gitRoot, "images/init-iptables"))
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("init-iptables:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend (Toolbox Server)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+
+	// Deploy Client Pod with Sidecar
+	clientPodName := "test-client-sidecar"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-sidecar
+  labels:
+    app: test-client-sidecar
+spec:
+  hostAliases:
+  - ip: "192.0.2.1"
+    hostnames:
+    - "gemini.backend"
+    - "github.backend"
+  initContainers:
+  - name: init-iptables
+    image: init-iptables:e2e
+    imagePullPolicy: Never
+    env:
+    - name: PROXY_PORT
+      value: "8080"
+    - name: PROXY_UID
+      value: "1337"
+    - name: INTERCEPT_PORTS
+      value: "80"
+    securityContext:
+      capabilities:
+        add: ["NET_ADMIN"]
+      runAsUser: 0
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/bin/sh", "-c", "sleep 3600"]
+  - name: service-portal-sidecar
+    image: all-in-one-portal:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1337
+      runAsGroup: 1337
+    env:
+    - name: SERVICE_NAMES
+      value: "gemini,github"
+    - name: GEMINI_TARGET_URL
+      value: "http://backend"
+    - name: GEMINI_HOST
+      value: "gemini.backend"
+    - name: GEMINI_AUTH_HEADER
+      value: "Authorization"
+    - name: GEMINI_AUTH_TOKEN
+      value: "gemini-sidecar-token"
+    - name: GITHUB_TARGET_URL
+      value: "http://backend"
+    - name: GITHUB_HOST
+      value: "github.backend"
+    - name: GITHUB_AUTH_HEADER
+      value: "Authorization"
+    - name: GITHUB_AUTH_TOKEN
+      value: "github-sidecar-token"
+`
+	h.KubectlApplyContent(clientManifest)
+	h.WaitForPodReady("app=test-client-sidecar", 2*time.Minute)
+
+	// Test Gemini request via sidecar transparent proxying
+	cmdGemini := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "-qO-", "http://gemini.backend")
+	outGemini, err := cmdGemini.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Gemini request failed: %v. Output: %s", err, outGemini)
+	}
+	logsGemini := string(outGemini)
+	t.Logf("Gemini request output: %s", logsGemini)
+
+	if !strings.Contains(logsGemini, "Authorization") {
+		t.Error("Gemini Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logsGemini, "Bearer gemini-sidecar-token") {
+		t.Error("Gemini Logs do not contain correct token")
+	}
+
+	// Test GitHub request via sidecar transparent proxying
+	cmdGithub := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "-qO-", "http://github.backend")
+	outGithub, err := cmdGithub.CombinedOutput()
+	if err != nil {
+		t.Fatalf("GitHub request failed: %v. Output: %s", err, outGithub)
+	}
+	logsGithub := string(outGithub)
+	t.Logf("GitHub request output: %s", logsGithub)
+
+	if !strings.Contains(logsGithub, "Authorization") {
+		t.Error("GitHub Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logsGithub, "Bearer github-sidecar-token") {
+		t.Error("GitHub Logs do not contain correct token")
+	}
+}
+
