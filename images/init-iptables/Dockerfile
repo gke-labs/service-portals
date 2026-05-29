@@ -12,8 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM alpine:3.18
-RUN apk add --no-cache iptables
-COPY entrypoint.sh /entrypoint.sh
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends iptables && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY images/init-iptables/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
 ENTRYPOINT ["/entrypoint.sh"]

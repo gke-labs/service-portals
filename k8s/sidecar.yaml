@@ -37,10 +37,10 @@ spec:
         app: workload-with-sidecar
     spec:
       # Use hostAliases to map backend hostnames to dummy IPs so that they resolve
-      # in the pod and trigger TCP connection attempts on port 80, which are then
+      # in the pod and trigger TCP connection attempts on port 80/443, which are then
       # transparently intercepted by iptables.
       hostAliases:
-      - ip: "127.0.0.1" # or any arbitrary IP; iptables will intercept all TCP port 80
+      - ip: "8.8.8.8" # or any arbitrary IP; iptables will intercept all TCP traffic on target ports
         hostnames:
         - "gemini.backend"
         - "github.backend"
@@ -57,7 +57,7 @@ spec:
         - name: PROXY_UID
           value: "1337"
         - name: INTERCEPT_PORTS
-          value: "80"
+          value: "80,443"
         securityContext:
           capabilities:
             add: ["NET_ADMIN"]
@@ -69,6 +69,10 @@ spec:
       # 1. The Workload Container: representing the actual application that is consuming
       # external services. It has no access to the API tokens, and simply makes
       # standard HTTP requests to `http://gemini.backend`.
+      # NOTE: The workload container MUST NOT run as the proxy UID (1337). If the workload
+      # were to run as UID 1337, its outbound traffic would be bypassed by the iptables rules
+      # and not redirected to the proxy. Ensure that the workload runs as a different user
+      # (e.g. UID 1000) or enforce this through Pod Security Policies or securityContext.
       - name: workload
         image: alpine:latest
         command: ["/bin/sh", "-c"]

@@ -386,7 +386,7 @@ func TestSidecarPortal(t *testing.T) {
 
 	// Paths relative to git root
 	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
-	h.DockerBuild("init-iptables:e2e", filepath.Join(gitRoot, "images/init-iptables/Dockerfile"), filepath.Join(gitRoot, "images/init-iptables"))
+	h.DockerBuild("init-iptables:e2e", filepath.Join(gitRoot, "images/init-iptables/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 
 	h.KindLoad("all-in-one-portal:e2e")
@@ -446,7 +446,7 @@ metadata:
     app: test-client-sidecar
 spec:
   hostAliases:
-  - ip: "192.0.2.1"
+  - ip: "8.8.8.8"
     hostnames:
     - "gemini.backend"
     - "github.backend"
@@ -460,7 +460,7 @@ spec:
     - name: PROXY_UID
       value: "1337"
     - name: INTERCEPT_PORTS
-      value: "80"
+      value: "80,443"
     securityContext:
       capabilities:
         add: ["NET_ADMIN"]
@@ -531,4 +531,3 @@ spec:
 		t.Error("GitHub Logs do not contain correct token")
 	}
 }
-
