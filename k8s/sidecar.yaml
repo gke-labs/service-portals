@@ -17,8 +17,24 @@ kind: Secret
 metadata:
   name: all-in-one-portal-sidecar-secret
 stringData:
-  gemini-token: gemini-api-key-here
-  github-token: github-token-here
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: https://generativelanguage.googleapis.com
+      authToken: gemini-api-key-here
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: https://api.github.com
+      authToken: github-token-here
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -97,28 +113,13 @@ spec:
         ports:
         - containerPort: 8080
           name: proxy
-        env:
-        - name: SERVICE_NAMES
-          value: "gemini,github"
-        - name: GEMINI_TARGET_URL
-          value: "https://generativelanguage.googleapis.com"
-        - name: GEMINI_HOST
-          value: "gemini.backend"
-        - name: GEMINI_AUTH_HEADER
-          value: "Authorization"
-        - name: GEMINI_AUTH_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: all-in-one-portal-sidecar-secret
-              key: gemini-token
-        - name: GITHUB_TARGET_URL
-          value: "https://api.github.com"
-        - name: GITHUB_HOST
-          value: "github.backend"
-        - name: GITHUB_AUTH_HEADER
-          value: "Authorization"
-        - name: GITHUB_AUTH_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: all-in-one-portal-sidecar-secret
-              key: github-token
+        args: ["--rules-dir=/etc/portals"]
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+
+      volumes:
+      - name: rules-volume
+        secret:
+          secretName: all-in-one-portal-sidecar-secret

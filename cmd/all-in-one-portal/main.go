@@ -16,93 +16,29 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
-	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
-	"github.com/gke-labs/service-portals/pkg/proxy"
+	"github.com/gke-labs/service-portals/pkg/portals"
 )
-
-type Router struct {
-	routes map[string]*proxy.HTTPProxy
-}
-
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	// Simple routing based on host header
-	target := req.Host
-	// Strip port if present
-	if idx := strings.LastIndex(target, ":"); idx != -1 {
-		target = target[:idx]
-	}
-
-	if p, ok := r.routes[target]; ok {
-		p.ServeHTTP(w, req)
-		return
-	}
-
-	http.Error(w, "Not Found", http.StatusNotFound)
-}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Configure services from env
-	// Example: SERVICE_NAMES="gemini,github"
-	// GEMINI_TARGET_URL=... GEMINI_AUTH_HEADER=...
-	// GITHUB_TARGET_URL=... GITHUB_AUTH_HEADER=...
-	serviceNames := strings.Split(os.Getenv("SERVICE_NAMES"), ",")
-	routes := make(map[string]*proxy.HTTPProxy)
+	rulesDir := flag.String("rules-dir", "", "Directory containing configuration rules")
+	flag.Parse()
 
-	for _, name := range serviceNames {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		prefix := strings.ToUpper(name) + "_"
-		target := os.Getenv(prefix + "TARGET_URL")
-		authHeader := os.Getenv(prefix + "AUTH_HEADER")
-		authToken := os.Getenv(prefix + "AUTH_TOKEN")
-		host := os.Getenv(prefix + "HOST") // e.g. gemini.portal
-
-		if target == "" || host == "" {
-			fmt.Fprintf(os.Stderr, "missing configuration for service %q (TARGET_URL or HOST)\n", name)
-			os.Exit(1)
-		}
-
-		targetURL, err := url.Parse(target)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid TARGET_URL for service %q: %v\n", name, err)
-			os.Exit(1)
-		}
-
-		p, err := proxy.NewHTTPProxy(targetURL, authToken, authHeader, "", "")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to create proxy for service %q: %v\n", name, err)
-			os.Exit(1)
-		}
-		routes[host] = p
-		fmt.Printf("Configured service %q for host %q\n", name, host)
+	config := portals.Config{}
+	if *rulesDir != "" {
+		config.RulesDir = *rulesDir
 	}
 
-	router := &Router{routes: routes}
-
-	srv := &http.Server{
-		Addr:    ":8080",
-		Handler: router,
+	if err := portals.Run(ctx, config); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
 	}
-
-	go func() {
-		fmt.Println("Starting all-in-one proxy on :8080")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "server failed: %v\n", err)
-			os.Exit(1)
-		}
-	}()
-
-	<-ctx.Done()
 }
