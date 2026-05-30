@@ -88,8 +88,7 @@ func (rr *RuleRouter) loadRules() error {
 
 	err := filepath.WalkDir(rr.rulesDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			errs = append(errs, walkErr)
-			return nil
+			return walkErr
 		}
 		if d.IsDir() {
 			return nil
@@ -184,7 +183,7 @@ func (rr *RuleRouter) loadRules() error {
 	})
 
 	if err != nil {
-		errs = append(errs, err)
+		return err
 	}
 
 	if len(errs) > 0 {
