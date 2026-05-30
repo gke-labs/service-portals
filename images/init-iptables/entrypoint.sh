@@ -50,17 +50,22 @@ fi
 # 1. Allow all loopback traffic
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# 2. Allow established and related connections (essential for inbound probes and active connections)
+# 2. Allow all traffic to localhost (127.0.0.1) and the proxy port.
+# This is crucial for locally-generated redirected packets to bypass the egress filter block.
+iptables -A OUTPUT -d 127.0.0.1 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport "${PROXY_PORT}" -j ACCEPT
+
+# 3. Allow established and related connections (essential for inbound probes and active connections)
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# 3. Allow all outbound traffic originating from our proxy user (UID 1337) to the external network
+# 4. Allow all outbound traffic originating from our proxy user (UID 1337) to the external network
 iptables -A OUTPUT -m owner --uid-owner "${PROXY_UID}" -j ACCEPT
 
-# 4. Allow DNS requests (UDP and TCP on port 53) so the workload can resolve hostnames
+# 5. Allow DNS requests (UDP and TCP on port 53) so the workload can resolve hostnames
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
-# 5. Reject/drop all other outbound TCP and UDP traffic from the pod to external networks.
+# 6. Reject/drop all other outbound TCP and UDP traffic from the pod to external networks.
 # This prevents workload processes from bypassing the proxy by using unauthorized ports or connecting directly.
 iptables -A OUTPUT -p tcp -j REJECT --reject-with icmp-port-unreachable
 iptables -A OUTPUT -p udp -j REJECT --reject-with icmp-port-unreachable

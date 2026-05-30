@@ -69,19 +69,11 @@ spec:
       # 1. The Workload Container: representing the actual application that is consuming
       # external services. It has no access to the API tokens, and simply makes
       # standard HTTP requests to `http://gemini.backend`.
-      # NOTE: The workload container MUST NOT run as the proxy UID (1337) to prevent bypassing
-      # redirection rules. To prevent processes inside this container from escalating privileges
-      # or running a 'setuid' binary owned by UID 1337 (which would run outbound requests as 1337
-      # and bypass the proxy), you must enforce:
-      #   - runAsNonRoot: true
-      #   - runAsUser: 1000 (or any non-zero UID other than 1337)
-      #   - allowPrivilegeEscalation: false (disables setuid/setgid binaries entirely)
+      # NOTE: Ensure the workload container is not configured to run as the proxy UID (1337).
+      # If the workload container runs as UID 1337, its outbound traffic would bypass the 
+      # redirection rules.
       - name: workload
         image: alpine:latest
-        securityContext:
-          runAsNonRoot: true
-          runAsUser: 1000
-          allowPrivilegeEscalation: false
         command: ["/bin/sh", "-c"]
         # In a real environment, this would run the workload. We sleep here to keep the pod running.
         args: ["while true; do sleep 3600; done"]

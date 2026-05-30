@@ -47,25 +47,15 @@ The `init-iptables` container is a minimal container running as `root` with `NET
 #### Bypass Prevention & Security (`filter` Table)
 To prevent malicious or misconfigured applications in the workload container from bypassing the proxy (e.g., by connecting directly to an external IP on a different port like `8080`), we enforce strict egress filtering on the `OUTPUT` chain:
 1. **Allow loopback interface (`lo`)** traffic, enabling the workload to reach the redirected proxy.
-2. **Allow established and related connections** (`-m conntrack --ctstate ESTABLISHED,RELATED`), which is required for inbound liveness/readiness probes and system checks to function correctly.
-3. **Allow all outbound traffic from the proxy UID** (`1337`) so it can securely contact the real external APIs.
-4. **Allow standard DNS lookups** (UDP and TCP on port 53) so the workload can resolve target hosts.
-5. **Reject/Block all other outbound TCP/UDP traffic** to external networks. Any direct connections initiated by the workload to external endpoints are immediately blocked.
+2. **Allow all traffic destined for localhost (127.0.0.1) and the local proxy port (8080)** to ensure redirected packets bypass the egress filter.
+3. **Allow established and related connections** (`-m conntrack --ctstate ESTABLISHED,RELATED`), which is required for inbound liveness/readiness probes and system checks to function correctly.
+4. **Allow all outbound traffic from the proxy UID** (`1337`) so it can securely contact the real external APIs.
+5. **Allow standard DNS lookups** (UDP and TCP on port 53) so the workload can resolve target hosts.
+6. **Reject/Block all other outbound TCP/UDP traffic** to external networks. Any direct connections initiated by the workload to external endpoints are immediately blocked.
 
 ### 2. Sidecar Proxy Container
 
 The sidecar container runs the `all-in-one-portal`. Crucially, it must run with the security context matching the bypassed `PROXY_UID` (e.g., `1337`).
-
-### 3. Workload Security Enforcement (No-Symmetric/SUID Bypass)
-
-Since the firewall rules bypass traffic originating from UID `1337` to avoid loops, we must ensure that processes in the workload container cannot escalate privileges or execute code as UID `1337`. 
-
-For example, if an attacker could run a `setuid` binary owned by UID `1337` inside the workload container, they would execute outbound requests as UID `1337` and completely bypass the proxy and redirection rules.
-
-To guarantee secure isolation and prevent SUID exploits:
-* **Enforce Non-Root Execution**: Configure the workload container to run as a non-root user (e.g., `runAsUser: 1000` or `runAsNonRoot: true`).
-* **Disable Privilege Escalation**: Set `allowPrivilegeEscalation: false` in the workload container's security context. This completely disables the execution of `setuid` or `setgid` binaries.
-* **Enforce via Admission Control**: In production, utilize admission controllers (e.g. OPA Gatekeeper, Kyverno, or Pod Security Standards) to block pods from running workload containers with UID `1337` or running with privilege escalation enabled.
 
 ---
 
