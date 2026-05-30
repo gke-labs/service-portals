@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gke-labs/service-portals/pkg/cache"
@@ -32,6 +34,7 @@ type Config struct {
 	DefaultAuthHeader string
 	SetupProxy        func(*proxy.HTTPProxy)
 	CacheTTL          time.Duration
+	RulesDir          string
 }
 
 func Run(ctx context.Context, config Config) error {
@@ -70,6 +73,7 @@ func Run(ctx context.Context, config Config) error {
 		return fmt.Errorf("failed to create proxy: %w", err)
 	}
 
+	var c *cache.InMemoryCache
 	cacheTTL := config.CacheTTL
 	if cacheTTLEnv := os.Getenv("CACHE_TTL"); cacheTTLEnv != "" {
 		if d, err := time.ParseDuration(cacheTTLEnv); err == nil {
@@ -89,13 +93,47 @@ func Run(ctx context.Context, config Config) error {
 			}
 		}
 
-		c := cache.NewInMemoryCache(cleanupInterval)
+		c = cache.NewInMemoryCache(cleanupInterval)
 		p.Transport = proxy.NewCachingTransport(c, p.Transport, cacheTTL)
 		log.Printf("Enabled caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
 	}
 
 	if config.SetupProxy != nil {
 		config.SetupProxy(p)
+	}
+
+	rulesDir := config.RulesDir
+	if rulesDir == "" {
+		rulesDir = os.Getenv("RULES_DIR")
+	}
+
+	var handler http.Handler = p
+
+	if rulesDir != "" {
+		rr := NewRuleRouter(rulesDir, p, caCertPath, caKeyPath, cacheTTL, c)
+		if err := rr.loadRules(); err != nil {
+			return fmt.Errorf("failed to load configuration rules: %w", err)
+		}
+
+		sighup := make(chan os.Signal, 1)
+		signal.Notify(sighup, syscall.SIGHUP)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-sighup:
+					log.Println("Received SIGHUP, reloading configuration rules...")
+					if err := rr.loadRules(); err != nil {
+						log.Printf("Error reloading configuration: %v", err)
+					} else {
+						log.Println("Configuration successfully reloaded!")
+					}
+				}
+			}
+		}()
+
+		handler = rr
 	}
 
 	port := os.Getenv("PORT")
@@ -105,7 +143,7 @@ func Run(ctx context.Context, config Config) error {
 
 	srv := &http.Server{
 		Addr:    ":" + port,
-		Handler: p,
+		Handler: handler,
 	}
 
 	errChan := make(chan error, 1)
