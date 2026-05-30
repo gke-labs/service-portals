@@ -469,6 +469,9 @@ spec:
   - name: workload
     image: toolbox:e2e
     imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
     command: ["/bin/sh", "-c", "sleep 3600"]
   - name: service-portal-sidecar
     image: all-in-one-portal:e2e

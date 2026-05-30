@@ -33,19 +33,39 @@ An `initContainer` is used to configure `iptables` NAT rules before the main con
 
 ## Setup and Configuration
 
-### 1. Transparent Redirection via `iptables` (`initContainer`)
+### 1. Transparent Redirection & Bypass Prevention via `iptables` (`initContainer`)
 
-The `init-iptables` container is a minimal container running as `root` with `NET_ADMIN` privileges. It executes a shell script that sets up the following `iptables` rules:
+The `init-iptables` container is a minimal container running as `root` with `NET_ADMIN` privileges. It executes a shell script that sets up `iptables` rules in both the `nat` and `filter` tables:
 
-1. Creates a custom chain `PORTAL_OUTPUT`.
-2. Jumps to `PORTAL_OUTPUT` from the `OUTPUT` chain.
-3. Excludes loopback (`lo`) interface traffic.
-4. Excludes traffic originating from the proxy's UID (e.g., `1337`) to prevent infinite redirection loops.
-5. Redirects all specified target TCP ports (e.g., `80,443`) to the local proxy port (`8080`).
+#### Traffic Redirection (`nat` Table)
+1. Creates a custom chain `PORTAL_OUTPUT` inside the `nat` table.
+2. Jumps to `PORTAL_OUTPUT` from the main `OUTPUT` chain for all TCP traffic.
+3. Excludes loopback (`lo`) interface traffic so local container communication remains unaffected.
+4. Excludes traffic originating from the proxy's UID (e.g., `1337`) to avoid infinite redirection loops when forwarding upstream.
+5. Redirects specified destination TCP ports (e.g., `80,443`) to the local proxy port (`8080`).
+
+#### Bypass Prevention & Security (`filter` Table)
+To prevent malicious or misconfigured applications in the workload container from bypassing the proxy (e.g., by connecting directly to an external IP on a different port like `8080`), we enforce strict egress filtering on the `OUTPUT` chain:
+1. **Allow loopback interface (`lo`)** traffic, enabling the workload to reach the redirected proxy.
+2. **Allow established and related connections** (`-m conntrack --ctstate ESTABLISHED,RELATED`), which is required for inbound liveness/readiness probes and system checks to function correctly.
+3. **Allow all outbound traffic from the proxy UID** (`1337`) so it can securely contact the real external APIs.
+4. **Allow standard DNS lookups** (UDP and TCP on port 53) so the workload can resolve target hosts.
+5. **Reject/Block all other outbound TCP/UDP traffic** to external networks. Any direct connections initiated by the workload to external endpoints are immediately blocked.
 
 ### 2. Sidecar Proxy Container
 
 The sidecar container runs the `all-in-one-portal`. Crucially, it must run with the security context matching the bypassed `PROXY_UID` (e.g., `1337`).
+
+### 3. Workload Security Enforcement (No-Symmetric/SUID Bypass)
+
+Since the firewall rules bypass traffic originating from UID `1337` to avoid loops, we must ensure that processes in the workload container cannot escalate privileges or execute code as UID `1337`. 
+
+For example, if an attacker could run a `setuid` binary owned by UID `1337` inside the workload container, they would execute outbound requests as UID `1337` and completely bypass the proxy and redirection rules.
+
+To guarantee secure isolation and prevent SUID exploits:
+* **Enforce Non-Root Execution**: Configure the workload container to run as a non-root user (e.g., `runAsUser: 1000` or `runAsNonRoot: true`).
+* **Disable Privilege Escalation**: Set `allowPrivilegeEscalation: false` in the workload container's security context. This completely disables the execution of `setuid` or `setgid` binaries.
+* **Enforce via Admission Control**: In production, utilize admission controllers (e.g. OPA Gatekeeper, Kyverno, or Pod Security Standards) to block pods from running workload containers with UID `1337` or running with privilege escalation enabled.
 
 ---
 

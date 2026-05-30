@@ -24,16 +24,18 @@ echo "PROXY_PORT: ${PROXY_PORT}"
 echo "PROXY_UID: ${PROXY_UID}"
 echo "INTERCEPT_PORTS: ${INTERCEPT_PORTS}"
 
-# Create a new chain
+# ==================== NAT Redirection ====================
+
+# Create a new NAT chain
 iptables -t nat -N PORTAL_OUTPUT || true
 
 # Jump to PORTAL_OUTPUT from OUTPUT
 iptables -t nat -A OUTPUT -p tcp -j PORTAL_OUTPUT
 
-# Exclude loopback traffic
+# Exclude loopback traffic from redirection
 iptables -t nat -A PORTAL_OUTPUT -o lo -j RETURN
 
-# Exclude traffic from our proxy user (to avoid infinite redirection loops)
+# Exclude traffic from our proxy user to prevent infinite redirection loops
 iptables -t nat -A PORTAL_OUTPUT -m owner --uid-owner "${PROXY_UID}" -j RETURN
 
 # Redirect specified TCP ports to the proxy
@@ -42,5 +44,25 @@ if [ "${INTERCEPT_PORTS}" = "*" ]; then
 else
   iptables -t nat -A PORTAL_OUTPUT -p tcp -m multiport --dports "${INTERCEPT_PORTS}" -j REDIRECT --to-ports "${PROXY_PORT}"
 fi
+
+# ==================== Egress Filtering (No Bypass) ====================
+
+# 1. Allow all loopback traffic
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# 2. Allow established and related connections (essential for inbound probes and active connections)
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# 3. Allow all outbound traffic originating from our proxy user (UID 1337) to the external network
+iptables -A OUTPUT -m owner --uid-owner "${PROXY_UID}" -j ACCEPT
+
+# 4. Allow DNS requests (UDP and TCP on port 53) so the workload can resolve hostnames
+iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+
+# 5. Reject/drop all other outbound TCP and UDP traffic from the pod to external networks.
+# This prevents workload processes from bypassing the proxy by using unauthorized ports or connecting directly.
+iptables -A OUTPUT -p tcp -j REJECT --reject-with icmp-port-unreachable
+iptables -A OUTPUT -p udp -j REJECT --reject-with icmp-port-unreachable
 
 echo "iptables rules configured successfully."
