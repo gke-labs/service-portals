@@ -15,9 +15,11 @@
 package portals
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,25 +30,26 @@ import (
 
 	"github.com/gke-labs/service-portals/pkg/cache"
 	"github.com/gke-labs/service-portals/pkg/proxy"
-	"gopkg.in/yaml.v3"
+	"sigs.k8s.io/yaml"
 )
 
 // PortalRule represents the Kubernetes-inspired YAML object.
 type PortalRule struct {
-	APIVersion string `yaml:"apiVersion"`
-	Kind       string `yaml:"kind"`
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
 	Metadata   struct {
-		Name string `yaml:"name"`
-	} `yaml:"metadata"`
-	Spec RuleSpec `yaml:"spec"`
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Spec RuleSpec `json:"spec"`
 }
 
 // RuleSpec defines the specification for a dynamic proxy rule.
 type RuleSpec struct {
-	Host       string `yaml:"host"`
-	TargetURL  string `yaml:"targetUrl"`
-	AuthToken  string `yaml:"authToken"`
-	AuthHeader string `yaml:"authHeader"`
+	Host       string `json:"host"`
+	RewriteURL string `json:"rewriteUrl"`
+	AuthToken  string `json:"authToken"`
+	AuthHeader string `json:"authHeader"`
+	CacheTTL   string `json:"cacheTTL"`
 }
 
 // RuleRouter routes incoming HTTP/HTTPS requests to the appropriate proxy based on host rules.
@@ -81,10 +84,12 @@ func (rr *RuleRouter) loadRules() error {
 	}
 
 	newRoutes := make(map[string]*proxy.HTTPProxy)
+	var errs []error
 
-	err := filepath.WalkDir(rr.rulesDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	err := filepath.WalkDir(rr.rulesDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			errs = append(errs, walkErr)
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -97,17 +102,21 @@ func (rr *RuleRouter) loadRules() error {
 
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("failed to read file %s: %w", path, err)
+			errs = append(errs, fmt.Errorf("failed to read file %s: %w", path, err))
+			return nil
 		}
 
-		dec := yaml.NewDecoder(strings.NewReader(string(data)))
-		for {
+		parts := strings.Split(string(data), "---")
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+
 			var rule PortalRule
-			if err := dec.Decode(&rule); err != nil {
-				if err.Error() == "EOF" {
-					break
-				}
-				return fmt.Errorf("failed to parse YAML in %s: %w", path, err)
+			if err := yaml.Unmarshal([]byte(trimmed), &rule); err != nil {
+				errs = append(errs, fmt.Errorf("failed to parse YAML in %s: %w", path, err))
+				continue
 			}
 
 			if rule.Kind != "PortalRule" {
@@ -119,14 +128,21 @@ func (rr *RuleRouter) loadRules() error {
 				continue
 			}
 
-			if rule.Spec.TargetURL == "" {
-				log.Printf("Warning: Rule %q in %s is missing spec.targetUrl, skipping", rule.Metadata.Name, path)
-				continue
+			// RewriteURL defaults to host
+			rewriteURLStr := rule.Spec.RewriteURL
+			if rewriteURLStr == "" {
+				rewriteURLStr = rule.Spec.Host
 			}
 
-			targetURL, err := url.Parse(rule.Spec.TargetURL)
+			// Prepend https:// if no scheme is present
+			if !strings.Contains(rewriteURLStr, "://") {
+				rewriteURLStr = "https://" + rewriteURLStr
+			}
+
+			rewriteURL, err := url.Parse(rewriteURLStr)
 			if err != nil {
-				return fmt.Errorf("invalid targetUrl %q in rule %q: %w", rule.Spec.TargetURL, rule.Metadata.Name, err)
+				errs = append(errs, fmt.Errorf("invalid rewriteUrl %q in rule %q: %w", rewriteURLStr, rule.Metadata.Name, err))
+				continue
 			}
 
 			authHeader := rule.Spec.AuthHeader
@@ -134,25 +150,45 @@ func (rr *RuleRouter) loadRules() error {
 				authHeader = "Authorization"
 			}
 
-			p, err := proxy.NewHTTPProxy(targetURL, rule.Spec.AuthToken, authHeader, rr.caCertPath, rr.caKeyPath)
+			p, err := proxy.NewHTTPProxy(rewriteURL, rule.Spec.AuthToken, authHeader, rr.caCertPath, rr.caKeyPath)
 			if err != nil {
-				return fmt.Errorf("failed to create proxy for rule %q: %w", rule.Metadata.Name, err)
+				errs = append(errs, fmt.Errorf("failed to create proxy for rule %q: %w", rule.Metadata.Name, err))
+				continue
 			}
 
-			if rr.cacheTTL > 0 && rr.cache != nil {
-				p.Transport = proxy.NewCachingTransport(rr.cache, p.Transport, rr.cacheTTL)
+			// Rule-specific cacheTTL takes precedence. If specified, setup caching.
+			var cacheTTL time.Duration
+			if rule.Spec.CacheTTL != "" {
+				d, err := time.ParseDuration(rule.Spec.CacheTTL)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("invalid cacheTTL %q in rule %q: %w", rule.Spec.CacheTTL, rule.Metadata.Name, err))
+					continue
+				}
+				cacheTTL = d
+			}
+
+			if cacheTTL > 0 {
+				if rr.cache == nil {
+					// Instantiate on-demand cache with a 1-minute cleanup interval if not globally defined
+					rr.cache = cache.NewInMemoryCache(1 * time.Minute)
+				}
+				p.Transport = proxy.NewCachingTransport(rr.cache, p.Transport, cacheTTL)
 			}
 
 			host := strings.ToLower(rule.Spec.Host)
 			newRoutes[host] = p
-			log.Printf("Loaded rule %s: host %s -> %s", rule.Metadata.Name, host, rule.Spec.TargetURL)
+			log.Printf("Loaded rule %s: host %s -> %s", rule.Metadata.Name, host, rewriteURLStr)
 		}
 
 		return nil
 	})
 
 	if err != nil {
-		return err
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 
 	rr.mu.Lock()
@@ -169,9 +205,9 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		host = r.URL.Host
 	}
 
-	// Strip port if present
-	if idx := strings.LastIndex(host, ":"); idx != -1 {
-		host = host[:idx]
+	// Strip port if present, safe for IPv6
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
 	}
 	host = strings.ToLower(host)
 

@@ -15,7 +15,6 @@
 package portals
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +36,7 @@ func TestLoadRulesAndRouting(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Set up two mock target backends
+	// Set up mock target backends
 	backend1Called := false
 	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		backend1Called = true
@@ -60,6 +59,14 @@ func TestLoadRulesAndRouting(t *testing.T) {
 	}))
 	defer backend2.Close()
 
+	ipv6BackendCalled := false
+	ipv6Backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ipv6BackendCalled = true
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ipv6-response"))
+	}))
+	defer ipv6Backend.Close()
+
 	fallbackCalled := false
 	fallbackBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fallbackCalled = true
@@ -75,7 +82,7 @@ func TestLoadRulesAndRouting(t *testing.T) {
 		t.Fatalf("failed to create fallback proxy: %v", err)
 	}
 
-	// Write rules to temp dir
+	// Write rules to temp dir using rewritten json-aligned property names (rewriteUrl, cacheTTL)
 	rule1Content := fmt.Sprintf(`
 apiVersion: portals.gke.io/v1alpha1
 kind: PortalRule
@@ -83,9 +90,10 @@ metadata:
   name: test-rule-1
 spec:
   host: "service-1.portal"
-  targetUrl: "%s"
+  rewriteUrl: "%s"
   authToken: "token-1"
   authHeader: "Authorization"
+  cacheTTL: "10s"
 `, backend1.URL)
 
 	rule2Content := fmt.Sprintf(`
@@ -95,10 +103,31 @@ metadata:
   name: test-rule-2
 spec:
   host: "service-2.portal"
-  targetUrl: "%s"
+  rewriteUrl: "%s"
   authToken: "token-2"
   authHeader: "X-Custom-Auth"
 `, backend2.URL)
+
+	// Verify defaulting of rewriteUrl to host (when omitted) and prepend of https://
+	ruleDefaultContent := `
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: test-rule-default
+spec:
+  host: "google.com"
+`
+
+	// Test rule for safe IPv6 support
+	ipv6RuleContent := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: test-ipv6-rule
+spec:
+  host: "::1"
+  rewriteUrl: "%s"
+`, ipv6Backend.URL)
 
 	// Also write a file containing multiple rules separated by "---"
 	multiRuleContent := fmt.Sprintf(`
@@ -108,7 +137,7 @@ metadata:
   name: multi-rule-a
 spec:
   host: "multi-a.portal"
-  targetUrl: "%s"
+  rewriteUrl: "%s"
 ---
 apiVersion: portals.gke.io/v1alpha1
 kind: PortalRule
@@ -116,7 +145,7 @@ metadata:
   name: multi-rule-b
 spec:
   host: "multi-b.portal"
-  targetUrl: "%s"
+  rewriteUrl: "%s"
 `, backend1.URL, backend2.URL)
 
 	// An invalid rule that should be skipped or trigger warning
@@ -127,7 +156,7 @@ metadata:
   name: invalid-rule
 spec:
   host: ""
-  targetUrl: ""
+  rewriteUrl: ""
 `
 
 	// A rule with a different Kind that should be skipped
@@ -138,7 +167,7 @@ metadata:
   name: wrong-kind
 spec:
   host: "should-skip.portal"
-  targetUrl: "https://skip.me"
+  rewriteUrl: "https://skip.me"
 `
 
 	if err := os.WriteFile(filepath.Join(tmpDir, "rule1.yaml"), []byte(rule1Content), 0644); err != nil {
@@ -146,6 +175,12 @@ spec:
 	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "rule2.yaml"), []byte(rule2Content), 0644); err != nil {
 		t.Fatalf("failed to write rule2: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "rule_default.yaml"), []byte(ruleDefaultContent), 0644); err != nil {
+		t.Fatalf("failed to write default rule: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "rule_ipv6.yaml"), []byte(ipv6RuleContent), 0644); err != nil {
+		t.Fatalf("failed to write ipv6 rule: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "multi.yaml"), []byte(multiRuleContent), 0644); err != nil {
 		t.Fatalf("failed to write multi rule: %v", err)
@@ -163,12 +198,22 @@ spec:
 		t.Fatalf("failed to load rules: %v", err)
 	}
 
-	// Verify routes are loaded
+	// Verify routes are loaded (6 valid rules: rule1, rule2, ruleDefault, ruleIPv6, multi-a, multi-b)
 	rr.mu.RLock()
 	routesCount := len(rr.routes)
 	rr.mu.RUnlock()
-	if routesCount != 4 {
-		t.Errorf("expected 4 loaded routes, got %d", routesCount)
+	if routesCount != 6 {
+		t.Errorf("expected 6 loaded routes, got %d", routesCount)
+	}
+
+	// Verify default-to-host and https:// prefixing logic:
+	rr.mu.RLock()
+	googleRuleProxy, exists := rr.routes["google.com"]
+	rr.mu.RUnlock()
+	if !exists {
+		t.Error("expected google.com rule to be loaded")
+	} else if googleRuleProxy.TargetURL.String() != "https://google.com" {
+		t.Errorf("expected targeted URL 'https://google.com' for default host-derived rewrite url, got %q", googleRuleProxy.TargetURL.String())
 	}
 
 	// Test case 1: Route matching service-1.portal
@@ -203,7 +248,23 @@ spec:
 		}
 	}
 
-	// Test case 3: Fallback routing
+	// Test case 3: IPv6 host routing and port-stripping matching [::1]:8080
+	{
+		ipv6BackendCalled = false
+		req := httptest.NewRequest("GET", "/baz", nil)
+		req.Host = "[::1]:8080"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+		if !ipv6BackendCalled {
+			t.Error("expected IPv6 backend to be called")
+		}
+	}
+
+	// Test case 4: Fallback routing
 	{
 		fallbackCalled = false
 		req := httptest.NewRequest("GET", "/baz", nil)
@@ -252,16 +313,13 @@ metadata:
   name: dynamic-rule
 spec:
   host: "dynamic.portal"
-  targetUrl: "%s"
+  rewriteUrl: "%s"
 `, backendA.URL)
 
 	rulePath := filepath.Join(tmpDir, "rule.yaml")
 	if err := os.WriteFile(rulePath, []byte(ruleContent), 0644); err != nil {
 		t.Fatalf("failed to write rule: %v", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Initialize Server config
 	config := Config{
@@ -277,7 +335,8 @@ spec:
 
 	errChan := make(chan error, 1)
 	go func() {
-		if err := Run(ctx, config); err != nil {
+		// Use t.Context() to gracefully bind the server lifecycle with the test execution context
+		if err := Run(t.Context(), config); err != nil {
 			errChan <- err
 		}
 	}()
@@ -309,7 +368,7 @@ metadata:
   name: dynamic-rule
 spec:
   host: "dynamic.portal"
-  targetUrl: "%s"
+  rewriteUrl: "%s"
 `, backendB.URL)
 
 	if err := os.WriteFile(rulePath, []byte(ruleContentUpdated), 0644); err != nil {
