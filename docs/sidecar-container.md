@@ -57,6 +57,14 @@ To prevent malicious or misconfigured applications in the workload container fro
 
 The sidecar container runs the `all-in-one-portal`. Crucially, it must run with the security context matching the bypassed `PROXY_UID` (e.g., `1337`).
 
+### 3. Workload Security Context (Best Practice)
+
+Since our iptables NAT rules bypass traffic originating from UID `1337` to avoid infinite loops, it is recommended best practice to configure the workload container to ensure it cannot execute outbound requests as UID `1337`.
+
+We can enforce this defense-in-depth security configuration by applying the following workload settings:
+* **Enforce non-root execution or different UID**: Configure the workload container to run as a user other than `1337` (e.g., `runAsUser: 1000` and `runAsNonRoot: true`).
+* **Disable Privilege Escalation**: Configure `allowPrivilegeEscalation: false` in the workload container's security context. This disables the execution of any `setuid` or `setgid` binaries, ensuring processes cannot escalate privileges or execute code under the bypassed proxy UID `1337`.
+
 ---
 
 ## Comparison: REDIRECT vs TPROXY
