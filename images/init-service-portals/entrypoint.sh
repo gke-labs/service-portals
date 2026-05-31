@@ -21,10 +21,12 @@ PROXY_UID=${PROXY_UID:-1337}
 INTERCEPT_PORTS=${INTERCEPT_PORTS:-80}
 CA_DIR=${CA_DIR:-/etc/service-portal/ca}
 CA_PRIVATE_DIR=${CA_PRIVATE_DIR:-/etc/service-portal/ca-private}
+CHOWN_UID=${CHOWN_UID:--1}
+CHOWN_GID=${CHOWN_GID:--1}
 
 if [ -x /usr/local/bin/init-service-portals ]; then
-  echo "Generating CA certificate in ${CA_DIR} and private cert/key in ${CA_PRIVATE_DIR}..."
-  /usr/local/bin/init-service-portals -cert-dir "${CA_DIR}" -key-dir "${CA_PRIVATE_DIR}"
+  echo "Generating CA certificate in ${CA_DIR} and private cert/key in ${CA_PRIVATE_DIR} with chown ${CHOWN_UID}:${CHOWN_GID}..."
+  /usr/local/bin/init-service-portals -cert-dir "${CA_DIR}" -key-dir "${CA_PRIVATE_DIR}" -chown-uid "${CHOWN_UID}" -chown-gid "${CHOWN_GID}"
 fi
 
 echo "Configuring iptables rules..."

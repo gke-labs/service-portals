@@ -17,7 +17,8 @@ WORKDIR /app
 COPY main.go .
 RUN go build -o toolbox main.go
 
-FROM alpine:latest
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/toolbox .
 ENTRYPOINT ["./toolbox"]

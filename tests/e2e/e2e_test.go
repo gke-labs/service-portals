@@ -487,6 +487,10 @@ spec:
       value: "1337"
     - name: INTERCEPT_PORTS
       value: "80,443"
+    - name: CHOWN_UID
+      value: "1337"
+    - name: CHOWN_GID
+      value: "1337"
     securityContext:
       capabilities:
         add: ["NET_ADMIN"]

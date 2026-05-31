@@ -31,16 +31,18 @@ import (
 func main() {
 	certDir := flag.String("cert-dir", "/etc/service-portal/ca", "Directory to write the public CA cert")
 	keyDir := flag.String("key-dir", "/etc/service-portal/ca-private", "Directory to write the CA cert and key")
+	chownUID := flag.Int("chown-uid", -1, "UID to chown the private key file to (-1 for no change)")
+	chownGID := flag.Int("chown-gid", -1, "GID to chown the private key file to (-1 for no change)")
 	flag.Parse()
 
-	if err := generateCA(*certDir, *keyDir); err != nil {
+	if err := generateCA(*certDir, *keyDir, *chownUID, *chownGID); err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating CA: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("Successfully generated CA certificate and key.")
 }
 
-func generateCA(certDir, keyDir string) error {
+func generateCA(certDir, keyDir string, chownUID, chownGID int) error {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate private key: %w", err)
@@ -86,9 +88,6 @@ func generateCA(certDir, keyDir string) error {
 		if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
 			return fmt.Errorf("failed to write public tls.crt: %w", err)
 		}
-		if os.Getuid() == 0 {
-			_ = os.Chown(certPath, 1337, 1337)
-		}
 	}
 
 	// 2. Write both the certificate and key to keyDir
@@ -106,12 +105,9 @@ func generateCA(certDir, keyDir string) error {
 			return fmt.Errorf("failed to write tls.key: %w", err)
 		}
 
-		if os.Getuid() == 0 {
-			if err := os.Chown(certPath, 1337, 1337); err != nil {
-				return fmt.Errorf("failed to chown private tls.crt: %w", err)
-			}
-			if err := os.Chown(keyPath, 1337, 1337); err != nil {
-				return fmt.Errorf("failed to chown tls.key: %w", err)
+		if chownUID != -1 || chownGID != -1 {
+			if err := os.Chown(keyPath, chownUID, chownGID); err != nil {
+				return fmt.Errorf("failed to chown private key to %d:%d: %w", chownUID, chownGID, err)
 			}
 		}
 	}
