@@ -70,6 +70,8 @@ spec:
         env:
         - name: PROXY_PORT
           value: "8080"
+        - name: PROXY_HTTPS_PORT
+          value: "8443"
         - name: PROXY_UID
           value: "1337"
         - name: INTERCEPT_PORTS
@@ -113,6 +115,8 @@ spec:
         ports:
         - containerPort: 8080
           name: proxy
+        - containerPort: 8443
+          name: proxy-https
         args: ["--rules-dir=/etc/portals"]
         volumeMounts:
         - name: rules-volume

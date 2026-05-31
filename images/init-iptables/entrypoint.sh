@@ -16,11 +16,13 @@
 set -eu
 
 PROXY_PORT=${PROXY_PORT:-8080}
+PROXY_HTTPS_PORT=${PROXY_HTTPS_PORT:-8443}
 PROXY_UID=${PROXY_UID:-1337}
 INTERCEPT_PORTS=${INTERCEPT_PORTS:-80}
 
 echo "Configuring iptables rules..."
 echo "PROXY_PORT: ${PROXY_PORT}"
+echo "PROXY_HTTPS_PORT: ${PROXY_HTTPS_PORT}"
 echo "PROXY_UID: ${PROXY_UID}"
 echo "INTERCEPT_PORTS: ${INTERCEPT_PORTS}"
 
@@ -40,9 +42,20 @@ iptables -t nat -A PORTAL_OUTPUT -m owner --uid-owner "${PROXY_UID}" -j RETURN
 
 # Redirect specified TCP ports to the proxy
 if [ "${INTERCEPT_PORTS}" = "*" ]; then
-  iptables -t nat -A PORTAL_OUTPUT -p tcp -j REDIRECT --to-ports "${PROXY_PORT}"
+  # For wildcard, redirect 443 to PROXY_HTTPS_PORT and everything else to PROXY_PORT
+  iptables -t nat -A PORTAL_OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports "${PROXY_HTTPS_PORT}"
+  iptables -t nat -A PORTAL_OUTPUT -p tcp ! --dport 443 -j REDIRECT --to-ports "${PROXY_PORT}"
 else
-  iptables -t nat -A PORTAL_OUTPUT -p tcp -m multiport --dports "${INTERCEPT_PORTS}" -j REDIRECT --to-ports "${PROXY_PORT}"
+  # Loop through comma-separated ports
+  # Replace commas with spaces
+  PORTS_SPACE=$(echo "${INTERCEPT_PORTS}" | tr ',' ' ')
+  for port in $PORTS_SPACE; do
+    if [ "$port" = "443" ]; then
+      iptables -t nat -A PORTAL_OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports "${PROXY_HTTPS_PORT}"
+    else
+      iptables -t nat -A PORTAL_OUTPUT -p tcp --dport "$port" -j REDIRECT --to-ports "${PROXY_PORT}"
+    fi
+  done
 fi
 
 # ==================== Egress Filtering (No Bypass) ====================
@@ -50,10 +63,11 @@ fi
 # 1. Allow all loopback traffic
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# 2. Allow all traffic to localhost (127.0.0.1) and the proxy port.
+# 2. Allow all traffic to localhost (127.0.0.1) and the proxy ports.
 # This is crucial for locally-generated redirected packets to bypass the egress filter block.
 iptables -A OUTPUT -d 127.0.0.1 -j ACCEPT
 iptables -A OUTPUT -p tcp --dport "${PROXY_PORT}" -j ACCEPT
+iptables -A OUTPUT -p tcp --dport "${PROXY_HTTPS_PORT}" -j ACCEPT
 
 # 3. Allow established and related connections (essential for inbound probes and active connections)
 iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

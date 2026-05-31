@@ -481,6 +481,8 @@ spec:
     env:
     - name: PROXY_PORT
       value: "8080"
+    - name: PROXY_HTTPS_PORT
+      value: "8443"
     - name: PROXY_UID
       value: "1337"
     - name: INTERCEPT_PORTS
@@ -532,6 +534,22 @@ spec:
 		t.Error("Gemini Logs do not contain correct token")
 	}
 
+	// Test Gemini HTTPS request via sidecar transparent proxying
+	cmdGeminiHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--no-check-certificate", "-qO-", "https://gemini.backend")
+	outGeminiHTTPS, err := cmdGeminiHTTPS.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Gemini HTTPS request failed: %v. Output: %s", err, outGeminiHTTPS)
+	}
+	logsGeminiHTTPS := string(outGeminiHTTPS)
+	t.Logf("Gemini HTTPS request output: %s", logsGeminiHTTPS)
+
+	if !strings.Contains(logsGeminiHTTPS, "Authorization") {
+		t.Error("Gemini HTTPS Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logsGeminiHTTPS, "Bearer gemini-sidecar-token") {
+		t.Error("Gemini HTTPS Logs do not contain correct token")
+	}
+
 	// Test GitHub request via sidecar transparent proxying
 	cmdGithub := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "-qO-", "http://github.backend")
 	outGithub, err := cmdGithub.CombinedOutput()
@@ -546,5 +564,21 @@ spec:
 	}
 	if !strings.Contains(logsGithub, "Bearer github-sidecar-token") {
 		t.Error("GitHub Logs do not contain correct token")
+	}
+
+	// Test GitHub HTTPS request via sidecar transparent proxying
+	cmdGithubHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--no-check-certificate", "-qO-", "https://github.backend")
+	outGithubHTTPS, err := cmdGithubHTTPS.CombinedOutput()
+	if err != nil {
+		t.Fatalf("GitHub HTTPS request failed: %v. Output: %s", err, outGithubHTTPS)
+	}
+	logsGithubHTTPS := string(outGithubHTTPS)
+	t.Logf("GitHub HTTPS request output: %s", logsGithubHTTPS)
+
+	if !strings.Contains(logsGithubHTTPS, "Authorization") {
+		t.Error("GitHub HTTPS Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logsGithubHTTPS, "Bearer github-sidecar-token") {
+		t.Error("GitHub HTTPS Logs do not contain correct token")
 	}
 }
