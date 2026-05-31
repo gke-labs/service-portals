@@ -35,7 +35,7 @@ An `initContainer` is used to configure `iptables` NAT rules before the main con
 
 ### 1. Transparent Redirection & Bypass Prevention via `iptables` (`initContainer`)
 
-The `init-iptables` container is a minimal container running as `root` with `NET_ADMIN` privileges. It executes a shell script that sets up `iptables` rules in both the `nat` and `filter` tables:
+The `init-service-portals` container is a minimal container running as `root` with `NET_ADMIN` privileges. It executes a shell script that sets up `iptables` rules in both the `nat` and `filter` tables:
 
 #### Traffic Redirection (`nat` Table)
 1. Creates a custom chain `PORTAL_OUTPUT` inside the `nat` table.

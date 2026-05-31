@@ -83,6 +83,17 @@ func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, 
 	return p, nil
 }
 
+func (p *HTTPProxy) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	host := info.ServerName
+	if host == "" {
+		host = "localhost"
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return p.getCert(host)
+}
+
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect && p.caCert != nil {
 		p.handleConnect(w, r)

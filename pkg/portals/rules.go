@@ -15,6 +15,7 @@
 package portals
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -237,4 +238,30 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Request: %s %s | Matched rule: <none> | Action: not found", r.Method, host)
 	http.Error(w, "Not Found", http.StatusNotFound)
+}
+
+// GetCertificate implements the CertificateProvider interface to dynamically return certificates for TLS connections.
+func (rr *RuleRouter) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	host := info.ServerName
+	if host == "" {
+		host = "localhost"
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(host)
+
+	rr.mu.RLock()
+	rule, ok := rr.routes[host]
+	rr.mu.RUnlock()
+
+	if ok {
+		return rule.Proxy.GetCertificate(info)
+	}
+
+	if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok {
+		return fallbackProxy.GetCertificate(info)
+	}
+
+	return nil, fmt.Errorf("no proxy available to sign certificate for %s", host)
 }

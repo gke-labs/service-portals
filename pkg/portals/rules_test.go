@@ -332,8 +332,10 @@ spec:
 	// Since we are running in an active test, we can directly invoke portals.Run in a goroutine
 	// and set the port dynamically to avoid collisions.
 	os.Setenv("PORT", "28080")
+	os.Setenv("HTTPS_PORT", "28443")
 	os.Setenv("TARGET_URL", backendA.URL) // fallback target url
 	defer os.Unsetenv("PORT")
+	defer os.Unsetenv("HTTPS_PORT")
 	defer os.Unsetenv("TARGET_URL")
 
 	errChan := make(chan error, 1)

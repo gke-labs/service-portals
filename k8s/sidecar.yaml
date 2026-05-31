@@ -62,24 +62,35 @@ spec:
         - "github.backend"
 
       initContainers:
-      # The init container configures the iptables rules within the shared pod
-      # network namespace. It requires NET_ADMIN capability and root user.
-      - name: init-iptables
-        image: init-iptables:latest
+      # The init container configures the iptables rules and generates the Root CA
+      # within the shared pod network/storage namespace. It requires NET_ADMIN capability and root user.
+      - name: init-service-portals
+        image: init-service-portals:latest
         imagePullPolicy: IfNotPresent
         env:
         - name: PROXY_PORT
           value: "8080"
+        - name: PROXY_HTTPS_PORT
+          value: "8443"
         - name: PROXY_UID
           value: "1337"
         - name: INTERCEPT_PORTS
           value: "80,443"
+        - name: CHOWN_UID
+          value: "1337"
+        - name: CHOWN_GID
+          value: "1337"
         securityContext:
           capabilities:
             add: ["NET_ADMIN"]
           runAsUser: 0
           runAsGroup: 0
           privileged: false
+        volumeMounts:
+        - name: ca-cert
+          mountPath: /etc/service-portal/ca
+        - name: ca-key
+          mountPath: /etc/service-portal/ca-private
 
       containers:
       # 1. The Workload Container: representing the actual application that is consuming
@@ -98,6 +109,10 @@ spec:
         command: ["/bin/sh", "-c"]
         # In a real environment, this would run the workload. We sleep here to keep the pod running.
         args: ["while true; do sleep 3600; done"]
+        volumeMounts:
+        - name: ca-cert
+          mountPath: /etc/service-portal/ca
+          readOnly: true
 
       # 2. The Sidecar Container: runs the all-in-one-portal proxy.
       # It must run as the specified non-root user (UID 1337) matching PROXY_UID so that
@@ -113,13 +128,27 @@ spec:
         ports:
         - containerPort: 8080
           name: proxy
+        - containerPort: 8443
+          name: proxy-https
+        env:
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca-private/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca-private/tls.key"
         args: ["--rules-dir=/etc/portals"]
         volumeMounts:
         - name: rules-volume
           mountPath: /etc/portals
+          readOnly: true
+        - name: ca-key
+          mountPath: /etc/service-portal/ca-private
           readOnly: true
 
       volumes:
       - name: rules-volume
         secret:
           secretName: all-in-one-portal-sidecar-secret
+      - name: ca-cert
+        emptyDir: {}
+      - name: ca-key
+        emptyDir: {}
