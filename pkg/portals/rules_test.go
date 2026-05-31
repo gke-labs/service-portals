@@ -15,12 +15,15 @@
 package portals
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -208,12 +211,12 @@ spec:
 
 	// Verify default-to-host and https:// prefixing logic:
 	rr.mu.RLock()
-	googleRuleProxy, exists := rr.routes["google.com"]
+	googleRule, exists := rr.routes["google.com"]
 	rr.mu.RUnlock()
 	if !exists {
 		t.Error("expected google.com rule to be loaded")
-	} else if googleRuleProxy.TargetURL.String() != "https://google.com" {
-		t.Errorf("expected targeted URL 'https://google.com' for default host-derived rewrite url, got %q", googleRuleProxy.TargetURL.String())
+	} else if googleRule.Proxy.TargetURL.String() != "https://google.com" {
+		t.Errorf("expected targeted URL 'https://google.com' for default host-derived rewrite url, got %q", googleRule.Proxy.TargetURL.String())
 	}
 
 	// Test case 1: Route matching service-1.portal
@@ -402,5 +405,104 @@ spec:
 
 	if !backendBCalled {
 		t.Error("expected backendB to be called after SIGHUP reload")
+	}
+}
+
+func TestRuleRouterLogging(t *testing.T) {
+	// Create a temp directory for rules
+	tmpDir, err := os.MkdirTemp("", "portal-rules-logging-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	ruleContent := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: test-logging-rule
+spec:
+  host: "log-test.portal"
+  rewriteUrl: "%s"
+`, backend.URL)
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "rule.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+
+	fallbackBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fallbackBackend.Close()
+
+	fallbackURL, _ := url.Parse(fallbackBackend.URL)
+	fallbackProxy, err := proxy.NewHTTPProxy(fallbackURL, "", "", "", "")
+	if err != nil {
+		t.Fatalf("failed to create fallback proxy: %v", err)
+	}
+
+	rr := NewRuleRouter(tmpDir, fallbackProxy, "", "", 0, nil)
+	if err := rr.loadRules(); err != nil {
+		t.Fatalf("failed to load rules: %v", err)
+	}
+
+	// Capture log output
+	var logBuf bytes.Buffer
+	originalOutput := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(originalOutput)
+
+	// Test case A: proxy action
+	{
+		logBuf.Reset()
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "log-test.portal"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+
+		logStr := logBuf.String()
+		expectedLog := "Request: GET log-test.portal | Matched rule: test-logging-rule | Action: proxy"
+		if !strings.Contains(logStr, expectedLog) {
+			t.Errorf("expected log to contain %q, got: %q", expectedLog, logStr)
+		}
+	}
+
+	// Test case B: fallback action
+	{
+		logBuf.Reset()
+		req := httptest.NewRequest("POST", "/other", nil)
+		req.Host = "other-test.portal"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+
+		logStr := logBuf.String()
+		expectedLog := "Request: POST other-test.portal | Matched rule: <none> | Action: fallback"
+		if !strings.Contains(logStr, expectedLog) {
+			t.Errorf("expected log to contain %q, got: %q", expectedLog, logStr)
+		}
+	}
+
+	// Test case C: not found action (if fallback is nil)
+	{
+		logBuf.Reset()
+		rrNoFallback := NewRuleRouter(tmpDir, nil, "", "", 0, nil)
+		if err := rrNoFallback.loadRules(); err != nil {
+			t.Fatalf("failed to load rules for rrNoFallback: %v", err)
+		}
+		req := httptest.NewRequest("PUT", "/notfound", nil)
+		req.Host = "other-test.portal"
+		rec := httptest.NewRecorder()
+		rrNoFallback.ServeHTTP(rec, req)
+
+		logStr := logBuf.String()
+		expectedLog := "Request: PUT other-test.portal | Matched rule: <none> | Action: not found"
+		if !strings.Contains(logStr, expectedLog) {
+			t.Errorf("expected log to contain %q, got: %q", expectedLog, logStr)
+		}
 	}
 }
