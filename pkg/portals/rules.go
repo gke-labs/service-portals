@@ -56,6 +56,7 @@ type RuleSpec struct {
 type RuleRouter struct {
 	mu         sync.RWMutex
 	routes     map[string]*proxy.HTTPProxy
+	ruleNames  map[string]string
 	fallback   http.Handler
 	rulesDir   string
 	caCertPath string
@@ -68,6 +69,7 @@ type RuleRouter struct {
 func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath string, cacheTTL time.Duration, c *cache.InMemoryCache) *RuleRouter {
 	return &RuleRouter{
 		routes:     make(map[string]*proxy.HTTPProxy),
+		ruleNames:  make(map[string]string),
 		fallback:   fallback,
 		rulesDir:   rulesDir,
 		caCertPath: caCertPath,
@@ -84,6 +86,7 @@ func (rr *RuleRouter) loadRules() error {
 	}
 
 	newRoutes := make(map[string]*proxy.HTTPProxy)
+	newRuleNames := make(map[string]string)
 	var errs []error
 
 	err := filepath.WalkDir(rr.rulesDir, func(path string, d fs.DirEntry, walkErr error) error {
@@ -176,6 +179,7 @@ func (rr *RuleRouter) loadRules() error {
 
 			host := strings.ToLower(rule.Spec.Host)
 			newRoutes[host] = p
+			newRuleNames[host] = rule.Metadata.Name
 			log.Printf("Loaded rule %s: host %s -> %s", rule.Metadata.Name, host, rewriteURLStr)
 		}
 
@@ -192,6 +196,7 @@ func (rr *RuleRouter) loadRules() error {
 
 	rr.mu.Lock()
 	rr.routes = newRoutes
+	rr.ruleNames = newRuleNames
 	rr.mu.Unlock()
 
 	return nil
@@ -212,17 +217,24 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rr.mu.RLock()
 	p, ok := rr.routes[host]
+	var ruleName string
+	if rr.ruleNames != nil {
+		ruleName = rr.ruleNames[host]
+	}
 	rr.mu.RUnlock()
 
 	if ok {
+		log.Printf("Request: %s %s | Matched rule: %s | Action: proxy", r.Method, host, ruleName)
 		p.ServeHTTP(w, r)
 		return
 	}
 
 	if rr.fallback != nil {
+		log.Printf("Request: %s %s | Matched rule: <none> | Action: fallback", r.Method, host)
 		rr.fallback.ServeHTTP(w, r)
 		return
 	}
 
+	log.Printf("Request: %s %s | Matched rule: <none> | Action: not found", r.Method, host)
 	http.Error(w, "Not Found", http.StatusNotFound)
 }
