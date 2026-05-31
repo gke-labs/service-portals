@@ -211,12 +211,12 @@ spec:
 
 	// Verify default-to-host and https:// prefixing logic:
 	rr.mu.RLock()
-	googleRuleProxy, exists := rr.routes["google.com"]
+	googleRule, exists := rr.routes["google.com"]
 	rr.mu.RUnlock()
 	if !exists {
 		t.Error("expected google.com rule to be loaded")
-	} else if googleRuleProxy.TargetURL.String() != "https://google.com" {
-		t.Errorf("expected targeted URL 'https://google.com' for default host-derived rewrite url, got %q", googleRuleProxy.TargetURL.String())
+	} else if googleRule.Proxy.TargetURL.String() != "https://google.com" {
+		t.Errorf("expected targeted URL 'https://google.com' for default host-derived rewrite url, got %q", googleRule.Proxy.TargetURL.String())
 	}
 
 	// Test case 1: Route matching service-1.portal

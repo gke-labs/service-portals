@@ -52,11 +52,16 @@ type RuleSpec struct {
 	CacheTTL   string `json:"cacheTTL"`
 }
 
+// Rule represents a loaded routing rule with its proxy and name.
+type Rule struct {
+	Proxy *proxy.HTTPProxy
+	Name  string
+}
+
 // RuleRouter routes incoming HTTP/HTTPS requests to the appropriate proxy based on host rules.
 type RuleRouter struct {
 	mu         sync.RWMutex
-	routes     map[string]*proxy.HTTPProxy
-	ruleNames  map[string]string
+	routes     map[string]*Rule
 	fallback   http.Handler
 	rulesDir   string
 	caCertPath string
@@ -68,8 +73,7 @@ type RuleRouter struct {
 // NewRuleRouter creates a new RuleRouter instance.
 func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath string, cacheTTL time.Duration, c *cache.InMemoryCache) *RuleRouter {
 	return &RuleRouter{
-		routes:     make(map[string]*proxy.HTTPProxy),
-		ruleNames:  make(map[string]string),
+		routes:     make(map[string]*Rule),
 		fallback:   fallback,
 		rulesDir:   rulesDir,
 		caCertPath: caCertPath,
@@ -85,8 +89,7 @@ func (rr *RuleRouter) loadRules() error {
 		return nil
 	}
 
-	newRoutes := make(map[string]*proxy.HTTPProxy)
-	newRuleNames := make(map[string]string)
+	newRoutes := make(map[string]*Rule)
 	var errs []error
 
 	err := filepath.WalkDir(rr.rulesDir, func(path string, d fs.DirEntry, walkErr error) error {
@@ -178,8 +181,10 @@ func (rr *RuleRouter) loadRules() error {
 			}
 
 			host := strings.ToLower(rule.Spec.Host)
-			newRoutes[host] = p
-			newRuleNames[host] = rule.Metadata.Name
+			newRoutes[host] = &Rule{
+				Proxy: p,
+				Name:  rule.Metadata.Name,
+			}
 			log.Printf("Loaded rule %s: host %s -> %s", rule.Metadata.Name, host, rewriteURLStr)
 		}
 
@@ -196,7 +201,6 @@ func (rr *RuleRouter) loadRules() error {
 
 	rr.mu.Lock()
 	rr.routes = newRoutes
-	rr.ruleNames = newRuleNames
 	rr.mu.Unlock()
 
 	return nil
@@ -216,16 +220,12 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host = strings.ToLower(host)
 
 	rr.mu.RLock()
-	p, ok := rr.routes[host]
-	var ruleName string
-	if rr.ruleNames != nil {
-		ruleName = rr.ruleNames[host]
-	}
+	rule, ok := rr.routes[host]
 	rr.mu.RUnlock()
 
 	if ok {
-		log.Printf("Request: %s %s | Matched rule: %s | Action: proxy", r.Method, host, ruleName)
-		p.ServeHTTP(w, r)
+		log.Printf("Request: %s %s | Matched rule: %s | Action: proxy", r.Method, host, rule.Name)
+		rule.Proxy.ServeHTTP(w, r)
 		return
 	}
 
