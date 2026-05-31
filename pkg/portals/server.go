@@ -16,6 +16,7 @@ package portals
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -28,6 +29,10 @@ import (
 	"github.com/gke-labs/service-portals/pkg/cache"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 )
+
+type CertificateProvider interface {
+	GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error)
+}
 
 type Config struct {
 	DefaultTargetURL  string
@@ -141,28 +146,58 @@ func Run(ctx context.Context, config Config) error {
 		port = "8080"
 	}
 
+	httpsPort := os.Getenv("HTTPS_PORT")
+	if httpsPort == "" {
+		httpsPort = "8443"
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + port,
 		Handler: handler,
 	}
 
-	errChan := make(chan error, 1)
+	var httpsSrv *http.Server
+	if certProv, ok := handler.(CertificateProvider); ok {
+		httpsSrv = &http.Server{
+			Addr:    ":" + httpsPort,
+			Handler: handler,
+			TLSConfig: &tls.Config{
+				GetCertificate: certProv.GetCertificate,
+			},
+		}
+	}
+
+	errChan := make(chan error, 2)
 	go func() {
-		log.Printf("Starting proxy on :%s forwarding to %s", port, target)
+		log.Printf("Starting HTTP proxy on :%s forwarding to %s", port, target)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errChan <- fmt.Errorf("server failed: %w", err)
+			errChan <- fmt.Errorf("HTTP server failed: %w", err)
 		}
 	}()
+
+	if httpsSrv != nil {
+		go func() {
+			log.Printf("Starting HTTPS proxy on :%s forwarding to %s", httpsPort, target)
+			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				errChan <- fmt.Errorf("HTTPS server failed: %w", err)
+			}
+		}()
+	}
 
 	select {
 	case err := <-errChan:
 		return err
 	case <-ctx.Done():
-		log.Println("Shutting down server...")
+		log.Println("Shutting down servers...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("server shutdown failed: %w", err)
+			log.Printf("HTTP server shutdown failed: %v", err)
+		}
+		if httpsSrv != nil {
+			if err := httpsSrv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("HTTPS server shutdown failed: %v", err)
+			}
 		}
 	}
 
