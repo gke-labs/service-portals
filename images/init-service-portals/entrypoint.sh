@@ -20,10 +20,11 @@ PROXY_HTTPS_PORT=${PROXY_HTTPS_PORT:-8443}
 PROXY_UID=${PROXY_UID:-1337}
 INTERCEPT_PORTS=${INTERCEPT_PORTS:-80}
 CA_DIR=${CA_DIR:-/etc/service-portal/ca}
+CA_PRIVATE_DIR=${CA_PRIVATE_DIR:-/etc/service-portal/ca-private}
 
 if [ -x /usr/local/bin/init-service-portals ]; then
-  echo "Generating CA certificate and key in ${CA_DIR}..."
-  /usr/local/bin/init-service-portals -out-dir "${CA_DIR}"
+  echo "Generating CA certificate in ${CA_DIR} and private cert/key in ${CA_PRIVATE_DIR}..."
+  /usr/local/bin/init-service-portals -cert-dir "${CA_DIR}" -key-dir "${CA_PRIVATE_DIR}"
 fi
 
 echo "Configuring iptables rules..."

@@ -494,6 +494,8 @@ spec:
     volumeMounts:
     - name: ca-cert
       mountPath: /etc/service-portal/ca
+    - name: ca-key
+      mountPath: /etc/service-portal/ca-private
   containers:
   - name: workload
     image: toolbox:e2e
@@ -514,22 +516,24 @@ spec:
       runAsGroup: 1337
     env:
     - name: CA_CERT_PATH
-      value: "/etc/service-portal/ca/tls.crt"
+      value: "/etc/service-portal/ca-private/tls.crt"
     - name: CA_KEY_PATH
-      value: "/etc/service-portal/ca/tls.key"
+      value: "/etc/service-portal/ca-private/tls.key"
     args: ["--rules-dir=/etc/portals"]
     volumeMounts:
     - name: rules-volume
       mountPath: /etc/portals
       readOnly: true
-    - name: ca-cert
-      mountPath: /etc/service-portal/ca
+    - name: ca-key
+      mountPath: /etc/service-portal/ca-private
       readOnly: true
   volumes:
   - name: rules-volume
     secret:
       secretName: sidecar-portal-rules-secret
   - name: ca-cert
+    emptyDir: {}
+  - name: ca-key
     emptyDir: {}
 `
 	h.KubectlApplyContent(clientManifest)

@@ -29,21 +29,18 @@ import (
 )
 
 func main() {
-	outDir := flag.String("out-dir", "/etc/service-portal/ca", "Directory to write the generated CA cert and key")
+	certDir := flag.String("cert-dir", "/etc/service-portal/ca", "Directory to write the public CA cert")
+	keyDir := flag.String("key-dir", "/etc/service-portal/ca-private", "Directory to write the CA cert and key")
 	flag.Parse()
 
-	if err := generateCA(*outDir); err != nil {
+	if err := generateCA(*certDir, *keyDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating CA: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("Successfully generated CA certificate and key.")
 }
 
-func generateCA(outDir string) error {
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
-	}
-
+func generateCA(certDir, keyDir string) error {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate private key: %w", err)
@@ -72,31 +69,51 @@ func generateCA(outDir string) error {
 		return fmt.Errorf("failed to create CA certificate: %w", err)
 	}
 
-	certPath := filepath.Join(outDir, "tls.crt")
-	certOut, err := os.Create(certPath)
-	if err != nil {
-		return fmt.Errorf("failed to open tls.crt for writing: %w", err)
-	}
-	defer certOut.Close()
-
-	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
-		return fmt.Errorf("failed to write tls.crt: %w", err)
-	}
-
-	keyPath := filepath.Join(outDir, "tls.key")
-	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to open tls.key for writing: %w", err)
-	}
-	defer keyOut.Close()
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 
 	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		return fmt.Errorf("failed to marshal private key: %w", err)
 	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
 
-	if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes}); err != nil {
-		return fmt.Errorf("failed to write tls.key: %w", err)
+	// 1. Write the public certificate to certDir
+	if certDir != "" {
+		if err := os.MkdirAll(certDir, 0755); err != nil {
+			return fmt.Errorf("failed to create cert directory: %w", err)
+		}
+		certPath := filepath.Join(certDir, "tls.crt")
+		if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+			return fmt.Errorf("failed to write public tls.crt: %w", err)
+		}
+		if os.Getuid() == 0 {
+			_ = os.Chown(certPath, 1337, 1337)
+		}
+	}
+
+	// 2. Write both the certificate and key to keyDir
+	if keyDir != "" {
+		if err := os.MkdirAll(keyDir, 0700); err != nil {
+			return fmt.Errorf("failed to create key directory: %w", err)
+		}
+		certPath := filepath.Join(keyDir, "tls.crt")
+		keyPath := filepath.Join(keyDir, "tls.key")
+
+		if err := os.WriteFile(certPath, certPEM, 0600); err != nil {
+			return fmt.Errorf("failed to write private tls.crt: %w", err)
+		}
+		if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+			return fmt.Errorf("failed to write tls.key: %w", err)
+		}
+
+		if os.Getuid() == 0 {
+			if err := os.Chown(certPath, 1337, 1337); err != nil {
+				return fmt.Errorf("failed to chown private tls.crt: %w", err)
+			}
+			if err := os.Chown(keyPath, 1337, 1337); err != nil {
+				return fmt.Errorf("failed to chown tls.key: %w", err)
+			}
+		}
 	}
 
 	return nil

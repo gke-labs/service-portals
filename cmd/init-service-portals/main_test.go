@@ -23,28 +23,39 @@ import (
 )
 
 func TestGenerateCA(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "init-service-portals-test-*")
+	tmpDirCert, err := os.MkdirTemp("", "init-service-portals-cert-*")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf("Failed to create temp cert dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer os.RemoveAll(tmpDirCert)
 
-	if err := generateCA(tmpDir); err != nil {
+	tmpDirKey, err := os.MkdirTemp("", "init-service-portals-key-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp key dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDirKey)
+
+	if err := generateCA(tmpDirCert, tmpDirKey); err != nil {
 		t.Fatalf("generateCA failed: %v", err)
 	}
 
-	certPath := filepath.Join(tmpDir, "tls.crt")
-	keyPath := filepath.Join(tmpDir, "tls.key")
+	publicCertPath := filepath.Join(tmpDirCert, "tls.crt")
+	privateCertPath := filepath.Join(tmpDirKey, "tls.crt")
+	privateKeyPath := filepath.Join(tmpDirKey, "tls.key")
 
-	if _, err := os.Stat(certPath); os.IsNotExist(err) {
-		t.Errorf("Expected tls.crt to exist, but it does not")
+	if _, err := os.Stat(publicCertPath); os.IsNotExist(err) {
+		t.Errorf("Expected public tls.crt to exist, but it does not")
 	}
 
-	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		t.Errorf("Expected tls.key to exist, but it does not")
+	if _, err := os.Stat(privateCertPath); os.IsNotExist(err) {
+		t.Errorf("Expected private tls.crt to exist, but it does not")
 	}
 
-	certBytes, err := os.ReadFile(certPath)
+	if _, err := os.Stat(privateKeyPath); os.IsNotExist(err) {
+		t.Errorf("Expected private tls.key to exist, but it does not")
+	}
+
+	certBytes, err := os.ReadFile(publicCertPath)
 	if err != nil {
 		t.Fatalf("Failed to read generated certificate: %v", err)
 	}

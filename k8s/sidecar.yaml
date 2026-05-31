@@ -85,6 +85,8 @@ spec:
         volumeMounts:
         - name: ca-cert
           mountPath: /etc/service-portal/ca
+        - name: ca-key
+          mountPath: /etc/service-portal/ca-private
 
       containers:
       # 1. The Workload Container: representing the actual application that is consuming
@@ -126,16 +128,16 @@ spec:
           name: proxy-https
         env:
         - name: CA_CERT_PATH
-          value: "/etc/service-portal/ca/tls.crt"
+          value: "/etc/service-portal/ca-private/tls.crt"
         - name: CA_KEY_PATH
-          value: "/etc/service-portal/ca/tls.key"
+          value: "/etc/service-portal/ca-private/tls.key"
         args: ["--rules-dir=/etc/portals"]
         volumeMounts:
         - name: rules-volume
           mountPath: /etc/portals
           readOnly: true
-        - name: ca-cert
-          mountPath: /etc/service-portal/ca
+        - name: ca-key
+          mountPath: /etc/service-portal/ca-private
           readOnly: true
 
       volumes:
@@ -143,4 +145,6 @@ spec:
         secret:
           secretName: all-in-one-portal-sidecar-secret
       - name: ca-cert
+        emptyDir: {}
+      - name: ca-key
         emptyDir: {}
