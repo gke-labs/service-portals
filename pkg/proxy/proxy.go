@@ -78,9 +78,63 @@ func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, 
 			return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
 		}
 		p.caKey = tlsCert.PrivateKey
+	} else {
+		if err := p.generateMemoryCA(); err != nil {
+			return nil, err
+		}
 	}
 
 	return p, nil
+}
+
+func (p *HTTPProxy) generateMemoryCA() error {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate CA key: %w", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("failed to generate CA serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"Service Portal Dynamic CA"},
+			CommonName:   "Service Portal Root CA",
+		},
+		NotBefore: time.Now().Add(-24 * time.Hour),
+		NotAfter:  time.Now().Add(time.Hour * 24 * 365 * 10), // 10 years
+
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return fmt.Errorf("failed to create CA certificate: %w", err)
+	}
+
+	p.caCert, err = x509.ParseCertificate(derBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse generated CA certificate: %w", err)
+	}
+	p.caKey = priv
+	log.Println("Successfully generated dynamic self-signed Root CA in memory")
+	return nil
+}
+
+func (p *HTTPProxy) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	host := info.ServerName
+	if host == "" {
+		host = "localhost"
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return p.getCert(host)
 }
 
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
