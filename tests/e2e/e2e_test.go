@@ -386,11 +386,11 @@ func TestSidecarPortal(t *testing.T) {
 
 	// Paths relative to git root
 	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
-	h.DockerBuild("init-iptables:e2e", filepath.Join(gitRoot, "images/init-iptables/Dockerfile"), gitRoot)
+	h.DockerBuild("init-service-portals:e2e", filepath.Join(gitRoot, "images/init-service-portals/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 
 	h.KindLoad("all-in-one-portal:e2e")
-	h.KindLoad("init-iptables:e2e")
+	h.KindLoad("init-service-portals:e2e")
 	h.KindLoad("toolbox:e2e")
 
 	// Deploy Backend (Toolbox Server)
@@ -475,8 +475,8 @@ spec:
     - "gemini.backend"
     - "github.backend"
   initContainers:
-  - name: init-iptables
-    image: init-iptables:e2e
+  - name: init-service-portals
+    image: init-service-portals:e2e
     imagePullPolicy: Never
     env:
     - name: PROXY_PORT
@@ -491,6 +491,9 @@ spec:
       capabilities:
         add: ["NET_ADMIN"]
       runAsUser: 0
+    volumeMounts:
+    - name: ca-cert
+      mountPath: /etc/service-portal/ca
   containers:
   - name: workload
     image: toolbox:e2e
@@ -499,21 +502,35 @@ spec:
       runAsUser: 1000
       allowPrivilegeEscalation: false
     command: ["/bin/sh", "-c", "sleep 3600"]
+    volumeMounts:
+    - name: ca-cert
+      mountPath: /etc/service-portal/ca
+      readOnly: true
   - name: service-portal-sidecar
     image: all-in-one-portal:e2e
     imagePullPolicy: Never
     securityContext:
       runAsUser: 1337
       runAsGroup: 1337
+    env:
+    - name: CA_CERT_PATH
+      value: "/etc/service-portal/ca/tls.crt"
+    - name: CA_KEY_PATH
+      value: "/etc/service-portal/ca/tls.key"
     args: ["--rules-dir=/etc/portals"]
     volumeMounts:
     - name: rules-volume
       mountPath: /etc/portals
       readOnly: true
+    - name: ca-cert
+      mountPath: /etc/service-portal/ca
+      readOnly: true
   volumes:
   - name: rules-volume
     secret:
       secretName: sidecar-portal-rules-secret
+  - name: ca-cert
+    emptyDir: {}
 `
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar", 2*time.Minute)
@@ -535,7 +552,7 @@ spec:
 	}
 
 	// Test Gemini HTTPS request via sidecar transparent proxying
-	cmdGeminiHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--no-check-certificate", "-qO-", "https://gemini.backend")
+	cmdGeminiHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://gemini.backend")
 	outGeminiHTTPS, err := cmdGeminiHTTPS.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Gemini HTTPS request failed: %v. Output: %s", err, outGeminiHTTPS)
@@ -567,7 +584,7 @@ spec:
 	}
 
 	// Test GitHub HTTPS request via sidecar transparent proxying
-	cmdGithubHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--no-check-certificate", "-qO-", "https://github.backend")
+	cmdGithubHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://github.backend")
 	outGithubHTTPS, err := cmdGithubHTTPS.CombinedOutput()
 	if err != nil {
 		t.Fatalf("GitHub HTTPS request failed: %v. Output: %s", err, outGithubHTTPS)

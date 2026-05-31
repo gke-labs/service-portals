@@ -12,13 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+FROM golang:1.26-bookworm AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o init-service-portals ./cmd/init-service-portals/main.go
+
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends iptables && \
     rm -rf /var/lib/apt/lists/*
 
-COPY images/init-iptables/entrypoint.sh /entrypoint.sh
+COPY --from=builder /app/init-service-portals /usr/local/bin/init-service-portals
+COPY images/init-service-portals/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
