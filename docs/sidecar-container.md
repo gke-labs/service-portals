@@ -57,6 +57,8 @@ To prevent malicious or misconfigured applications in the workload container fro
 
 The sidecar container runs the `all-in-one-portal`. Crucially, it must run with the security context matching the bypassed `PROXY_UID` (e.g., `1337`).
 
+It is configured using the `--rules-dir` CLI flag (or `RULES_DIR` environment variable), pointing to a directory where `PortalRule` configuration files are defined. In Kubernetes, this directory is typically backed by a Secret volume mount containing the API keys and routing configuration.
+
 ### 3. Workload Security Context (Best Practice)
 
 Since our iptables NAT rules bypass traffic originating from UID `1337` to avoid infinite loops, it is recommended best practice to configure the workload container to ensure it cannot execute outbound requests as UID `1337`.

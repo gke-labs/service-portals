@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -28,7 +29,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := portals.Run(ctx, portals.Config{}); err != nil {
+	rulesDir := flag.String("rules-dir", "", "Directory containing configuration rules")
+	flag.Parse()
+
+	config := portals.Config{}
+	if *rulesDir != "" {
+		config.RulesDir = *rulesDir
+	}
+
+	if err := portals.Run(ctx, config); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}

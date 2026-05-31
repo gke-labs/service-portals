@@ -239,8 +239,24 @@ kind: Secret
 metadata:
   name: all-in-one-portal-secret
 stringData:
-  gemini-token: gemini-e2e-token
-  github-token: github-e2e-token
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: http://backend
+      authToken: gemini-e2e-token
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: http://backend
+      authToken: github-e2e-token
 `)
 
 	portalManifest := `
@@ -266,31 +282,15 @@ spec:
         imagePullPolicy: Never
         ports:
         - containerPort: 8080
-        env:
-        - name: SERVICE_NAMES
-          value: "gemini,github"
-        - name: GEMINI_TARGET_URL
-          value: "http://backend"
-        - name: GEMINI_HOST
-          value: "gemini.backend"
-        - name: GEMINI_AUTH_HEADER
-          value: "Authorization"
-        - name: GEMINI_AUTH_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: all-in-one-portal-secret
-              key: gemini-token
-        - name: GITHUB_TARGET_URL
-          value: "http://backend"
-        - name: GITHUB_HOST
-          value: "github.backend"
-        - name: GITHUB_AUTH_HEADER
-          value: "Authorization"
-        - name: GITHUB_AUTH_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: all-in-one-portal-secret
-              key: github-token
+        args: ["--rules-dir=/etc/portals"]
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+      volumes:
+      - name: rules-volume
+        secret:
+          secretName: all-in-one-portal-secret
 ---
 apiVersion: v1
 kind: Service
@@ -439,6 +439,30 @@ spec:
 
 	clientManifest := `
 apiVersion: v1
+kind: Secret
+metadata:
+  name: sidecar-portal-rules-secret
+stringData:
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: http://backend
+      authToken: gemini-sidecar-token
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: http://backend
+      authToken: github-sidecar-token
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: test-client-sidecar
@@ -479,25 +503,15 @@ spec:
     securityContext:
       runAsUser: 1337
       runAsGroup: 1337
-    env:
-    - name: SERVICE_NAMES
-      value: "gemini,github"
-    - name: GEMINI_TARGET_URL
-      value: "http://backend"
-    - name: GEMINI_HOST
-      value: "gemini.backend"
-    - name: GEMINI_AUTH_HEADER
-      value: "Authorization"
-    - name: GEMINI_AUTH_TOKEN
-      value: "gemini-sidecar-token"
-    - name: GITHUB_TARGET_URL
-      value: "http://backend"
-    - name: GITHUB_HOST
-      value: "github.backend"
-    - name: GITHUB_AUTH_HEADER
-      value: "Authorization"
-    - name: GITHUB_AUTH_TOKEN
-      value: "github-sidecar-token"
+    args: ["--rules-dir=/etc/portals"]
+    volumeMounts:
+    - name: rules-volume
+      mountPath: /etc/portals
+      readOnly: true
+  volumes:
+  - name: rules-volume
+    secret:
+      secretName: sidecar-portal-rules-secret
 `
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar", 2*time.Minute)

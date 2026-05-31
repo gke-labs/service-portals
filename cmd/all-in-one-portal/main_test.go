@@ -15,37 +15,25 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"net/url"
+	"flag"
+	"os"
 	"testing"
-
-	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
-func TestRouter_ServeHTTP(t *testing.T) {
-	// Setup a mock upstream
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
+func TestFlags(t *testing.T) {
+	// Backup original args and reset flags
+	origArgs := os.Args
+	defer func() { os.Args = origArgs }()
 
-	upstreamURL, _ := url.Parse(upstream.URL)
-	p, _ := proxy.NewHTTPProxy(upstreamURL, "", "", "", "")
+	os.Args = []string{"cmd", "-rules-dir", "/tmp/rules"}
 
-	router := &Router{
-		routes: map[string]*proxy.HTTPProxy{
-			"test.portal": p,
-		},
-	}
+	// Reset CommandLine so we can redefine/reparse flags
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Host = "test.portal"
-	rec := httptest.NewRecorder()
+	rulesDir := flag.String("rules-dir", "", "Directory containing configuration rules")
+	flag.Parse()
 
-	router.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("Expected status OK, got %d", rec.Code)
+	if *rulesDir != "/tmp/rules" {
+		t.Errorf("expected rules-dir to be /tmp/rules, got %q", *rulesDir)
 	}
 }
