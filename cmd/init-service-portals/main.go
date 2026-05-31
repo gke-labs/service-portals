@@ -92,13 +92,13 @@ func generateCA(certDir, keyDir string, chownUID, chownGID int) error {
 
 	// 2. Write both the certificate and key to keyDir
 	if keyDir != "" {
-		if err := os.MkdirAll(keyDir, 0700); err != nil {
+		if err := os.MkdirAll(keyDir, 0755); err != nil {
 			return fmt.Errorf("failed to create key directory: %w", err)
 		}
 		certPath := filepath.Join(keyDir, "tls.crt")
 		keyPath := filepath.Join(keyDir, "tls.key")
 
-		if err := os.WriteFile(certPath, certPEM, 0600); err != nil {
+		if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
 			return fmt.Errorf("failed to write private tls.crt: %w", err)
 		}
 		if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
@@ -106,6 +106,9 @@ func generateCA(certDir, keyDir string, chownUID, chownGID int) error {
 		}
 
 		if chownUID != -1 || chownGID != -1 {
+			if err := os.Chown(keyDir, chownUID, chownGID); err != nil {
+				return fmt.Errorf("failed to chown key directory to %d:%d: %w", chownUID, chownGID, err)
+			}
 			if err := os.Chown(keyPath, chownUID, chownGID); err != nil {
 				return fmt.Errorf("failed to chown private key to %d:%d: %w", chownUID, chownGID, err)
 			}
