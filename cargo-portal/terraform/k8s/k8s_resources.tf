@@ -62,21 +62,28 @@ resource "kubernetes_manifest" "kellnr_backend_config" {
   }
 }
 
-# Storage Class for Filestore PVC
-resource "kubernetes_storage_class" "filestore_sc" {
+# Statically mapped PV referencing the pre-created Filestore instance in Phase 1
+resource "kubernetes_persistent_volume" "filestore_pv" {
   count = local.cfg.storage_backend == "filestore" ? 1 : 0
   metadata {
-    name = "kellnr-filestore-sc"
+    name = "kellnr-filestore-pv"
   }
-  storage_provisioner = "filestore.csi.storage.gke.io"
-  volume_binding_mode = "WaitForFirstConsumer"
-  parameters = {
-    tier    = "standard"
-    network = data.terraform_remote_state.infra.outputs.kellnr_network_name
+  spec {
+    capacity = {
+      storage = "1Ti"
+    }
+    access_modes = ["ReadWriteMany"]
+    persistent_volume_source {
+      nfs {
+        path   = "/vol1"
+        server = data.terraform_remote_state.infra.outputs.kellnr_filestore_ip
+      }
+    }
+    storage_class_name = "kellnr-filestore-static"
   }
 }
 
-# PVC for Filestore dynamic provisioning
+# PVC bound to the static PersistentVolume
 resource "kubernetes_persistent_volume_claim" "filestore_pvc" {
   count = local.cfg.storage_backend == "filestore" ? 1 : 0
   metadata {
@@ -85,13 +92,15 @@ resource "kubernetes_persistent_volume_claim" "filestore_pvc" {
   }
   spec {
     access_modes       = ["ReadWriteMany"]
-    storage_class_name = kubernetes_storage_class.filestore_sc[0].metadata[0].name
+    storage_class_name = "kellnr-filestore-static"
+    volume_name        = kubernetes_persistent_volume.filestore_pv[0].metadata[0].name
     resources {
       requests = {
-        storage = "1Ti" # Filestore requires minimum 1Ti
+        storage = "1Ti"
       }
     }
   }
+  wait_until_bound = false
 }
 
 # Kellnr Service (NodePort required for GKE Ingress integration)
@@ -101,6 +110,7 @@ resource "kubernetes_service" "kellnr_service" {
     namespace = kubernetes_namespace.kellnr.metadata[0].name
     annotations = local.cfg.enable_cdn ? {
       "cloud.google.com/backend-config" = jsonencode({ "default" = "kellnr-backend-config" })
+      "cloud.google.com/neg"            = jsonencode({ "ingress" = true })
     } : {}
   }
   spec {
@@ -122,6 +132,9 @@ resource "kubernetes_ingress_v1" "kellnr_ingress" {
   metadata {
     name      = "kellnr-ingress"
     namespace = kubernetes_namespace.kellnr.metadata[0].name
+    labels = {
+      "force-reconcile" = "1"
+    }
     annotations = {
       "kubernetes.io/ingress.global-static-ip-name" = "kellnr-static-ip"
       "kubernetes.io/ingress.class"                 = "gce"

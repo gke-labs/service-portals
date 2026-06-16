@@ -67,3 +67,7 @@ output "cfg" {
 output "kellnr_network_name" {
   value = google_compute_network.kellnr_network.name
 }
+
+output "kellnr_filestore_ip" {
+  value = local.cfg.storage_backend == "filestore" ? google_filestore_instance.kellnr_filestore[0].networks[0].ip_addresses[0] : ""
+}

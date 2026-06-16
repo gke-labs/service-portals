@@ -8,7 +8,8 @@ resource "google_storage_bucket" "kellnr_bucket" {
   location      = var.region
   force_destroy = true # Allow cleanup of all storage objects on destroy
 
-  public_access_prevention = "enforced"
+  public_access_prevention    = "enforced"
+  uniform_bucket_level_access = true
 }
 
 resource "google_storage_hmac_key" "kellnr_hmac_key" {
