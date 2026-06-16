@@ -132,6 +132,22 @@ kubectl get ingress kellnr-ingress -n kellnr
 > [!NOTE]
 > It can take 5-10 minutes for the GKE HTTP(S) Load Balancer and global IP bindings to fully propagate in GCP.
 
+## 🛠️ Troubleshooting & Pitfalls
+
+### 1. GCS HMAC Credentials (Signature Errors)
+*   **Symptom**: Pod logs show `S3 error: Generic S3 error: ... Server returned non-2xx status code: 400 Bad Request` with `MalformedSecurityHeader` and `Credential scope string has invalid format`.
+*   **Cause**: 
+    *   **Resource ID vs Access ID**: The Terraform `google_storage_hmac_key` resource's `.id` attribute exports the full resource path (`projects/{{project}}/hmacKeys/{{access_id}}`). If this is mapped directly to the S3 access key, GCS signature verification fails.
+    *   **Region Scope Mismatch**: GCS S3 API expects the region in the Signature V4 credential scope to be `"US"` or `"us-east-1"` for compatibility, even if the target bucket is in a specific region like `us-central1`.
+*   **Solution**:
+    *   Ensure the access key is mapped using the `.access_id` attribute (e.g., `GOOG1ESK...`) in Terraform outputs, not `.id`.
+    *   Hardcode `KELLNR_S3__REGION` to `"US"` or `"us-east-1"` in the Kubernetes deployment environment variables when using GCS backend.
+
+### 2. Sparse Index Routing & Unexpected JSON Responses
+*   **Symptom**: Direct `curl` requests to download a crate (e.g. `/api/v1/cratesio/anyhow/1.0.80/download`) return `200 OK` but with JSON index metadata for a crate named `download` instead of the `.crate` gzip file.
+*   **Cause**: The Cargo sparse registry protocol expects a `/dl` path prefix for download requests (as defined in the index's `config.json`). If `/dl` is omitted, Kellnr matches the metadata/index routes instead. It treats the path as a package name, sanitizes it to the last segment (`download`), and returns the index metadata for that mock package.
+*   **Solution**: Always verify download endpoints using the correct path with the `/dl` segment: `/api/v1/cratesio/dl/{crate}/{version}/download`.
+
 ---
 
 ## 🗑️ Clean Up & Teardown

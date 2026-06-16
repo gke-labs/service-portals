@@ -44,7 +44,7 @@ output "gcs_bucket_name" {
 }
 
 output "gcs_hmac_access_key_id" {
-  value = local.cfg.storage_backend == "gcs" ? google_storage_hmac_key.kellnr_hmac_key[0].id : ""
+  value = local.cfg.storage_backend == "gcs" ? google_storage_hmac_key.kellnr_hmac_key[0].access_id : ""
 }
 
 output "gcs_hmac_secret_key" {

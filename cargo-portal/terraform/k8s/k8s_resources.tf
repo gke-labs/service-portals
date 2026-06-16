@@ -256,29 +256,48 @@ resource "kubernetes_deployment" "kellnr_deployment" {
             value = "/data"
           }
           env {
-            name  = "RUST_LOG"
-            value = "debug,kellnr=debug"
+            name  = "KELLNR_REGISTRY__MAX_DB_CONNECTIONS"
+            value = "30"
+          }
+          env {
+            name  = "KELLNR_LOG__LEVEL"
+            value = "trace"
+          }
+          env {
+            name  = "KELLNR_LOG__LEVEL_WEB_SERVER"
+            value = "trace"
+          }
+          env {
+            name  = "RUST_BACKTRACE"
+            value = "1"
           }
 
           # GCS bucket storage S3 compatible env injection
           dynamic "env" {
             for_each = local.cfg.storage_backend == "gcs" ? [1] : []
             content {
-              name  = "KELLNR_STORAGE__TYPE"
-              value = "s3"
+              name  = "KELLNR_S3__ENABLED"
+              value = "true"
             }
           }
           dynamic "env" {
             for_each = local.cfg.storage_backend == "gcs" ? [1] : []
             content {
-              name  = "KELLNR_STORAGE__S3__BUCKET"
+              name  = "KELLNR_S3__CRATES_BUCKET"
               value = data.terraform_remote_state.infra.outputs.gcs_bucket_name
             }
           }
           dynamic "env" {
             for_each = local.cfg.storage_backend == "gcs" ? [1] : []
             content {
-              name = "KELLNR_STORAGE__S3__ACCESS_KEY"
+              name  = "KELLNR_S3__CRATESIO_BUCKET"
+              value = data.terraform_remote_state.infra.outputs.gcs_bucket_name
+            }
+          }
+          dynamic "env" {
+            for_each = local.cfg.storage_backend == "gcs" ? [1] : []
+            content {
+              name = "KELLNR_S3__ACCESS_KEY"
               value_from {
                 secret_key_ref {
                   name = kubernetes_secret.kellnr_secrets.metadata[0].name
@@ -290,7 +309,7 @@ resource "kubernetes_deployment" "kellnr_deployment" {
           dynamic "env" {
             for_each = local.cfg.storage_backend == "gcs" ? [1] : []
             content {
-              name = "KELLNR_STORAGE__S3__SECRET_KEY"
+              name = "KELLNR_S3__SECRET_KEY"
               value_from {
                 secret_key_ref {
                   name = kubernetes_secret.kellnr_secrets.metadata[0].name
@@ -302,15 +321,22 @@ resource "kubernetes_deployment" "kellnr_deployment" {
           dynamic "env" {
             for_each = local.cfg.storage_backend == "gcs" ? [1] : []
             content {
-              name  = "KELLNR_STORAGE__S3__ENDPOINT"
+              name  = "KELLNR_S3__ENDPOINT"
               value = "https://storage.googleapis.com"
             }
           }
           dynamic "env" {
             for_each = local.cfg.storage_backend == "gcs" ? [1] : []
             content {
-              name  = "KELLNR_STORAGE__S3__REGION"
-              value = data.terraform_remote_state.infra.outputs.region
+              name  = "KELLNR_S3__REGION"
+              value = "US"
+            }
+          }
+          dynamic "env" {
+            for_each = local.cfg.storage_backend == "gcs" ? [1] : []
+            content {
+              name  = "KELLNR_S3__ALLOW_HTTP"
+              value = "false"
             }
           }
 

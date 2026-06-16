@@ -98,18 +98,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let req_start = Instant::now();
                 let response = client.get(&url).send().await;
+                
+                let mut success = false;
+                let mut status_code = 0;
+                if let Ok(resp) = response {
+                    status_code = resp.status().as_u16();
+                    if resp.status().is_success() {
+                        if let Ok(_bytes) = resp.bytes().await {
+                            success = true;
+                        }
+                    }
+                }
                 let latency = req_start.elapsed().as_millis();
-
-                
-                let success = match &response {
-                    Ok(resp) => resp.status().is_success(),
-                    Err(_) => false,
-                };
-                
-                let status_code = match &response {
-                    Ok(resp) => resp.status().as_u16(),
-                    Err(_) => 0,
-                };
 
                 let result = RequestResult {
                     timestamp: Utc::now().to_rfc3339(),

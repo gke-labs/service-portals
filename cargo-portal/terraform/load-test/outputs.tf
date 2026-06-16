@@ -1,3 +1,7 @@
+output "load_test_bucket_name" {
+  value = google_storage_bucket.load_test_bucket.name
+}
+
 output "stress_instructions" {
   value = <<EOF
 
@@ -7,17 +11,18 @@ To run the load simulations:
 1. Compile the stress-test binary locally for Linux x86_64:
    cargo build --release --manifest-path ../../stress-test/Cargo.toml
 
-2. Copy the compiled binary into the Filestore NFS share via the helper pod:
-   kubectl cp ../../stress-test/target/release/stress-test kellnr-helper:/data/stress-test -n kellnr
+2. Copy the compiled binary and packages.txt into the GCS load-test bucket:
+   gcloud storage cp ../../stress-test/target/release/stress-test gs://${google_storage_bucket.load_test_bucket.name}/stress-test
 
    (Optional) Fetch and copy the top 1000 popular crates to load-test real-world proxy caching:
    python3 ../../stress-test/get_popular_crates.py 1000
-   kubectl cp packages.txt kellnr-helper:/data/packages.txt -n kellnr
+   gcloud storage cp packages.txt gs://${google_storage_bucket.load_test_bucket.name}/packages.txt
 
 3. Trigger the stress test by running:
    terraform apply
 
-4. Once the job completes, you can copy the CSV results back to analyze them:
-   kubectl cp kellnr-helper:/data/ . -n kellnr
+4. Once the job completes, you can copy the CSV results back from the GCS bucket to analyze them:
+   gcloud storage cp -r gs://${google_storage_bucket.load_test_bucket.name}/results/ .
+
 EOF
 }

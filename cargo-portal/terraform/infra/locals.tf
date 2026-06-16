@@ -3,7 +3,7 @@ locals {
     gke_cdn_gcs = {
       enable_cdn        = true
       storage_backend   = "gcs"
-      database_tier     = "db-f1-micro"
+      database_tier     = "db-custom-1-3840"
       kellnr_replicas   = 3
       kellnr_cpu        = "200m"
       kellnr_memory     = "512Mi"
@@ -11,7 +11,7 @@ locals {
     gke_cdn_filestore = {
       enable_cdn        = true
       storage_backend   = "filestore"
-      database_tier     = "db-f1-micro"
+      database_tier     = "db-custom-1-3840"
       kellnr_replicas   = 3
       kellnr_cpu        = "200m"
       kellnr_memory     = "512Mi"
