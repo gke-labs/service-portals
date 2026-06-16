@@ -1,0 +1,174 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kellnr
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kellnr-ksa
+  namespace: kellnr
+  annotations:
+    # Set to your Google Service Account (GSA) email for Workload Identity
+    iam.gke.io/gcp-service-account: "kellnr-gsa@YOUR_PROJECT_ID.iam.gserviceaccount.com"
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: kellnr-backend-config
+  namespace: kellnr
+spec:
+  cdn:
+    enabled: true
+    cacheMode: FORCE_CACHE_ALL
+    defaultTtl: 300
+    clientTtl: 300
+    cachePolicy:
+      includeHost: true
+      includeProtocol: true
+      includeQueryString: false
+  securityPolicy:
+    name: "kellnr-security-policy"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kellnr-service
+  namespace: kellnr
+  annotations:
+    # Link BackendConfig for Cloud CDN and Cloud Armor rules
+    cloud.google.com/backend-config: '{"default": "kellnr-backend-config"}'
+spec:
+  selector:
+    app: kellnr
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: NodePort
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kellnr-ingress
+  namespace: kellnr
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: "kellnr-static-ip"
+    kubernetes.io/ingress.class: "gce"
+spec:
+  defaultBackend:
+    service:
+      name: kellnr-service
+      port:
+        number: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kellnr-deployment
+  namespace: kellnr
+  labels:
+    app: kellnr
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kellnr
+  template:
+    metadata:
+      labels:
+        app: kellnr
+    spec:
+      serviceAccountName: kellnr-ksa
+      containers:
+        # 1. Kellnr Core Container
+        - name: kellnr
+          image: ghcr.io/kellnr/kellnr:5
+          ports:
+            - containerPort: 8000
+          env:
+            - name: KELLNR_PROXY__ENABLED
+              value: "true"
+            - name: KELLNR_OAUTH2__ENABLED
+              value: "false" # Set to true and supply Client ID/Secret if OIDC login is needed
+            
+            # DB Configuration (Cloud SQL Proxy handles secure local connection)
+            - name: KELLNR_POSTGRESQL__ENABLED
+              value: "true"
+            - name: KELLNR_POSTGRESQL__ADDRESS
+              value: "127.0.0.1"
+            - name: KELLNR_POSTGRESQL__PORT
+              value: "5432"
+            - name: KELLNR_POSTGRESQL__DB
+              value: "kellnr_db"
+            - name: KELLNR_POSTGRESQL__USER
+              value: "kellnr_user"
+            - name: KELLNR_POSTGRESQL__PWD
+              valueFrom:
+                secretKeyRef:
+                  name: kellnr-secrets
+                  key: db_password
+
+            # Origin settings for client redirection
+            - name: KELLNR_ORIGIN__HOSTNAME
+              value: "YOUR_LB_IP_OR_STATIC_IP"
+            - name: KELLNR_ORIGIN__PORT
+              value: "80"
+            - name: KELLNR_ORIGIN__HTTPS
+              value: "false"
+
+            - name: KELLNR_REGISTRY__DATA_DIR
+              value: "/data"
+            - name: RUST_LOG
+              value: "debug,kellnr=debug"
+
+            # GCS Bucket Storage configuration (using S3 compatibility mode)
+            - name: KELLNR_STORAGE__TYPE
+              value: "s3"
+            - name: KELLNR_STORAGE__S3__BUCKET
+              value: "kellnr-crates-YOUR_PROJECT_ID"
+            - name: KELLNR_STORAGE__S3__ENDPOINT
+              value: "https://storage.googleapis.com"
+            - name: KELLNR_STORAGE__S3__REGION
+              value: "us-central1"
+            - name: KELLNR_STORAGE__S3__ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kellnr-secrets
+                  key: gcs_hmac_access_key
+            - name: KELLNR_STORAGE__S3__SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kellnr-secrets
+                  key: gcs_hmac_secret_key
+
+          volumeMounts:
+            - name: kellnr-storage-volume
+              mountPath: /data
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: "200m"
+              memory: 512Mi
+
+        # 2. Cloud SQL Proxy Sidecar
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.1.0
+          args:
+            - "YOUR_PROJECT_ID:us-central1:kellnr-postgres"
+            - "--port=5432"
+          securityContext:
+            runAsNonRoot: true
+          resources:
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+            requests:
+              cpu: "100m"
+              memory: 128Mi
+
+      volumes:
+        - name: kellnr-storage-volume
+          emptyDir: {} # Ephemeral local storage since persistent binaries are stored in GCS
