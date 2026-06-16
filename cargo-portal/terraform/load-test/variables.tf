@@ -21,3 +21,9 @@ variable "completions" {
   default     = 16
   description = "Total number of successful pod completions for the Job."
 }
+
+variable "registry_path" {
+  type        = string
+  default     = "/api/v1/cratesio"
+  description = "The target registry path to test (e.g. /api/v1/crates for private registry, or /api/v1/cratesio for crates.io proxy fallback)."
+}

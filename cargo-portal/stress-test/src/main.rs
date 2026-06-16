@@ -44,13 +44,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "15".to_string())
         .parse()?;
 
-    // Target the PRIVATE registry namespace `/api/v1/crates/` for 100% offline sandbox validation
-    let base_url = format!("http://{}/api/v1/crates", ip);
-    println!("Starting PRIVATE registry stress test against: {}", base_url);
+    let registry_path = env::var("REGISTRY_PATH").unwrap_or_else(|_| "/api/v1/crates".to_string());
+    let base_url = format!("http://{}{}", ip, registry_path);
+    println!("Starting registry stress test against: {}", base_url);
     println!("Concurrency: {}, Duration: {}s", concurrency, duration_secs);
 
-    // Target only our whitelisted private dummy crate to guarantee 100% success
-    let packages = vec!["dummy-test"];
+    // Attempt to read packages from a file, otherwise fall back to default list
+    let packages_file = env::var("PACKAGES_FILE").unwrap_or_else(|_| "/data/packages.txt".to_string());
+    let mut packages = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(&packages_file) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                packages.push(trimmed.to_string());
+            }
+        }
+    }
+
+    if packages.is_empty() {
+        println!("No package list found at {}, using default package list: [\"dummy-test\"]", packages_file);
+        packages.push("dummy-test".to_string());
+    } else {
+        println!("Loaded {} package names from {}", packages.len(), packages_file);
+    }
 
     let client = Client::builder()
         .timeout(Duration::from_secs(5))

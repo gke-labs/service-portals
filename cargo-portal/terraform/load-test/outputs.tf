@@ -10,6 +10,10 @@ To run the load simulations:
 2. Copy the compiled binary into the Filestore NFS share via the helper pod:
    kubectl cp ../../stress-test/target/release/stress-test kellnr-helper:/data/stress-test -n kellnr
 
+   (Optional) Fetch and copy the top 1000 popular crates to load-test real-world proxy caching:
+   python3 ../../stress-test/get_popular_crates.py 1000
+   kubectl cp packages.txt kellnr-helper:/data/packages.txt -n kellnr
+
 3. Trigger the stress test by running:
    terraform apply
 

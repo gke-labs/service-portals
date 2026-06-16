@@ -84,6 +84,11 @@ resource "kubernetes_job" "kellnr_stress_job" {
           }
 
           env {
+            name  = "REGISTRY_PATH"
+            value = var.registry_path
+          }
+
+          env {
             name  = "CSV_OUT"
             value = "/data/stress_test_option_b_$(POD_NAME).csv"
           }
