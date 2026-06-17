@@ -118,7 +118,7 @@ resource "kubernetes_service" "kellnr_service" {
       app = "kellnr"
     }
     port {
-      port        = local.cfg.enable_cdn ? 80 : 8000
+      port        = 80
       target_port = 8000
       protocol    = "TCP"
     }

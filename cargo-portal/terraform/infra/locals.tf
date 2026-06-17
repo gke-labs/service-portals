@@ -19,7 +19,7 @@ locals {
     gke_only_2node_gcs = {
       enable_cdn        = false
       storage_backend   = "gcs"
-      database_tier     = "db-n1-standard-16"
+      database_tier     = "db-custom-16-61440"
       kellnr_replicas   = 22
       kellnr_cpu        = "4"
       kellnr_memory     = "8Gi"
@@ -27,7 +27,7 @@ locals {
     gke_only_2node_filestore = {
       enable_cdn        = false
       storage_backend   = "filestore"
-      database_tier     = "db-n1-standard-16"
+      database_tier     = "db-custom-16-61440"
       kellnr_replicas   = 22
       kellnr_cpu        = "4"
       kellnr_memory     = "8Gi"
@@ -35,7 +35,7 @@ locals {
     gke_only_1node_gcs = {
       enable_cdn        = false
       storage_backend   = "gcs"
-      database_tier     = "db-n1-standard-16"
+      database_tier     = "db-custom-16-61440"
       kellnr_replicas   = 11
       kellnr_cpu        = "4"
       kellnr_memory     = "8Gi"
@@ -43,7 +43,7 @@ locals {
     gke_only_1node_filestore = {
       enable_cdn        = false
       storage_backend   = "filestore"
-      database_tier     = "db-n1-standard-16"
+      database_tier     = "db-custom-16-61440"
       kellnr_replicas   = 11
       kellnr_cpu        = "4"
       kellnr_memory     = "8Gi"

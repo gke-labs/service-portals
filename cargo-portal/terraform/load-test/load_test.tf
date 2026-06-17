@@ -23,7 +23,7 @@ resource "kubernetes_job" "kellnr_stress_job" {
   spec {
     parallelism   = var.parallelism
     completions   = var.completions
-    backoff_limit = 0
+    backoff_limit = 3
 
     template {
       metadata {
@@ -33,7 +33,7 @@ resource "kubernetes_job" "kellnr_stress_job" {
       }
 
       spec {
-        restart_policy       = "Never"
+        restart_policy       = "OnFailure"
         service_account_name = "kellnr-ksa"
 
         container {
@@ -52,7 +52,7 @@ resource "kubernetes_job" "kellnr_stress_job" {
 
           env {
             name  = "GKE_IP"
-            value = data.terraform_remote_state.infra.outputs.kellnr_static_ip_address
+            value = data.terraform_remote_state.infra.outputs.cfg.enable_cdn ? data.terraform_remote_state.infra.outputs.kellnr_static_ip_address : "kellnr-service.kellnr.svc.cluster.local"
           }
 
           env {

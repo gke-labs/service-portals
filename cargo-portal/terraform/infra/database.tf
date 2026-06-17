@@ -18,10 +18,7 @@ resource "google_sql_database_instance" "kellnr_postgres" {
       ipv4_enabled = true # Required for Cloud SQL Proxy to connect over public IP securely via IAM
     }
 
-    database_flags {
-      name  = "max_connections"
-      value = "100"
-    }
+
   }
 }
 
