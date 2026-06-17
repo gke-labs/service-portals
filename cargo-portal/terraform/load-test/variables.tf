@@ -27,3 +27,11 @@ variable "registry_path" {
   default     = "/api/v1/cratesio"
   description = "The target registry path to test (e.g. /api/v1/crates for private registry, or /api/v1/cratesio for crates.io proxy fallback)."
 }
+
+variable "node_selector" {
+  type        = map(string)
+  default     = {
+    "cloud.google.com/machine-family" = "n2"
+  }
+  description = "Additional node selectors for load generator pods (e.g. {'cloud.google.com/machine-family' = 'n2'})."
+}

@@ -35,9 +35,10 @@ resource "kubernetes_job" "kellnr_stress_job" {
       spec {
         restart_policy       = "OnFailure"
         service_account_name = "kellnr-ksa"
-        node_selector = {
-          "topology.kubernetes.io/zone" = "us-central1-a"
-        }
+        node_selector = merge(
+          { "topology.kubernetes.io/zone" = "us-central1-a" },
+          var.node_selector
+        )
 
         container {
           name    = "load-generator"
@@ -45,15 +46,54 @@ resource "kubernetes_job" "kellnr_stress_job" {
           command = ["/bin/bash", "-c"]
           args    = [
             <<-EOT
-            until gsutil ls gs://${google_storage_bucket.load_test_bucket.name}/ >/dev/null 2>&1; do
+            cat << 'EOF' > /tmp/gcs_helper.py
+            import sys, urllib.request, json, os, urllib.parse
+            def get_token():
+                req = urllib.request.Request("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", headers={"Metadata-Flavor": "Google"})
+                return json.loads(urllib.request.urlopen(req).read())["access_token"]
+            def download(bucket, object_path, dest_path):
+                token = get_token()
+                encoded_path = urllib.parse.quote(object_path, safe='')
+                url = f"https://storage.googleapis.com/download/storage/v1/b/{bucket}/o/{encoded_path}?alt=media"
+                req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+                with urllib.request.urlopen(req) as response:
+                    with open(dest_path, "wb") as f:
+                        f.write(response.read())
+            def upload(bucket, src_path, object_path):
+                token = get_token()
+                encoded_path = urllib.parse.quote(object_path, safe='')
+                url = f"https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o?uploadType=media&name={encoded_path}"
+                with open(src_path, "rb") as f:
+                    data = f.read()
+                req = urllib.request.Request(url, data=data, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"}, method="POST")
+                with urllib.request.urlopen(req) as response:
+                    pass
+            def check(bucket):
+                try:
+                    token = get_token()
+                    url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o?maxResults=1"
+                    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+                    with urllib.request.urlopen(req) as response:
+                        pass
+                    return True
+                except Exception as e:
+                    return False
+            if __name__ == "__main__":
+                cmd, bucket = sys.argv[1], sys.argv[2]
+                if cmd == "download": download(bucket, sys.argv[3], sys.argv[4])
+                elif cmd == "upload": upload(bucket, sys.argv[3], sys.argv[4])
+                elif cmd == "check": sys.exit(0 if check(bucket) else 1)
+            EOF
+
+            until python3 /tmp/gcs_helper.py check ${google_storage_bucket.load_test_bucket.name}; do
               echo "Waiting for Workload Identity credentials..."
               sleep 5
             done
-            gsutil cp gs://${google_storage_bucket.load_test_bucket.name}/stress-test /tmp/stress-test
-            gsutil cp gs://${google_storage_bucket.load_test_bucket.name}/packages.txt /tmp/packages.txt
+            python3 /tmp/gcs_helper.py download ${google_storage_bucket.load_test_bucket.name} stress-test /tmp/stress-test
+            python3 /tmp/gcs_helper.py download ${google_storage_bucket.load_test_bucket.name} packages.txt /tmp/packages.txt
             chmod +x /tmp/stress-test
             /tmp/stress-test
-            gsutil cp /tmp/stress_test_result.csv gs://${google_storage_bucket.load_test_bucket.name}/results/stress_test_$${POD_NAME}.csv
+            python3 /tmp/gcs_helper.py upload ${google_storage_bucket.load_test_bucket.name} /tmp/stress_test_result.csv results/stress_test_$${POD_NAME}.csv
             EOT
           ]
 
