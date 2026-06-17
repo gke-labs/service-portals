@@ -42,6 +42,10 @@ resource "kubernetes_job" "kellnr_stress_job" {
           command = ["/bin/bash", "-c"]
           args    = [
             <<-EOT
+            until gsutil ls gs://${google_storage_bucket.load_test_bucket.name}/ >/dev/null 2>&1; do
+              echo "Waiting for Workload Identity credentials..."
+              sleep 5
+            done
             gsutil cp gs://${google_storage_bucket.load_test_bucket.name}/stress-test /tmp/stress-test
             gsutil cp gs://${google_storage_bucket.load_test_bucket.name}/packages.txt /tmp/packages.txt
             chmod +x /tmp/stress-test
