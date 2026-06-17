@@ -36,7 +36,7 @@ fn crate_sub_path(name: &str) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ip = env::var("GKE_IP").unwrap_or_else(|_| "8.233.208.83".to_string());
+    let ip = env::var("GKE_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
     let concurrency: usize = env::var("CONCURRENCY")
         .unwrap_or_else(|_| "50".to_string())
         .parse()?;

@@ -175,6 +175,9 @@ resource "kubernetes_deployment" "kellnr_deployment" {
         }
       }
       spec {
+        node_selector = {
+          "topology.kubernetes.io/zone" = "us-central1-a"
+        }
         service_account_name = kubernetes_service_account.kellnr_ksa.metadata[0].name
 
         # 1. Kellnr Container
