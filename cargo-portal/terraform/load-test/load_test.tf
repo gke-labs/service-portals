@@ -35,6 +35,9 @@ resource "kubernetes_job" "kellnr_stress_job" {
       spec {
         restart_policy       = "OnFailure"
         service_account_name = "kellnr-ksa"
+        node_selector = {
+          "topology.kubernetes.io/zone" = "us-central1-a"
+        }
 
         container {
           name    = "load-generator"
