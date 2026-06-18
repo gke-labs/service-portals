@@ -35,10 +35,24 @@ resource "kubernetes_job" "kellnr_stress_job" {
       spec {
         restart_policy       = "OnFailure"
         service_account_name = "kellnr-ksa"
-        node_selector = merge(
-          { "topology.kubernetes.io/zone" = "us-central1-a" },
-          var.node_selector
-        )
+        node_selector = var.node_selector
+
+        affinity {
+          pod_anti_affinity {
+            required_during_scheduling_ignored_during_execution {
+              label_selector {
+                match_expressions {
+                  key      = "app"
+                  operator = "In"
+                  values   = ["kellnr-stress", "kellnr"]
+                }
+              }
+              topology_key = "kubernetes.io/hostname"
+            }
+          }
+        }
+
+
 
         container {
           name    = "load-generator"

@@ -176,7 +176,8 @@ resource "kubernetes_deployment" "kellnr_deployment" {
       }
       spec {
         node_selector = {
-          "topology.kubernetes.io/zone" = "us-central1-a"
+          "topology.kubernetes.io/zone"     = "us-central1-a"
+          "cloud.google.com/machine-family" = "n2"
         }
         service_account_name = kubernetes_service_account.kellnr_ksa.metadata[0].name
 
@@ -260,7 +261,7 @@ resource "kubernetes_deployment" "kellnr_deployment" {
           }
           env {
             name  = "KELLNR_REGISTRY__MAX_DB_CONNECTIONS"
-            value = "30"
+            value = "100"
           }
           env {
             name  = "KELLNR_LOG__LEVEL"
@@ -350,8 +351,8 @@ resource "kubernetes_deployment" "kellnr_deployment" {
 
           resources {
             limits = {
-              cpu    = "1"
-              memory = "2Gi"
+              cpu    = local.cfg.kellnr_cpu
+              memory = local.cfg.kellnr_memory
             }
             requests = {
               cpu    = local.cfg.kellnr_cpu

@@ -1,15 +1,31 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+# Terraform
+.terraform/
+.terraform.d/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
 
-# Test binary, built with `go test -c`
-*.test
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock
+**/Cargo.lock
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
+# Test Results
+cargo-portal/results-*/
+cargo-portal/stress-test/results_*/
+cargo-portal/results-warmed/
+cargo-portal/results-1n*/
+cargo-portal/results-2n*/
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# Logs
+cargo-portal/stress-test/*.log
+cargo-portal/stress-test/*.csv
+
+# Packages lists
+cargo-portal/packages*.txt
+cargo-portal/terraform/load-test/packages.txt
+
+# Test directories
+cargo-portal/terraform-1n/
+cargo-portal/terraform-2n/
