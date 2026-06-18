@@ -53,6 +53,27 @@ If you already have a GKE cluster running with a Cloud SQL PostgreSQL database, 
 
 ---
 
+## 🔒 Security & Access Control (CDN Lockdown)
+
+By default, deploying an Ingress with Cloud CDN exposes the endpoint to the public internet. To prevent unauthorized external users from abusing your proxy (which could lead to high storage egress and CDN costs), the deployment is configured with **Google Cloud Armor** protection by default.
+
+### How it works:
+1.  **VPC NAT IP Allowlisting**: The Cloud Armor policy automatically allows traffic originating from the GKE cluster's **Cloud NAT IP**. This ensures GKE nodes can always reach the proxy internally through the public Load Balancer (required for Cloud CDN routing).
+2.  **Explicit IP Allowlisting**: You can specify additional external IP ranges (e.g., corporate office VPNs, CI/CD runners) that are allowed to access the registry.
+3.  **Default Deny**: All other traffic from the public internet is blocked at the Google Front End (GFE) edge with an `HTTP 403 Forbidden` response, protecting your backend from unauthorized bandwidth consumption.
+
+### Configuration (Terraform):
+In `terraform/infra/terraform.tfvars`, configure the `allowed_ip_ranges` variable:
+```hcl
+allowed_ip_ranges = [
+  "192.0.2.0/24",  # Example: Corporate office range
+  "203.0.113.5/32" # Example: Specific CI/CD runner host IP
+]
+```
+If left empty, **only** the GKE cluster (via its NAT IP) will be able to access the registry.
+
+---
+
 ## ⚙️ Cargo Client Configuration
 
 To configure your local Cargo client or CI/CD runner to fetch dependencies from the caching proxy:

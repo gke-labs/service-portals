@@ -17,11 +17,17 @@ resource "google_compute_router" "kellnr_router" {
   region  = var.region
 }
 
+resource "google_compute_address" "nat_ip" {
+  name   = "kellnr-nat-ip"
+  region = var.region
+}
+
 resource "google_compute_router_nat" "kellnr_nat" {
   name                               = "kellnr-nat"
   router                             = google_compute_router.kellnr_router.name
   region                             = var.region
-  nat_ip_allocate_option             = "AUTO_ONLY"
+  nat_ip_allocate_option             = "MANUAL_ONLY"
+  nat_ips                            = [google_compute_address.nat_ip.self_link]
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
@@ -44,10 +50,10 @@ resource "google_compute_security_policy" "cloud_armor_policy" {
     match {
       versioned_expr = "SRC_IPS_V1"
       config {
-        src_ip_ranges = var.allowed_ip_ranges
+        src_ip_ranges = concat(["${google_compute_address.nat_ip.address}/32"], var.allowed_ip_ranges)
       }
     }
-    description = "Allow access from approved ranges"
+    description = "Allow access from approved ranges and Cloud NAT"
   }
 
   rule {

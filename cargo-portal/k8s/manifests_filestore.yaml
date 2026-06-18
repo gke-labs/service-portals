@@ -1,0 +1,203 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kellnr
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kellnr-ksa
+  namespace: kellnr
+  annotations:
+    iam.gke.io/gcp-service-account: "kellnr-gsa@rust-dem.iam.gserviceaccount.com"
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: kellnr-backend-config
+  namespace: kellnr
+spec:
+  cdn:
+    enabled: true
+    cacheMode: FORCE_CACHE_ALL
+    defaultTtl: 300
+    clientTtl: 300
+    cachePolicy:
+      includeHost: true
+      includeProtocol: true
+      includeQueryString: false
+  securityPolicy:
+    name: "kellnr-security-policy"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kellnr-service
+  namespace: kellnr
+  annotations:
+    cloud.google.com/backend-config: '{"default": "kellnr-backend-config"}'
+spec:
+  selector:
+    app: kellnr
+  ports:
+    - port: 80
+      targetPort: 8000
+      protocol: TCP
+  type: NodePort
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kellnr-ingress
+  namespace: kellnr
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: "kellnr-static-ip"
+    kubernetes.io/ingress.class: "gce"
+spec:
+  defaultBackend:
+    service:
+      name: kellnr-service
+      port:
+        number: 80
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: kellnr-filestore-pv
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    path: /vol1
+    server: 10.47.158.186
+  persistentVolumeReclaimPolicy: Retain
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kellnr-storage-pvc
+  namespace: kellnr
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Ti
+  volumeName: kellnr-filestore-pv
+  storageClassName: "" # Statically provisioned
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kellnr-deployment
+  namespace: kellnr
+  labels:
+    app: kellnr
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kellnr
+  template:
+    metadata:
+      labels:
+        app: kellnr
+    spec:
+      serviceAccountName: kellnr-ksa
+      nodeSelector:
+        cloud.google.com/machine-family: n2
+        cloud.google.com/pods-per-node: any
+        topology.kubernetes.io/zone: us-central1-a
+      tolerations:
+      - effect: NoSchedule
+        key: cloud.google.com/machine-family
+        operator: Equal
+        value: n2
+      - effect: NoSchedule
+        key: kubernetes.io/arch
+        operator: Equal
+        value: amd64
+      - effect: NoSchedule
+        key: cloud.google.com/pods-per-node
+        operator: Equal
+        value: any
+      containers:
+        # 1. Kellnr Core Container
+        - name: kellnr
+          image: ghcr.io/kellnr/kellnr:5
+          ports:
+            - containerPort: 8000
+          env:
+            - name: KELLNR_PROXY__ENABLED
+              value: "true"
+            - name: KELLNR_OAUTH2__ENABLED
+              value: "false"
+            
+            # DB Configuration
+            - name: KELLNR_POSTGRESQL__ENABLED
+              value: "true"
+            - name: KELLNR_POSTGRESQL__ADDRESS
+              value: "127.0.0.1"
+            - name: KELLNR_POSTGRESQL__PORT
+              value: "5432"
+            - name: KELLNR_POSTGRESQL__DB
+              value: "kellnr_db"
+            - name: KELLNR_POSTGRESQL__USER
+              value: "kellnr_user"
+            - name: KELLNR_POSTGRESQL__PWD
+              valueFrom:
+                secretKeyRef:
+                  name: kellnr-secrets
+                  key: db_password
+
+            # Origin settings
+            - name: KELLNR_ORIGIN__HOSTNAME
+              value: "35.190.115.105"
+            - name: KELLNR_ORIGIN__PORT
+              value: "80"
+            - name: KELLNR_ORIGIN__HTTPS
+              value: "false"
+
+            - name: KELLNR_REGISTRY__DATA_DIR
+              value: "/data"
+            - name: RUST_LOG
+              value: "debug,kellnr=debug"
+
+            # Filestore (local) storage backend configuration
+            - name: KELLNR_S3__ENABLED
+              value: "false"
+
+          volumeMounts:
+            - name: kellnr-storage-volume
+              mountPath: /data
+          resources:
+            limits:
+              cpu: "1"
+              memory: 2Gi
+            requests:
+              cpu: "200m"
+              memory: 512Mi
+
+        # 2. Cloud SQL Proxy Sidecar
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.1.0
+          args:
+            - "rust-dem:us-central1:kellnr-postgres"
+            - "--port=5432"
+          securityContext:
+            runAsNonRoot: true
+          resources:
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+            requests:
+              cpu: "100m"
+              memory: 128Mi
+
+      volumes:
+        - name: kellnr-storage-volume
+          persistentVolumeClaim:
+            claimName: kellnr-storage-pvc

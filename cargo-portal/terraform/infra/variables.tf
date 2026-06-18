@@ -28,6 +28,6 @@ variable "deployment_option" {
 
 variable "allowed_ip_ranges" {
   type        = list(string)
-  default     = ["0.0.0.0/0"]
+  default     = []
   description = "IP ranges allowed to access the Ingress. Used by Cloud Armor. Set to specific corporate ranges to restrict access."
 }
