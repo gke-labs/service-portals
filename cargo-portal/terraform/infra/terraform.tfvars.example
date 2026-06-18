@@ -1,0 +1,14 @@
+# The GCP Project ID to deploy resources to
+project_id = "YOUR_PROJECT_ID"
+
+# The GCP region and zone for resources
+region = "us-central1"
+zone   = "us-central1-a"
+
+# Select the deployment option: 
+# Options: gke_cdn_gcs, gke_cdn_filestore, gke_only_2node_gcs, gke_only_2node_filestore, gke_only_1node_gcs, gke_only_1node_filestore
+deployment_option = "gke_cdn_gcs"
+
+# IP ranges allowed to access the Ingress Load Balancer (Cloud Armor).
+# Set to specific corporate ranges to restrict access.
+allowed_ip_ranges = ["0.0.0.0/0"]

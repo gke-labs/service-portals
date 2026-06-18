@@ -1,0 +1,14 @@
+# Local active variable files (contains private project IDs)
+*.tfvars
+*.tfvars.json
+
+# Local terraform execution state directories
+.terraform/
+.terraform.lock.hcl
+
+# State history files
+terraform.tfstate
+terraform.tfstate.backup
+
+# Telemetry and checkpoint directories
+.terraform.d/
