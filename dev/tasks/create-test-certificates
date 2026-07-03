@@ -1,0 +1,118 @@
+#!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -euo pipefail
+
+# Default configuration
+DEFAULT_OUT_DIR="certs"
+DEFAULT_DOMAINS=(
+  "localhost"
+  "127.0.0.1"
+  "gemini.backend"
+  "github.backend"
+  "anthropic.backend"
+)
+
+# Parse command line arguments
+OUT_DIR="${1:-$DEFAULT_OUT_DIR}"
+shift || true
+
+if [ $# -gt 0 ]; then
+  DOMAINS=("$@")
+else
+  DOMAINS=("${DEFAULT_DOMAINS[@]}")
+fi
+
+echo "Creating test certificates in: ${OUT_DIR}"
+echo "Subject Alternative Names (SANs): ${DOMAINS[*]}"
+
+# Create directories
+mkdir -p "${OUT_DIR}/ca"
+mkdir -p "${OUT_DIR}/signed"
+
+# Temporary files for CSR configuration
+TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+CSR_FILE="${TMP_DIR}/req.csr"
+EXT_FILE="${TMP_DIR}/ext.cnf"
+
+# 1. Generate CA private key and self-signed certificate
+echo "Generating CA private key and certificate..."
+openssl genrsa -out "${OUT_DIR}/ca.key" 2048
+openssl req -x509 -new -nodes -key "${OUT_DIR}/ca.key" -sha256 -days 3650 \
+  -out "${OUT_DIR}/ca.crt" \
+  -subj "/CN=Local Test CA/O=Local Test"
+
+# Copy CA files to ca/ subdirectory as tls.key and tls.crt to match K8s structure
+cp "${OUT_DIR}/ca.key" "${OUT_DIR}/ca/tls.key"
+cp "${OUT_DIR}/ca.crt" "${OUT_DIR}/ca/tls.crt"
+
+# 2. Generate private key for the signed certificate
+echo "Generating signed certificate private key..."
+openssl genrsa -out "${OUT_DIR}/tls.key" 2048
+
+# 3. Generate Certificate Signing Request (CSR)
+echo "Generating Certificate Signing Request (CSR)..."
+openssl req -new -key "${OUT_DIR}/tls.key" -out "$CSR_FILE" \
+  -subj "/CN=Local Test Service/O=Local Test"
+
+# 4. Prepare extension config file for SAN
+echo "authorityKeyIdentifier=keyid,issuer" > "$EXT_FILE"
+echo "basicConstraints=CA:FALSE" >> "$EXT_FILE"
+echo "keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment" >> "$EXT_FILE"
+echo "subjectAltName = @alt_names" >> "$EXT_FILE"
+echo "" >> "$EXT_FILE"
+echo "[alt_names]" >> "$EXT_FILE"
+
+dns_idx=1
+ip_idx=1
+for domain in "${DOMAINS[@]}"; do
+  # Very basic regex to check for IP addresses
+  if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "IP.${ip_idx} = ${domain}" >> "$EXT_FILE"
+    ip_idx=$((ip_idx + 1))
+  else
+    echo "DNS.${dns_idx} = ${domain}" >> "$EXT_FILE"
+    dns_idx=$((dns_idx + 1))
+  fi
+done
+
+# 5. Sign the certificate with the CA
+echo "Signing certificate with CA..."
+openssl x509 -req -in "$CSR_FILE" \
+  -CA "${OUT_DIR}/ca.crt" \
+  -CAkey "${OUT_DIR}/ca.key" \
+  -CAcreateserial \
+  -out "${OUT_DIR}/tls.crt" \
+  -days 365 \
+  -sha256 \
+  -extfile "$EXT_FILE"
+
+# Copy signed files to signed/ subdirectory as tls.key and tls.crt to match K8s structure
+cp "${OUT_DIR}/tls.key" "${OUT_DIR}/signed/tls.key"
+cp "${OUT_DIR}/tls.crt" "${OUT_DIR}/signed/tls.crt"
+
+echo "=================================================="
+echo "Certificates successfully generated!"
+echo "=================================================="
+echo "Root CA:"
+echo "  - Private Key: ${OUT_DIR}/ca.key (also ${OUT_DIR}/ca/tls.key)"
+echo "  - Certificate: ${OUT_DIR}/ca.crt (also ${OUT_DIR}/ca/tls.crt)"
+echo ""
+echo "Signed Certificate (for SANs: ${DOMAINS[*]}):"
+echo "  - Private Key: ${OUT_DIR}/tls.key (also ${OUT_DIR}/signed/tls.key)"
+echo "  - Certificate: ${OUT_DIR}/tls.crt (also ${OUT_DIR}/signed/tls.crt)"
+echo "=================================================="
