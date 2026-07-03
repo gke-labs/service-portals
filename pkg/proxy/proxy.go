@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type HTTPProxy struct {
@@ -56,6 +58,10 @@ func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, 
 		AuthHeader: authHeader,
 		certs:      make(map[string]*tls.Certificate),
 		Transport:  http.DefaultTransport,
+	}
+
+	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+		p.Transport = otelhttp.NewTransport(p.Transport)
 	}
 
 	if caCertPath != "" && caKeyPath != "" {

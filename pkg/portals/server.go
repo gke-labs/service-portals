@@ -28,6 +28,9 @@ import (
 
 	"github.com/gke-labs/service-portals/pkg/cache"
 	"github.com/gke-labs/service-portals/pkg/proxy"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 type CertificateProvider interface {
@@ -141,6 +144,10 @@ func Run(ctx context.Context, config Config) error {
 		handler = rr
 	}
 
+	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -151,16 +158,22 @@ func Run(ctx context.Context, config Config) error {
 		httpsPort = "8443"
 	}
 
+	servedHandler := handler
+	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+		servedHandler = otelhttp.NewHandler(handler, "service-portal")
+		log.Println("OpenTelemetry server instrumentation enabled")
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + port,
-		Handler: handler,
+		Handler: servedHandler,
 	}
 
 	var httpsSrv *http.Server
 	if certProv, ok := handler.(CertificateProvider); ok {
 		httpsSrv = &http.Server{
 			Addr:    ":" + httpsPort,
-			Handler: handler,
+			Handler: servedHandler,
 			TLSConfig: &tls.Config{
 				GetCertificate: certProv.GetCertificate,
 			},
