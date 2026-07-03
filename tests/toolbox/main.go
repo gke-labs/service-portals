@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
@@ -78,10 +79,19 @@ func runServer() {
 }
 
 func runClient(targetURL string) {
-	log.Printf("Sending request to %s", targetURL)
-	resp, err := http.Get(targetURL)
+	var resp *http.Response
+	var err error
+	for i := 1; i <= 10; i++ {
+		log.Printf("Sending request to %s (attempt %d/10)", targetURL, i)
+		resp, err = http.Get(targetURL)
+		if err == nil {
+			break
+		}
+		log.Printf("Request failed: %v. Retrying in 2s...", err)
+		time.Sleep(2 * time.Second)
+	}
 	if err != nil {
-		log.Fatalf("Request failed: %v", err)
+		log.Fatalf("Request failed after 10 attempts: %v", err)
 	}
 	defer resp.Body.Close()
 

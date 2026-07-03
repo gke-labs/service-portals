@@ -323,7 +323,7 @@ spec:
   - name: toolbox
     image: toolbox:e2e
     imagePullPolicy: Never
-    command: ["/bin/sh", "-c", "wget -qO- --header='Host: gemini.backend' http://all-in-one-portal:80"]
+    command: ["/bin/sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do wget -qO- --header='Host: gemini.backend' http://all-in-one-portal:80 && exit 0; echo 'wget failed, retrying in 2s...'; sleep 2; done; exit 1"]
   restartPolicy: Never
 `
 	h.KubectlApplyContent(clientManifestGemini)
@@ -356,7 +356,7 @@ spec:
   - name: toolbox
     image: toolbox:e2e
     imagePullPolicy: Never
-    command: ["/bin/sh", "-c", "wget -qO- --header='Host: github.backend' http://all-in-one-portal:80"]
+    command: ["/bin/sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do wget -qO- --header='Host: github.backend' http://all-in-one-portal:80 && exit 0; echo 'wget failed, retrying in 2s...'; sleep 2; done; exit 1"]
   restartPolicy: Never
 `
 	h.KubectlApplyContent(clientManifestGithub)
