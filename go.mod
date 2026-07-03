@@ -1,6 +1,6 @@
 module github.com/gke-labs/service-portals
 
-go 1.26.0
+go 1.26.4
 
 require (
 	cloud.google.com/go/ai v0.18.0

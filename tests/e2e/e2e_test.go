@@ -79,6 +79,7 @@ spec:
 `
 	h.KubectlApplyContent(backendManifest)
 	h.WaitForDeployment("backend", 2*time.Minute)
+	h.WaitForServiceEndpoints("backend", 1*time.Minute)
 
 	// Deploy Service Portal
 	h.KubectlApplyContent(`
@@ -126,6 +127,7 @@ stringData:
 	// Restart service-portal to ensure it picks up the CA secret (it might have started before the secret was created)
 	h.RunCommand("kubectl", "rollout", "restart", "deployment/service-portal")
 	h.WaitForDeployment("service-portal", 2*time.Minute)
+	h.WaitForServiceEndpoints("service-portal", 1*time.Minute)
 
 	// Run Client
 	clientPodName := "test-client"
@@ -231,6 +233,7 @@ spec:
 `
 	h.KubectlApplyContent(backendManifest)
 	h.WaitForDeployment("backend", 2*time.Minute)
+	h.WaitForServiceEndpoints("backend", 1*time.Minute)
 
 	// Deploy All-In-One Portal
 	h.KubectlApplyContent(`
@@ -306,6 +309,7 @@ spec:
 `
 	h.KubectlApplyContent(portalManifest)
 	h.WaitForDeployment("all-in-one-portal", 2*time.Minute)
+	h.WaitForServiceEndpoints("all-in-one-portal", 1*time.Minute)
 
 	// Run Client 1: Gemini
 	clientPodNameGemini := "test-client-gemini"
@@ -323,7 +327,7 @@ spec:
   - name: toolbox
     image: toolbox:e2e
     imagePullPolicy: Never
-    command: ["/bin/sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do wget -qO- --header='Host: gemini.backend' http://all-in-one-portal:80 && exit 0; echo 'wget failed, retrying in 2s...'; sleep 2; done; exit 1"]
+    command: ["/bin/sh", "-c", "wget -qO- --header='Host: gemini.backend' http://all-in-one-portal:80"]
   restartPolicy: Never
 `
 	h.KubectlApplyContent(clientManifestGemini)
@@ -356,7 +360,7 @@ spec:
   - name: toolbox
     image: toolbox:e2e
     imagePullPolicy: Never
-    command: ["/bin/sh", "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do wget -qO- --header='Host: github.backend' http://all-in-one-portal:80 && exit 0; echo 'wget failed, retrying in 2s...'; sleep 2; done; exit 1"]
+    command: ["/bin/sh", "-c", "wget -qO- --header='Host: github.backend' http://all-in-one-portal:80"]
   restartPolicy: Never
 `
 	h.KubectlApplyContent(clientManifestGithub)
@@ -432,6 +436,7 @@ spec:
 `
 	h.KubectlApplyContent(backendManifest)
 	h.WaitForDeployment("backend", 2*time.Minute)
+	h.WaitForServiceEndpoints("backend", 1*time.Minute)
 
 	// Deploy Client Pod with Sidecar
 	clientPodName := "test-client-sidecar"
