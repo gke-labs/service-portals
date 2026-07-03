@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # Default configuration
-DEFAULT_OUT_DIR="certs"
+DEFAULT_OUT_DIR=".build/certs"
 DEFAULT_DOMAINS=(
   "localhost"
   "127.0.0.1"
