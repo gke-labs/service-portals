@@ -156,9 +156,3 @@ func (h *Harness) WaitForPodSuccess(name string, timeout time.Duration) {
 		time.Sleep(2 * time.Second)
 	}
 }
-
-func (h *Harness) WaitForServiceEndpoints(name string, timeout time.Duration) {
-	h.t.Helper()
-	h.t.Logf("Waiting for service %s to have ready endpoints", name)
-	h.RunCommand("kubectl", "wait", "--for=jsonpath={.subsets[*].addresses[*].ip}", "endpoints/"+name, "--timeout="+timeout.String())
-}

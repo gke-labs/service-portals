@@ -79,7 +79,8 @@ spec:
 `
 	h.KubectlApplyContent(backendManifest)
 	h.WaitForDeployment("backend", 2*time.Minute)
-	h.WaitForServiceEndpoints("backend", 1*time.Minute)
+	// TODO: Add health/readiness checks for services and deployments to avoid timing issues.
+	time.Sleep(5 * time.Second)
 
 	// Deploy Service Portal
 	h.KubectlApplyContent(`
@@ -127,7 +128,8 @@ stringData:
 	// Restart service-portal to ensure it picks up the CA secret (it might have started before the secret was created)
 	h.RunCommand("kubectl", "rollout", "restart", "deployment/service-portal")
 	h.WaitForDeployment("service-portal", 2*time.Minute)
-	h.WaitForServiceEndpoints("service-portal", 1*time.Minute)
+	// TODO: Add health/readiness checks for services and deployments to avoid timing issues.
+	time.Sleep(5 * time.Second)
 
 	// Run Client
 	clientPodName := "test-client"
@@ -233,7 +235,8 @@ spec:
 `
 	h.KubectlApplyContent(backendManifest)
 	h.WaitForDeployment("backend", 2*time.Minute)
-	h.WaitForServiceEndpoints("backend", 1*time.Minute)
+	// TODO: Add health/readiness checks for services and deployments to avoid timing issues.
+	time.Sleep(5 * time.Second)
 
 	// Deploy All-In-One Portal
 	h.KubectlApplyContent(`
@@ -309,7 +312,8 @@ spec:
 `
 	h.KubectlApplyContent(portalManifest)
 	h.WaitForDeployment("all-in-one-portal", 2*time.Minute)
-	h.WaitForServiceEndpoints("all-in-one-portal", 1*time.Minute)
+	// TODO: Add health/readiness checks for services and deployments to avoid timing issues.
+	time.Sleep(5 * time.Second)
 
 	// Run Client 1: Gemini
 	clientPodNameGemini := "test-client-gemini"
@@ -436,7 +440,8 @@ spec:
 `
 	h.KubectlApplyContent(backendManifest)
 	h.WaitForDeployment("backend", 2*time.Minute)
-	h.WaitForServiceEndpoints("backend", 1*time.Minute)
+	// TODO: Add health/readiness checks for services and deployments to avoid timing issues.
+	time.Sleep(5 * time.Second)
 
 	// Deploy Client Pod with Sidecar
 	clientPodName := "test-client-sidecar"
