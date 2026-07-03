@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.4-alpine AS builder
 WORKDIR /app
 COPY main.go .
-RUN go build -o toolbox main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o toolbox main.go
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && rm -rf /var/lib/apt/lists/*
