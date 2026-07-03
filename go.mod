@@ -5,7 +5,7 @@ go 1.26
 toolchain go1.26.4
 
 require (
-	cloud.google.com/go/ai v0.18.0
+	cloud.google.com/go/ai v1.0.0
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 	sigs.k8s.io/yaml v1.6.0
