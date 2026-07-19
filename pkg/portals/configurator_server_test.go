@@ -152,7 +152,7 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 	grpcPort := getFreePort(t)
 
 	// 4. Run server using explicit RouterOptions (Isolated from env variables)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
 	opts := RouterOptions{

@@ -127,11 +127,10 @@ func (s *ConfiguratorServer) GetSecurityPolicy(ctx context.Context, req *pb.GetS
 }
 
 func (s *ConfiguratorServer) SetSecret(ctx context.Context, req *pb.SetSecretRequest) (*pb.SetSecretResponse, error) {
-	sec := req.GetSecret()
-	if sec == nil || sec.GetMetadata() == nil || sec.GetMetadata().GetName() == "" {
+	if req.GetSecret().GetMetadata().GetName() == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "secret name must be provided")
 	}
-	s.router.SetSecret(sec.GetMetadata().GetName(), sec.GetValue())
+	s.router.SetSecret(req.GetSecret().GetMetadata().GetName(), req.GetSecret().GetValue())
 	return &pb.SetSecretResponse{}, nil
 }
 
