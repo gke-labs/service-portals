@@ -17,8 +17,10 @@ package portals
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,10 +29,14 @@ import (
 	"time"
 
 	"github.com/gke-labs/service-portals/pkg/cache"
+	pb "github.com/gke-labs/service-portals/pkg/portals/proto"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 type CertificateProvider interface {
@@ -45,6 +51,27 @@ type Config struct {
 	RulesDir          string
 }
 
+// RouterOptions defines all configuration parameters for the router and servers.
+type RouterOptions struct {
+	TargetURL            string
+	UpstreamAuthToken    string
+	UpstreamAuthHeader   string
+	CacheTTL             time.Duration
+	CacheCleanupInterval time.Duration
+	RulesDir             string
+	Port                 string
+	HTTPSPort            string
+	GrpcPort             string
+	CaCertPath           string
+	CaKeyPath            string
+	GrpcTLSCertPath      string
+	GrpcTLSKeyPath       string
+	GrpcClientCAPath     string
+	OtelEnabled          bool
+	SetupProxy           func(*proxy.HTTPProxy)
+}
+
+// Run implements the legacy entry point by translating environment variables into RouterOptions.
 func Run(ctx context.Context, config Config) error {
 	target := os.Getenv("TARGET_URL")
 	if target == "" {
@@ -68,20 +95,9 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
-	targetURL, err := url.Parse(target)
-	if err != nil {
-		return fmt.Errorf("invalid TARGET_URL: %w", err)
-	}
-
 	caCertPath := os.Getenv("CA_CERT_PATH")
 	caKeyPath := os.Getenv("CA_KEY_PATH")
 
-	p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
-	if err != nil {
-		return fmt.Errorf("failed to create proxy: %w", err)
-	}
-
-	var c *cache.InMemoryCache
 	cacheTTL := config.CacheTTL
 	if cacheTTLEnv := os.Getenv("CACHE_TTL"); cacheTTLEnv != "" {
 		if d, err := time.ParseDuration(cacheTTLEnv); err == nil {
@@ -91,23 +107,13 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
-	if cacheTTL > 0 {
-		cleanupInterval := 1 * time.Minute
-		if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
-			if d, err := time.ParseDuration(cleanupEnv); err == nil {
-				cleanupInterval = d
-			} else {
-				log.Printf("Warning: invalid CACHE_CLEANUP_INTERVAL %q: %v", cleanupEnv, err)
-			}
+	cleanupInterval := 1 * time.Minute
+	if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
+		if d, err := time.ParseDuration(cleanupEnv); err == nil {
+			cleanupInterval = d
+		} else {
+			log.Printf("Warning: invalid CACHE_CLEANUP_INTERVAL %q: %v", cleanupEnv, err)
 		}
-
-		c = cache.NewInMemoryCache(cleanupInterval)
-		p.Transport = proxy.NewCachingTransport(c, p.Transport, cacheTTL)
-		log.Printf("Enabled caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
-	}
-
-	if config.SetupProxy != nil {
-		config.SetupProxy(p)
 	}
 
 	rulesDir := config.RulesDir
@@ -115,10 +121,98 @@ func Run(ctx context.Context, config Config) error {
 		rulesDir = os.Getenv("RULES_DIR")
 	}
 
-	var handler http.Handler = p
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
 
-	if rulesDir != "" {
-		rr := NewRuleRouter(rulesDir, p, caCertPath, caKeyPath, cacheTTL, c)
+	httpsPort := os.Getenv("HTTPS_PORT")
+	if httpsPort == "" {
+		httpsPort = "8443"
+	}
+
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = "8082"
+	}
+
+	grpcTLSCertPath := os.Getenv("GRPC_TLS_CERT_PATH")
+	if grpcTLSCertPath == "" {
+		grpcTLSCertPath = os.Getenv("TLS_CERT_PATH")
+	}
+	if grpcTLSCertPath == "" {
+		grpcTLSCertPath = caCertPath
+	}
+
+	grpcTLSKeyPath := os.Getenv("GRPC_TLS_KEY_PATH")
+	if grpcTLSKeyPath == "" {
+		grpcTLSKeyPath = os.Getenv("TLS_KEY_PATH")
+	}
+	if grpcTLSKeyPath == "" {
+		grpcTLSKeyPath = caKeyPath
+	}
+
+	grpcClientCAPath := os.Getenv("GRPC_CLIENT_CA_PATH")
+	if grpcClientCAPath == "" {
+		grpcClientCAPath = os.Getenv("CLIENT_CA_PATH")
+	}
+	if grpcClientCAPath == "" {
+		grpcClientCAPath = caCertPath
+	}
+
+	otelEnabled := os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true"
+
+	opts := RouterOptions{
+		TargetURL:            target,
+		UpstreamAuthToken:    upstreamAuthToken,
+		UpstreamAuthHeader:   upstreamAuthHeader,
+		CacheTTL:             cacheTTL,
+		CacheCleanupInterval: cleanupInterval,
+		RulesDir:             rulesDir,
+		Port:                 port,
+		HTTPSPort:            httpsPort,
+		GrpcPort:             grpcPort,
+		CaCertPath:           caCertPath,
+		CaKeyPath:            caKeyPath,
+		GrpcTLSCertPath:      grpcTLSCertPath,
+		GrpcTLSKeyPath:       grpcTLSKeyPath,
+		GrpcClientCAPath:     grpcClientCAPath,
+		OtelEnabled:          otelEnabled,
+		SetupProxy:           config.SetupProxy,
+	}
+
+	return RunRouter(ctx, opts)
+}
+
+// RunRouter executes the router using explicit options, completely isolated from env/flags.
+func RunRouter(ctx context.Context, opts RouterOptions) error {
+	targetURL, err := url.Parse(opts.TargetURL)
+	if err != nil {
+		return fmt.Errorf("invalid TargetURL %q: %w", opts.TargetURL, err)
+	}
+
+	p, err := proxy.NewHTTPProxy(targetURL, opts.UpstreamAuthToken, opts.UpstreamAuthHeader, opts.CaCertPath, opts.CaKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to create proxy: %w", err)
+	}
+
+	var c *cache.InMemoryCache
+	if opts.CacheTTL > 0 {
+		cleanupInterval := opts.CacheCleanupInterval
+		if cleanupInterval == 0 {
+			cleanupInterval = 1 * time.Minute
+		}
+		c = cache.NewInMemoryCache(cleanupInterval)
+		p.Transport = proxy.NewCachingTransport(c, p.Transport, opts.CacheTTL)
+		log.Printf("Enabled caching with TTL %v (cleanup interval %v)", opts.CacheTTL, cleanupInterval)
+	}
+
+	if opts.SetupProxy != nil {
+		opts.SetupProxy(p)
+	}
+
+	rr := NewRuleRouter(opts.RulesDir, p, opts.CaCertPath, opts.CaKeyPath, opts.CacheTTL, c)
+	if opts.RulesDir != "" {
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}
@@ -140,39 +234,69 @@ func Run(ctx context.Context, config Config) error {
 				}
 			}
 		}()
-
-		handler = rr
 	}
 
-	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+	var handler http.Handler = rr
+
+	if opts.OtelEnabled {
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	var grpcServer *grpc.Server
+
+	if opts.GrpcTLSCertPath != "" && opts.GrpcTLSKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(opts.GrpcTLSCertPath, opts.GrpcTLSKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to load gRPC server key pair: %w", err)
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+
+		if opts.GrpcClientCAPath != "" {
+			caPem, err := os.ReadFile(opts.GrpcClientCAPath)
+			if err != nil {
+				return fmt.Errorf("failed to read gRPC client CA file: %w", err)
+			}
+			certPool := x509.NewCertPool()
+			if !certPool.AppendCertsFromPEM(caPem) {
+				return fmt.Errorf("failed to append client CA certs")
+			}
+			tlsConfig.ClientCAs = certPool
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+
+		creds := credentials.NewTLS(tlsConfig)
+		grpcServer = grpc.NewServer(grpc.Creds(creds))
+		log.Println("gRPC server configured with mTLS")
+	} else {
+		grpcServer = grpc.NewServer()
+		log.Println("gRPC server configured without TLS (insecure)")
 	}
 
-	httpsPort := os.Getenv("HTTPS_PORT")
-	if httpsPort == "" {
-		httpsPort = "8443"
+	pb.RegisterSidecarReconfiguratorServer(grpcServer, NewConfiguratorServer(rr))
+
+	lis, err := net.Listen("tcp", ":"+opts.GrpcPort)
+	if err != nil {
+		return fmt.Errorf("failed to listen on gRPC port %s: %w", opts.GrpcPort, err)
 	}
 
 	servedHandler := handler
-	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+	if opts.OtelEnabled {
 		servedHandler = otelhttp.NewHandler(handler, "service-portal")
 		log.Println("OpenTelemetry server instrumentation enabled")
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    ":" + opts.Port,
 		Handler: servedHandler,
 	}
 
 	var httpsSrv *http.Server
 	if certProv, ok := handler.(CertificateProvider); ok {
 		httpsSrv = &http.Server{
-			Addr:    ":" + httpsPort,
+			Addr:    ":" + opts.HTTPSPort,
 			Handler: servedHandler,
 			TLSConfig: &tls.Config{
 				GetCertificate: certProv.GetCertificate,
@@ -180,30 +304,43 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
-	errChan := make(chan error, 2)
-	go func() {
-		log.Printf("Starting HTTP proxy on :%s forwarding to %s", port, target)
+	g, groupCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		log.Printf("Starting HTTP proxy on :%s forwarding to %s", opts.Port, opts.TargetURL)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errChan <- fmt.Errorf("HTTP server failed: %w", err)
+			return fmt.Errorf("HTTP server failed: %w", err)
 		}
-	}()
+		return nil
+	})
 
 	if httpsSrv != nil {
-		go func() {
-			log.Printf("Starting HTTPS proxy on :%s forwarding to %s", httpsPort, target)
+		g.Go(func() error {
+			log.Printf("Starting HTTPS proxy on :%s forwarding to %s", opts.HTTPSPort, opts.TargetURL)
 			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				errChan <- fmt.Errorf("HTTPS server failed: %w", err)
+				return fmt.Errorf("HTTPS server failed: %w", err)
 			}
-		}()
+			return nil
+		})
 	}
 
-	select {
-	case err := <-errChan:
-		return err
-	case <-ctx.Done():
+	g.Go(func() error {
+		log.Printf("Starting gRPC configurator server on :%s", opts.GrpcPort)
+		if err := grpcServer.Serve(lis); err != nil && err != grpc.ErrServerStopped {
+			return fmt.Errorf("gRPC server failed: %w", err)
+		}
+		return nil
+	})
+
+	// Wait for context cancellation or any server failure
+	g.Go(func() error {
+		<-groupCtx.Done()
 		log.Println("Shutting down servers...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		grpcServer.GracefulStop()
+
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown failed: %v", err)
 		}
@@ -212,7 +349,8 @@ func Run(ctx context.Context, config Config) error {
 				log.Printf("HTTPS server shutdown failed: %v", err)
 			}
 		}
-	}
+		return nil
+	})
 
-	return nil
+	return g.Wait()
 }
