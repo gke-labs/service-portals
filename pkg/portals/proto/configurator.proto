@@ -21,7 +21,7 @@ option go_package = "github.com/gke-labs/service-portals/pkg/portals/proto";
 message RuleSpec {
   string host = 1;
   string rewrite_url = 2;
-  string auth_token = 3;
+  string secret_ref = 3; // Reference to a Secret message by metadata.name
   string auth_header = 4;
   string cache_ttl = 5;
 }
@@ -64,9 +64,28 @@ message GetSecurityPolicyResponse {
   SecurityPolicy policy = 1;
 }
 
+message Secret {
+  Metadata metadata = 1;
+  string value = 2;
+}
+
+message SetSecretRequest {
+  Secret secret = 1;
+}
+
+message SetSecretResponse {}
+
+message ListSecretsRequest {}
+
+message ListSecretsResponse {
+  repeated Secret secrets = 1;
+}
+
 service SidecarReconfigurator {
   rpc UpdateRules(UpdateRulesRequest) returns (UpdateRulesResponse);
   rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
   rpc SetSecurityPolicy(SetSecurityPolicyRequest) returns (SetSecurityPolicyResponse);
   rpc GetSecurityPolicy(GetSecurityPolicyRequest) returns (GetSecurityPolicyResponse);
+  rpc SetSecret(SetSecretRequest) returns (SetSecretResponse);
+  rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
 }

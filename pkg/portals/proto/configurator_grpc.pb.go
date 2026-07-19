@@ -37,6 +37,8 @@ const (
 	SidecarReconfigurator_ListRules_FullMethodName         = "/portals.SidecarReconfigurator/ListRules"
 	SidecarReconfigurator_SetSecurityPolicy_FullMethodName = "/portals.SidecarReconfigurator/SetSecurityPolicy"
 	SidecarReconfigurator_GetSecurityPolicy_FullMethodName = "/portals.SidecarReconfigurator/GetSecurityPolicy"
+	SidecarReconfigurator_SetSecret_FullMethodName         = "/portals.SidecarReconfigurator/SetSecret"
+	SidecarReconfigurator_ListSecrets_FullMethodName       = "/portals.SidecarReconfigurator/ListSecrets"
 )
 
 // SidecarReconfiguratorClient is the client API for SidecarReconfigurator service.
@@ -47,6 +49,8 @@ type SidecarReconfiguratorClient interface {
 	ListRules(ctx context.Context, in *ListRulesRequest, opts ...grpc.CallOption) (*ListRulesResponse, error)
 	SetSecurityPolicy(ctx context.Context, in *SetSecurityPolicyRequest, opts ...grpc.CallOption) (*SetSecurityPolicyResponse, error)
 	GetSecurityPolicy(ctx context.Context, in *GetSecurityPolicyRequest, opts ...grpc.CallOption) (*GetSecurityPolicyResponse, error)
+	SetSecret(ctx context.Context, in *SetSecretRequest, opts ...grpc.CallOption) (*SetSecretResponse, error)
+	ListSecrets(ctx context.Context, in *ListSecretsRequest, opts ...grpc.CallOption) (*ListSecretsResponse, error)
 }
 
 type sidecarReconfiguratorClient struct {
@@ -97,6 +101,26 @@ func (c *sidecarReconfiguratorClient) GetSecurityPolicy(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *sidecarReconfiguratorClient) SetSecret(ctx context.Context, in *SetSecretRequest, opts ...grpc.CallOption) (*SetSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetSecretResponse)
+	err := c.cc.Invoke(ctx, SidecarReconfigurator_SetSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sidecarReconfiguratorClient) ListSecrets(ctx context.Context, in *ListSecretsRequest, opts ...grpc.CallOption) (*ListSecretsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSecretsResponse)
+	err := c.cc.Invoke(ctx, SidecarReconfigurator_ListSecrets_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SidecarReconfiguratorServer is the server API for SidecarReconfigurator service.
 // All implementations must embed UnimplementedSidecarReconfiguratorServer
 // for forward compatibility.
@@ -105,6 +129,8 @@ type SidecarReconfiguratorServer interface {
 	ListRules(context.Context, *ListRulesRequest) (*ListRulesResponse, error)
 	SetSecurityPolicy(context.Context, *SetSecurityPolicyRequest) (*SetSecurityPolicyResponse, error)
 	GetSecurityPolicy(context.Context, *GetSecurityPolicyRequest) (*GetSecurityPolicyResponse, error)
+	SetSecret(context.Context, *SetSecretRequest) (*SetSecretResponse, error)
+	ListSecrets(context.Context, *ListSecretsRequest) (*ListSecretsResponse, error)
 	mustEmbedUnimplementedSidecarReconfiguratorServer()
 }
 
@@ -126,6 +152,12 @@ func (UnimplementedSidecarReconfiguratorServer) SetSecurityPolicy(context.Contex
 }
 func (UnimplementedSidecarReconfiguratorServer) GetSecurityPolicy(context.Context, *GetSecurityPolicyRequest) (*GetSecurityPolicyResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetSecurityPolicy not implemented")
+}
+func (UnimplementedSidecarReconfiguratorServer) SetSecret(context.Context, *SetSecretRequest) (*SetSecretResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetSecret not implemented")
+}
+func (UnimplementedSidecarReconfiguratorServer) ListSecrets(context.Context, *ListSecretsRequest) (*ListSecretsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListSecrets not implemented")
 }
 func (UnimplementedSidecarReconfiguratorServer) mustEmbedUnimplementedSidecarReconfiguratorServer() {}
 func (UnimplementedSidecarReconfiguratorServer) testEmbeddedByValue()                               {}
@@ -220,6 +252,42 @@ func _SidecarReconfigurator_GetSecurityPolicy_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SidecarReconfigurator_SetSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SidecarReconfiguratorServer).SetSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SidecarReconfigurator_SetSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SidecarReconfiguratorServer).SetSecret(ctx, req.(*SetSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SidecarReconfigurator_ListSecrets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSecretsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SidecarReconfiguratorServer).ListSecrets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SidecarReconfigurator_ListSecrets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SidecarReconfiguratorServer).ListSecrets(ctx, req.(*ListSecretsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SidecarReconfigurator_ServiceDesc is the grpc.ServiceDesc for SidecarReconfigurator service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -242,6 +310,14 @@ var SidecarReconfigurator_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSecurityPolicy",
 			Handler:    _SidecarReconfigurator_GetSecurityPolicy_Handler,
+		},
+		{
+			MethodName: "SetSecret",
+			Handler:    _SidecarReconfigurator_SetSecret_Handler,
+		},
+		{
+			MethodName: "ListSecrets",
+			Handler:    _SidecarReconfigurator_ListSecrets_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

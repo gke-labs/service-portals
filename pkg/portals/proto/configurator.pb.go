@@ -39,7 +39,7 @@ type RuleSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Host          string                 `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
 	RewriteUrl    string                 `protobuf:"bytes,2,opt,name=rewrite_url,json=rewriteUrl,proto3" json:"rewrite_url,omitempty"`
-	AuthToken     string                 `protobuf:"bytes,3,opt,name=auth_token,json=authToken,proto3" json:"auth_token,omitempty"`
+	SecretRef     string                 `protobuf:"bytes,3,opt,name=secret_ref,json=secretRef,proto3" json:"secret_ref,omitempty"` // Reference to a Secret message by metadata.name
 	AuthHeader    string                 `protobuf:"bytes,4,opt,name=auth_header,json=authHeader,proto3" json:"auth_header,omitempty"`
 	CacheTtl      string                 `protobuf:"bytes,5,opt,name=cache_ttl,json=cacheTtl,proto3" json:"cache_ttl,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -90,9 +90,9 @@ func (x *RuleSpec) GetRewriteUrl() string {
 	return ""
 }
 
-func (x *RuleSpec) GetAuthToken() string {
+func (x *RuleSpec) GetSecretRef() string {
 	if x != nil {
-		return x.AuthToken
+		return x.SecretRef
 	}
 	return ""
 }
@@ -579,6 +579,218 @@ func (x *GetSecurityPolicyResponse) GetPolicy() *SecurityPolicy {
 	return nil
 }
 
+type Secret struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Metadata      *Metadata              `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Secret) Reset() {
+	*x = Secret{}
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Secret) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Secret) ProtoMessage() {}
+
+func (x *Secret) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Secret.ProtoReflect.Descriptor instead.
+func (*Secret) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Secret) GetMetadata() *Metadata {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
+func (x *Secret) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+type SetSecretRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Secret        *Secret                `protobuf:"bytes,1,opt,name=secret,proto3" json:"secret,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetSecretRequest) Reset() {
+	*x = SetSecretRequest{}
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetSecretRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetSecretRequest) ProtoMessage() {}
+
+func (x *SetSecretRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetSecretRequest.ProtoReflect.Descriptor instead.
+func (*SetSecretRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *SetSecretRequest) GetSecret() *Secret {
+	if x != nil {
+		return x.Secret
+	}
+	return nil
+}
+
+type SetSecretResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetSecretResponse) Reset() {
+	*x = SetSecretResponse{}
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetSecretResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetSecretResponse) ProtoMessage() {}
+
+func (x *SetSecretResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetSecretResponse.ProtoReflect.Descriptor instead.
+func (*SetSecretResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{14}
+}
+
+type ListSecretsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSecretsRequest) Reset() {
+	*x = ListSecretsRequest{}
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSecretsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSecretsRequest) ProtoMessage() {}
+
+func (x *ListSecretsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSecretsRequest.ProtoReflect.Descriptor instead.
+func (*ListSecretsRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{15}
+}
+
+type ListSecretsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Secrets       []*Secret              `protobuf:"bytes,1,rep,name=secrets,proto3" json:"secrets,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSecretsResponse) Reset() {
+	*x = ListSecretsResponse{}
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSecretsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSecretsResponse) ProtoMessage() {}
+
+func (x *ListSecretsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_proto_configurator_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSecretsResponse.ProtoReflect.Descriptor instead.
+func (*ListSecretsResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ListSecretsResponse) GetSecrets() []*Secret {
+	if x != nil {
+		return x.Secrets
+	}
+	return nil
+}
+
 var File_pkg_portals_proto_configurator_proto protoreflect.FileDescriptor
 
 const file_pkg_portals_proto_configurator_proto_rawDesc = "" +
@@ -589,7 +801,7 @@ const file_pkg_portals_proto_configurator_proto_rawDesc = "" +
 	"\vrewrite_url\x18\x02 \x01(\tR\n" +
 	"rewriteUrl\x12\x1d\n" +
 	"\n" +
-	"auth_token\x18\x03 \x01(\tR\tauthToken\x12\x1f\n" +
+	"secret_ref\x18\x03 \x01(\tR\tsecretRef\x12\x1f\n" +
 	"\vauth_header\x18\x04 \x01(\tR\n" +
 	"authHeader\x12\x1b\n" +
 	"\tcache_ttl\x18\x05 \x01(\tR\bcacheTtl\"\x1e\n" +
@@ -614,12 +826,23 @@ const file_pkg_portals_proto_configurator_proto_rawDesc = "" +
 	"\x19SetSecurityPolicyResponse\"\x1a\n" +
 	"\x18GetSecurityPolicyRequest\"L\n" +
 	"\x19GetSecurityPolicyResponse\x12/\n" +
-	"\x06policy\x18\x01 \x01(\v2\x17.portals.SecurityPolicyR\x06policy2\xdd\x02\n" +
+	"\x06policy\x18\x01 \x01(\v2\x17.portals.SecurityPolicyR\x06policy\"M\n" +
+	"\x06Secret\x12-\n" +
+	"\bmetadata\x18\x01 \x01(\v2\x11.portals.MetadataR\bmetadata\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\";\n" +
+	"\x10SetSecretRequest\x12'\n" +
+	"\x06secret\x18\x01 \x01(\v2\x0f.portals.SecretR\x06secret\"\x13\n" +
+	"\x11SetSecretResponse\"\x14\n" +
+	"\x12ListSecretsRequest\"@\n" +
+	"\x13ListSecretsResponse\x12)\n" +
+	"\asecrets\x18\x01 \x03(\v2\x0f.portals.SecretR\asecrets2\xeb\x03\n" +
 	"\x15SidecarReconfigurator\x12H\n" +
 	"\vUpdateRules\x12\x1b.portals.UpdateRulesRequest\x1a\x1c.portals.UpdateRulesResponse\x12B\n" +
 	"\tListRules\x12\x19.portals.ListRulesRequest\x1a\x1a.portals.ListRulesResponse\x12Z\n" +
 	"\x11SetSecurityPolicy\x12!.portals.SetSecurityPolicyRequest\x1a\".portals.SetSecurityPolicyResponse\x12Z\n" +
-	"\x11GetSecurityPolicy\x12!.portals.GetSecurityPolicyRequest\x1a\".portals.GetSecurityPolicyResponseB7Z5github.com/gke-labs/service-portals/pkg/portals/protob\x06proto3"
+	"\x11GetSecurityPolicy\x12!.portals.GetSecurityPolicyRequest\x1a\".portals.GetSecurityPolicyResponse\x12B\n" +
+	"\tSetSecret\x12\x19.portals.SetSecretRequest\x1a\x1a.portals.SetSecretResponse\x12H\n" +
+	"\vListSecrets\x12\x1b.portals.ListSecretsRequest\x1a\x1c.portals.ListSecretsResponseB7Z5github.com/gke-labs/service-portals/pkg/portals/protob\x06proto3"
 
 var (
 	file_pkg_portals_proto_configurator_proto_rawDescOnce sync.Once
@@ -633,7 +856,7 @@ func file_pkg_portals_proto_configurator_proto_rawDescGZIP() []byte {
 	return file_pkg_portals_proto_configurator_proto_rawDescData
 }
 
-var file_pkg_portals_proto_configurator_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_pkg_portals_proto_configurator_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_pkg_portals_proto_configurator_proto_goTypes = []any{
 	(*RuleSpec)(nil),                  // 0: portals.RuleSpec
 	(*Metadata)(nil),                  // 1: portals.Metadata
@@ -647,6 +870,11 @@ var file_pkg_portals_proto_configurator_proto_goTypes = []any{
 	(*SetSecurityPolicyResponse)(nil), // 9: portals.SetSecurityPolicyResponse
 	(*GetSecurityPolicyRequest)(nil),  // 10: portals.GetSecurityPolicyRequest
 	(*GetSecurityPolicyResponse)(nil), // 11: portals.GetSecurityPolicyResponse
+	(*Secret)(nil),                    // 12: portals.Secret
+	(*SetSecretRequest)(nil),          // 13: portals.SetSecretRequest
+	(*SetSecretResponse)(nil),         // 14: portals.SetSecretResponse
+	(*ListSecretsRequest)(nil),        // 15: portals.ListSecretsRequest
+	(*ListSecretsResponse)(nil),       // 16: portals.ListSecretsResponse
 }
 var file_pkg_portals_proto_configurator_proto_depIdxs = []int32{
 	1,  // 0: portals.PortalRule.metadata:type_name -> portals.Metadata
@@ -655,19 +883,26 @@ var file_pkg_portals_proto_configurator_proto_depIdxs = []int32{
 	2,  // 3: portals.ListRulesResponse.rules:type_name -> portals.PortalRule
 	7,  // 4: portals.SetSecurityPolicyRequest.policy:type_name -> portals.SecurityPolicy
 	7,  // 5: portals.GetSecurityPolicyResponse.policy:type_name -> portals.SecurityPolicy
-	3,  // 6: portals.SidecarReconfigurator.UpdateRules:input_type -> portals.UpdateRulesRequest
-	5,  // 7: portals.SidecarReconfigurator.ListRules:input_type -> portals.ListRulesRequest
-	8,  // 8: portals.SidecarReconfigurator.SetSecurityPolicy:input_type -> portals.SetSecurityPolicyRequest
-	10, // 9: portals.SidecarReconfigurator.GetSecurityPolicy:input_type -> portals.GetSecurityPolicyRequest
-	4,  // 10: portals.SidecarReconfigurator.UpdateRules:output_type -> portals.UpdateRulesResponse
-	6,  // 11: portals.SidecarReconfigurator.ListRules:output_type -> portals.ListRulesResponse
-	9,  // 12: portals.SidecarReconfigurator.SetSecurityPolicy:output_type -> portals.SetSecurityPolicyResponse
-	11, // 13: portals.SidecarReconfigurator.GetSecurityPolicy:output_type -> portals.GetSecurityPolicyResponse
-	10, // [10:14] is the sub-list for method output_type
-	6,  // [6:10] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	1,  // 6: portals.Secret.metadata:type_name -> portals.Metadata
+	12, // 7: portals.SetSecretRequest.secret:type_name -> portals.Secret
+	12, // 8: portals.ListSecretsResponse.secrets:type_name -> portals.Secret
+	3,  // 9: portals.SidecarReconfigurator.UpdateRules:input_type -> portals.UpdateRulesRequest
+	5,  // 10: portals.SidecarReconfigurator.ListRules:input_type -> portals.ListRulesRequest
+	8,  // 11: portals.SidecarReconfigurator.SetSecurityPolicy:input_type -> portals.SetSecurityPolicyRequest
+	10, // 12: portals.SidecarReconfigurator.GetSecurityPolicy:input_type -> portals.GetSecurityPolicyRequest
+	13, // 13: portals.SidecarReconfigurator.SetSecret:input_type -> portals.SetSecretRequest
+	15, // 14: portals.SidecarReconfigurator.ListSecrets:input_type -> portals.ListSecretsRequest
+	4,  // 15: portals.SidecarReconfigurator.UpdateRules:output_type -> portals.UpdateRulesResponse
+	6,  // 16: portals.SidecarReconfigurator.ListRules:output_type -> portals.ListRulesResponse
+	9,  // 17: portals.SidecarReconfigurator.SetSecurityPolicy:output_type -> portals.SetSecurityPolicyResponse
+	11, // 18: portals.SidecarReconfigurator.GetSecurityPolicy:output_type -> portals.GetSecurityPolicyResponse
+	14, // 19: portals.SidecarReconfigurator.SetSecret:output_type -> portals.SetSecretResponse
+	16, // 20: portals.SidecarReconfigurator.ListSecrets:output_type -> portals.ListSecretsResponse
+	15, // [15:21] is the sub-list for method output_type
+	9,  // [9:15] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_pkg_portals_proto_configurator_proto_init() }
@@ -681,7 +916,7 @@ func file_pkg_portals_proto_configurator_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_portals_proto_configurator_proto_rawDesc), len(file_pkg_portals_proto_configurator_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
