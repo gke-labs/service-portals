@@ -18,7 +18,7 @@ updates:
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
 
   # Maintain Docker base image versions in all Dockerfiles recursively
   - package-ecosystem: "docker"
