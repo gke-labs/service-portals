@@ -45,7 +45,7 @@ func protoToRule(p *pb.PortalRule) PortalRule {
 		r.Spec = RuleSpec{
 			Host:       p.Spec.Host,
 			RewriteURL: p.Spec.RewriteUrl,
-			AuthToken:  p.Spec.AuthToken,
+			SecretRef:  p.Spec.SecretRef,
 			AuthHeader: p.Spec.AuthHeader,
 			CacheTTL:   p.Spec.CacheTtl,
 		}
@@ -61,7 +61,7 @@ func ruleToProto(r PortalRule) *pb.PortalRule {
 		Spec: &pb.RuleSpec{
 			Host:       r.Spec.Host,
 			RewriteUrl: r.Spec.RewriteURL,
-			AuthToken:  r.Spec.AuthToken,
+			SecretRef:  r.Spec.SecretRef,
 			AuthHeader: r.Spec.AuthHeader,
 			CacheTtl:   r.Spec.CacheTTL,
 		},
@@ -123,5 +123,30 @@ func (s *ConfiguratorServer) GetSecurityPolicy(ctx context.Context, req *pb.GetS
 	policy := s.router.GetSecurityPolicy()
 	return &pb.GetSecurityPolicyResponse{
 		Policy: policyToProto(policy),
+	}, nil
+}
+
+func (s *ConfiguratorServer) SetSecret(ctx context.Context, req *pb.SetSecretRequest) (*pb.SetSecretResponse, error) {
+	sec := req.GetSecret()
+	if sec == nil || sec.GetMetadata() == nil || sec.GetMetadata().GetName() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "secret name must be provided")
+	}
+	s.router.SetSecret(sec.GetMetadata().GetName(), sec.GetValue())
+	return &pb.SetSecretResponse{}, nil
+}
+
+func (s *ConfiguratorServer) ListSecrets(ctx context.Context, req *pb.ListSecretsRequest) (*pb.ListSecretsResponse, error) {
+	secrets := s.router.GetSecrets()
+	var pbSecrets []*pb.Secret
+	for name, val := range secrets {
+		pbSecrets = append(pbSecrets, &pb.Secret{
+			Metadata: &pb.Metadata{
+				Name: name,
+			},
+			Value: val, // Values are already redacted inside rr.GetSecrets()
+		})
+	}
+	return &pb.ListSecretsResponse{
+		Secrets: pbSecrets,
 	}, nil
 }

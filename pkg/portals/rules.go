@@ -49,6 +49,7 @@ type RuleSpec struct {
 	Host       string `json:"host"`
 	RewriteURL string `json:"rewriteUrl"`
 	AuthToken  string `json:"authToken"`
+	SecretRef  string `json:"secretRef"`
 	AuthHeader string `json:"authHeader"`
 	CacheTTL   string `json:"cacheTTL"`
 }
@@ -68,11 +69,12 @@ type SecurityPolicy struct {
 // RuleRouter routes incoming HTTP/HTTPS requests to the appropriate proxy based on host rules.
 type RuleRouter struct {
 	mu                 sync.RWMutex
-	routes             map[string]*Rule // Combined active routes
-	fileRules          map[string]*Rule // Rules loaded from files in rulesDir
-	dynamicRules       map[string]*Rule // Dynamic rules set via the gRPC API
-	dynamicRulesSource []PortalRule     // Source structures of dynamic rules
-	securityPolicy     *SecurityPolicy  // Current security policy
+	routes             map[string]*Rule  // Combined active routes
+	fileRules          map[string]*Rule  // Rules loaded from files in rulesDir
+	dynamicRules       map[string]*Rule  // Dynamic rules set via the gRPC API
+	dynamicRulesSource []PortalRule      // Source structures of dynamic rules
+	secrets            map[string]string // Dynamic secrets map
+	securityPolicy     *SecurityPolicy   // Current security policy
 	fallback           http.Handler
 	rulesDir           string
 	caCertPath         string
@@ -87,6 +89,7 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 		routes:       make(map[string]*Rule),
 		fileRules:    make(map[string]*Rule),
 		dynamicRules: make(map[string]*Rule),
+		secrets:      make(map[string]string),
 		fallback:     fallback,
 		rulesDir:     rulesDir,
 		caCertPath:   caCertPath,
@@ -118,6 +121,14 @@ func (rr *RuleRouter) rebuildRoutesLocked() {
 func (rr *RuleRouter) UpdateDynamicRules(rules []PortalRule) error {
 	newDynamicRules := make(map[string]*Rule)
 
+	rr.mu.RLock()
+	// Temporarily acquire lock on secrets map read
+	secretsCopy := make(map[string]string)
+	for k, v := range rr.secrets {
+		secretsCopy[k] = v
+	}
+	rr.mu.RUnlock()
+
 	for _, rule := range rules {
 		if rule.Spec.Host == "" {
 			return fmt.Errorf("rule metadata %q is missing spec.host", rule.Metadata.Name)
@@ -144,7 +155,17 @@ func (rr *RuleRouter) UpdateDynamicRules(rules []PortalRule) error {
 			authHeader = "Authorization"
 		}
 
-		p, err := proxy.NewHTTPProxy(rewriteURL, rule.Spec.AuthToken, authHeader, rr.caCertPath, rr.caKeyPath)
+		// Determine auth token: use SecretRef if present, otherwise fallback to AuthToken
+		authToken := rule.Spec.AuthToken
+		if rule.Spec.SecretRef != "" {
+			token, exists := secretsCopy[rule.Spec.SecretRef]
+			if !exists {
+				return fmt.Errorf("secret %q referenced by rule %q not found", rule.Spec.SecretRef, rule.Metadata.Name)
+			}
+			authToken = token
+		}
+
+		p, err := proxy.NewHTTPProxy(rewriteURL, authToken, authHeader, rr.caCertPath, rr.caKeyPath)
 		if err != nil {
 			return fmt.Errorf("failed to create proxy for rule %q: %w", rule.Metadata.Name, err)
 		}
@@ -181,6 +202,25 @@ func (rr *RuleRouter) UpdateDynamicRules(rules []PortalRule) error {
 	rr.mu.Unlock()
 
 	return nil
+}
+
+// SetSecret sets/registers a dynamic secret in memory.
+func (rr *RuleRouter) SetSecret(name, value string) {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	rr.secrets[name] = value
+}
+
+// GetSecrets returns all secret names with redacted values.
+func (rr *RuleRouter) GetSecrets() map[string]string {
+	rr.mu.RLock()
+	defer rr.mu.RUnlock()
+
+	redacted := make(map[string]string)
+	for k := range rr.secrets {
+		redacted[k] = "[REDACTED]"
+	}
+	return redacted
 }
 
 // GetDynamicRules returns a slice of currently loaded dynamic PortalRules.

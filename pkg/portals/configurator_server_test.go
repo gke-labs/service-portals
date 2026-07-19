@@ -227,7 +227,38 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 		t.Errorf("expected allowed images, got: %v", getPolicyResp.Policy.AllowedImages)
 	}
 
-	// Test case B: Update and List Rules
+	// Test case B1: Create Secret (SetSecret)
+	secretReq := &pb.SetSecretRequest{
+		Secret: &pb.Secret{
+			Metadata: &pb.Metadata{
+				Name: "my-secret-token",
+			},
+			Value: "secret-token-123",
+		},
+	}
+	_, err = client.SetSecret(context.Background(), secretReq)
+	if err != nil {
+		t.Fatalf("failed to set secret: %v", err)
+	}
+
+	// Test case B2: Verify Listing Secrets is redacted
+	secretsList, err := client.ListSecrets(context.Background(), &pb.ListSecretsRequest{})
+	if err != nil {
+		t.Fatalf("failed to list secrets: %v", err)
+	}
+	if len(secretsList.Secrets) != 1 {
+		t.Errorf("expected 1 secret, got %d", len(secretsList.Secrets))
+	} else {
+		sec := secretsList.Secrets[0]
+		if sec.Metadata.Name != "my-secret-token" {
+			t.Errorf("expected secret name 'my-secret-token', got '%s'", sec.Metadata.Name)
+		}
+		if sec.Value != "[REDACTED]" {
+			t.Errorf("expected secret value to be redacted, got: %q", sec.Value)
+		}
+	}
+
+	// Test case C: Update and List Rules with SecretRef
 	updateReq := &pb.UpdateRulesRequest{
 		Rules: []*pb.PortalRule{
 			{
@@ -237,7 +268,7 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 				Spec: &pb.RuleSpec{
 					Host:       "dynamic-host.portal",
 					RewriteUrl: backend.URL,
-					AuthToken:  "secret-token-123",
+					SecretRef:  "my-secret-token",
 					AuthHeader: "Authorization",
 				},
 			},
@@ -258,6 +289,9 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 		rule := listResp.Rules[0]
 		if rule.Metadata.Name != "dynamic-rule-1" || rule.Spec.Host != "dynamic-host.portal" {
 			t.Errorf("unexpected rule values: %+v", rule)
+		}
+		if rule.Spec.SecretRef != "my-secret-token" {
+			t.Errorf("expected secret ref 'my-secret-token', got %q", rule.Spec.SecretRef)
 		}
 	}
 
