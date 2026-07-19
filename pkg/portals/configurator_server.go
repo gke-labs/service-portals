@@ -18,6 +18,8 @@ import (
 	"context"
 
 	pb "github.com/gke-labs/service-portals/pkg/portals/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type ConfiguratorServer struct {
@@ -33,8 +35,8 @@ func NewConfiguratorServer(router *RuleRouter) *ConfiguratorServer {
 
 func protoToRule(p *pb.PortalRule) PortalRule {
 	r := PortalRule{
-		APIVersion: p.ApiVersion,
-		Kind:       p.Kind,
+		APIVersion: "portals.gke.io/v1alpha1",
+		Kind:       "PortalRule",
 	}
 	if p.Metadata != nil {
 		r.Metadata.Name = p.Metadata.Name
@@ -53,8 +55,6 @@ func protoToRule(p *pb.PortalRule) PortalRule {
 
 func ruleToProto(r PortalRule) *pb.PortalRule {
 	p := &pb.PortalRule{
-		ApiVersion: r.APIVersion,
-		Kind:       r.Kind,
 		Metadata: &pb.Metadata{
 			Name: r.Metadata.Name,
 		},
@@ -96,16 +96,10 @@ func (s *ConfiguratorServer) UpdateRules(ctx context.Context, req *pb.UpdateRule
 	}
 
 	if err := s.router.UpdateDynamicRules(rules); err != nil {
-		return &pb.UpdateRulesResponse{
-			Success: false,
-			Message: err.Error(),
-		}, nil
+		return nil, status.Errorf(codes.InvalidArgument, "failed to update dynamic rules: %v", err)
 	}
 
-	return &pb.UpdateRulesResponse{
-		Success: true,
-		Message: "Rules successfully updated",
-	}, nil
+	return &pb.UpdateRulesResponse{}, nil
 }
 
 func (s *ConfiguratorServer) ListRules(ctx context.Context, req *pb.ListRulesRequest) (*pb.ListRulesResponse, error) {
@@ -122,10 +116,7 @@ func (s *ConfiguratorServer) ListRules(ctx context.Context, req *pb.ListRulesReq
 func (s *ConfiguratorServer) SetSecurityPolicy(ctx context.Context, req *pb.SetSecurityPolicyRequest) (*pb.SetSecurityPolicyResponse, error) {
 	policy := protoToPolicy(req.GetPolicy())
 	s.router.SetSecurityPolicy(policy)
-	return &pb.SetSecurityPolicyResponse{
-		Success: true,
-		Message: "Security policy set",
-	}, nil
+	return &pb.SetSecurityPolicyResponse{}, nil
 }
 
 func (s *ConfiguratorServer) GetSecurityPolicy(ctx context.Context, req *pb.GetSecurityPolicyRequest) (*pb.GetSecurityPolicyResponse, error) {

@@ -146,37 +146,30 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	// 3. Set environment variables
+	// 3. Setup dynamic ports
 	httpPort := getFreePort(t)
 	httpsPort := getFreePort(t)
 	grpcPort := getFreePort(t)
 
-	os.Setenv("PORT", httpPort)
-	os.Setenv("HTTPS_PORT", httpsPort)
-	os.Setenv("GRPC_PORT", grpcPort)
-	os.Setenv("TARGET_URL", backend.URL)
-
-	os.Setenv("GRPC_TLS_CERT_PATH", certFile)
-	os.Setenv("GRPC_TLS_KEY_PATH", keyFile)
-	os.Setenv("GRPC_CLIENT_CA_PATH", caFile)
-
-	defer func() {
-		os.Unsetenv("PORT")
-		os.Unsetenv("HTTPS_PORT")
-		os.Unsetenv("GRPC_PORT")
-		os.Unsetenv("TARGET_URL")
-		os.Unsetenv("GRPC_TLS_CERT_PATH")
-		os.Unsetenv("GRPC_TLS_KEY_PATH")
-		os.Unsetenv("GRPC_CLIENT_CA_PATH")
-	}()
-
-	// 4. Run server
+	// 4. Run server using explicit RouterOptions (Isolated from env variables)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	opts := RouterOptions{
+		TargetURL:        backend.URL,
+		Port:             httpPort,
+		HTTPSPort:        httpsPort,
+		GrpcPort:         grpcPort,
+		GrpcTLSCertPath:  certFile,
+		GrpcTLSKeyPath:   keyFile,
+		GrpcClientCAPath: caFile,
+		CaCertPath:       certFile,
+		CaKeyPath:        keyFile,
+	}
+
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- Run(ctx, Config{})
+		errChan <- RunRouter(ctx, opts)
 	}()
 
 	// Give servers a brief moment to start up
@@ -215,12 +208,9 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 			AllowedImages: []string{"gcr.io/test/image1", "gcr.io/test/image2"},
 		},
 	}
-	policyResp, err := client.SetSecurityPolicy(context.Background(), policyReq)
+	_, err = client.SetSecurityPolicy(context.Background(), policyReq)
 	if err != nil {
 		t.Fatalf("failed to set security policy: %v", err)
-	}
-	if !policyResp.Success {
-		t.Errorf("set security policy not successful: %s", policyResp.Message)
 	}
 
 	getPolicyResp, err := client.GetSecurityPolicy(context.Background(), &pb.GetSecurityPolicyRequest{})
@@ -241,8 +231,6 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 	updateReq := &pb.UpdateRulesRequest{
 		Rules: []*pb.PortalRule{
 			{
-				ApiVersion: "portals.gke.io/v1alpha1",
-				Kind:       "PortalRule",
 				Metadata: &pb.Metadata{
 					Name: "dynamic-rule-1",
 				},
@@ -255,12 +243,9 @@ func TestDynamicReconfigurationAndPolicy(t *testing.T) {
 			},
 		},
 	}
-	updateResp, err := client.UpdateRules(context.Background(), updateReq)
+	_, err = client.UpdateRules(context.Background(), updateReq)
 	if err != nil {
 		t.Fatalf("failed to update rules: %v", err)
-	}
-	if !updateResp.Success {
-		t.Errorf("update rules not successful: %s", updateResp.Message)
 	}
 
 	listResp, err := client.ListRules(context.Background(), &pb.ListRulesRequest{})

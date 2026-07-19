@@ -67,18 +67,18 @@ type SecurityPolicy struct {
 
 // RuleRouter routes incoming HTTP/HTTPS requests to the appropriate proxy based on host rules.
 type RuleRouter struct {
-	mu            sync.RWMutex
-	routes        map[string]*Rule // Combined active routes
-	fileRules     map[string]*Rule // Rules loaded from files in rulesDir
-	dynamicRules  map[string]*Rule // Dynamic rules set via the gRPC API
+	mu                 sync.RWMutex
+	routes             map[string]*Rule // Combined active routes
+	fileRules          map[string]*Rule // Rules loaded from files in rulesDir
+	dynamicRules       map[string]*Rule // Dynamic rules set via the gRPC API
 	dynamicRulesSource []PortalRule     // Source structures of dynamic rules
-	securityPolicy *SecurityPolicy  // Current security policy
-	fallback      http.Handler
-	rulesDir      string
-	caCertPath    string
-	caKeyPath     string
-	cacheTTL      time.Duration
-	cache         *cache.InMemoryCache
+	securityPolicy     *SecurityPolicy  // Current security policy
+	fallback           http.Handler
+	rulesDir           string
+	caCertPath         string
+	caKeyPath          string
+	cacheTTL           time.Duration
+	cache              *cache.InMemoryCache
 }
 
 // NewRuleRouter creates a new RuleRouter instance.
