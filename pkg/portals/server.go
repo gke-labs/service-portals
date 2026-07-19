@@ -17,8 +17,10 @@ package portals
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,9 +30,12 @@ import (
 
 	"github.com/gke-labs/service-portals/pkg/cache"
 	"github.com/gke-labs/service-portals/pkg/proxy"
+	pb "github.com/gke-labs/service-portals/pkg/portals/proto"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 type CertificateProvider interface {
@@ -115,10 +120,8 @@ func Run(ctx context.Context, config Config) error {
 		rulesDir = os.Getenv("RULES_DIR")
 	}
 
-	var handler http.Handler = p
-
+	rr := NewRuleRouter(rulesDir, p, caCertPath, caKeyPath, cacheTTL, c)
 	if rulesDir != "" {
-		rr := NewRuleRouter(rulesDir, p, caCertPath, caKeyPath, cacheTTL, c)
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}
@@ -140,9 +143,9 @@ func Run(ctx context.Context, config Config) error {
 				}
 			}
 		}()
-
-		handler = rr
 	}
+
+	var handler http.Handler = rr
 
 	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
@@ -156,6 +159,75 @@ func Run(ctx context.Context, config Config) error {
 	httpsPort := os.Getenv("HTTPS_PORT")
 	if httpsPort == "" {
 		httpsPort = "8443"
+	}
+
+	grpcPort := os.Getenv("GRPC_PORT")
+	if grpcPort == "" {
+		grpcPort = "8082"
+	}
+
+	grpcTLSCertPath := os.Getenv("GRPC_TLS_CERT_PATH")
+	if grpcTLSCertPath == "" {
+		grpcTLSCertPath = os.Getenv("TLS_CERT_PATH")
+	}
+	if grpcTLSCertPath == "" {
+		grpcTLSCertPath = caCertPath
+	}
+
+	grpcTLSKeyPath := os.Getenv("GRPC_TLS_KEY_PATH")
+	if grpcTLSKeyPath == "" {
+		grpcTLSKeyPath = os.Getenv("TLS_KEY_PATH")
+	}
+	if grpcTLSKeyPath == "" {
+		grpcTLSKeyPath = caKeyPath
+	}
+
+	grpcClientCAPath := os.Getenv("GRPC_CLIENT_CA_PATH")
+	if grpcClientCAPath == "" {
+		grpcClientCAPath = os.Getenv("CLIENT_CA_PATH")
+	}
+	if grpcClientCAPath == "" {
+		grpcClientCAPath = caCertPath
+	}
+
+	var grpcServer *grpc.Server
+
+	if grpcTLSCertPath != "" && grpcTLSKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(grpcTLSCertPath, grpcTLSKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to load gRPC server key pair: %w", err)
+		}
+
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+
+		if grpcClientCAPath != "" {
+			caPem, err := os.ReadFile(grpcClientCAPath)
+			if err != nil {
+				return fmt.Errorf("failed to read gRPC client CA file: %w", err)
+			}
+			certPool := x509.NewCertPool()
+			if !certPool.AppendCertsFromPEM(caPem) {
+				return fmt.Errorf("failed to append client CA certs")
+			}
+			tlsConfig.ClientCAs = certPool
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+
+		creds := credentials.NewTLS(tlsConfig)
+		grpcServer = grpc.NewServer(grpc.Creds(creds))
+		log.Println("gRPC server configured with mTLS")
+	} else {
+		grpcServer = grpc.NewServer()
+		log.Println("gRPC server configured without TLS (insecure)")
+	}
+
+	pb.RegisterSidecarReconfiguratorServer(grpcServer, NewConfiguratorServer(rr))
+
+	lis, err := net.Listen("tcp", ":"+grpcPort)
+	if err != nil {
+		return fmt.Errorf("failed to listen on gRPC port %s: %w", grpcPort, err)
 	}
 
 	servedHandler := handler
@@ -180,7 +252,7 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 3)
 	go func() {
 		log.Printf("Starting HTTP proxy on :%s forwarding to %s", port, target)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -197,6 +269,13 @@ func Run(ctx context.Context, config Config) error {
 		}()
 	}
 
+	go func() {
+		log.Printf("Starting gRPC configurator server on :%s", grpcPort)
+		if err := grpcServer.Serve(lis); err != nil && err != grpc.ErrServerStopped {
+			errChan <- fmt.Errorf("gRPC server failed: %w", err)
+		}
+	}()
+
 	select {
 	case err := <-errChan:
 		return err
@@ -204,6 +283,9 @@ func Run(ctx context.Context, config Config) error {
 		log.Println("Shutting down servers...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		grpcServer.GracefulStop()
+
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown failed: %v", err)
 		}
