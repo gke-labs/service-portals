@@ -31,20 +31,15 @@ message Metadata {
 }
 
 message PortalRule {
-  string api_version = 1;
-  string kind = 2;
-  Metadata metadata = 3;
-  RuleSpec spec = 4;
+  Metadata metadata = 1;
+  RuleSpec spec = 2;
 }
 
 message UpdateRulesRequest {
   repeated PortalRule rules = 1;
 }
 
-message UpdateRulesResponse {
-  bool success = 1;
-  string message = 2;
-}
+message UpdateRulesResponse {}
 
 message ListRulesRequest {}
 
@@ -61,10 +56,7 @@ message SetSecurityPolicyRequest {
   SecurityPolicy policy = 1;
 }
 
-message SetSecurityPolicyResponse {
-  bool success = 1;
-  string message = 2;
-}
+message SetSecurityPolicyResponse {}
 
 message GetSecurityPolicyRequest {}
 

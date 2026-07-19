@@ -157,10 +157,8 @@ func (x *Metadata) GetName() string {
 
 type PortalRule struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	ApiVersion    string                 `protobuf:"bytes,1,opt,name=api_version,json=apiVersion,proto3" json:"api_version,omitempty"`
-	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	Metadata      *Metadata              `protobuf:"bytes,3,opt,name=metadata,proto3" json:"metadata,omitempty"`
-	Spec          *RuleSpec              `protobuf:"bytes,4,opt,name=spec,proto3" json:"spec,omitempty"`
+	Metadata      *Metadata              `protobuf:"bytes,1,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Spec          *RuleSpec              `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -193,20 +191,6 @@ func (x *PortalRule) ProtoReflect() protoreflect.Message {
 // Deprecated: Use PortalRule.ProtoReflect.Descriptor instead.
 func (*PortalRule) Descriptor() ([]byte, []int) {
 	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *PortalRule) GetApiVersion() string {
-	if x != nil {
-		return x.ApiVersion
-	}
-	return ""
-}
-
-func (x *PortalRule) GetKind() string {
-	if x != nil {
-		return x.Kind
-	}
-	return ""
 }
 
 func (x *PortalRule) GetMetadata() *Metadata {
@@ -269,8 +253,6 @@ func (x *UpdateRulesRequest) GetRules() []*PortalRule {
 
 type UpdateRulesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -303,20 +285,6 @@ func (x *UpdateRulesResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use UpdateRulesResponse.ProtoReflect.Descriptor instead.
 func (*UpdateRulesResponse) Descriptor() ([]byte, []int) {
 	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *UpdateRulesResponse) GetSuccess() bool {
-	if x != nil {
-		return x.Success
-	}
-	return false
-}
-
-func (x *UpdateRulesResponse) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
 }
 
 type ListRulesRequest struct {
@@ -497,8 +465,6 @@ func (x *SetSecurityPolicyRequest) GetPolicy() *SecurityPolicy {
 
 type SetSecurityPolicyResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	Message       string                 `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -531,20 +497,6 @@ func (x *SetSecurityPolicyResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use SetSecurityPolicyResponse.ProtoReflect.Descriptor instead.
 func (*SetSecurityPolicyResponse) Descriptor() ([]byte, []int) {
 	return file_pkg_portals_proto_configurator_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *SetSecurityPolicyResponse) GetSuccess() bool {
-	if x != nil {
-		return x.Success
-	}
-	return false
-}
-
-func (x *SetSecurityPolicyResponse) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
 }
 
 type GetSecurityPolicyRequest struct {
@@ -642,19 +594,14 @@ const file_pkg_portals_proto_configurator_proto_rawDesc = "" +
 	"authHeader\x12\x1b\n" +
 	"\tcache_ttl\x18\x05 \x01(\tR\bcacheTtl\"\x1e\n" +
 	"\bMetadata\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"\x97\x01\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\"b\n" +
 	"\n" +
-	"PortalRule\x12\x1f\n" +
-	"\vapi_version\x18\x01 \x01(\tR\n" +
-	"apiVersion\x12\x12\n" +
-	"\x04kind\x18\x02 \x01(\tR\x04kind\x12-\n" +
-	"\bmetadata\x18\x03 \x01(\v2\x11.portals.MetadataR\bmetadata\x12%\n" +
-	"\x04spec\x18\x04 \x01(\v2\x11.portals.RuleSpecR\x04spec\"?\n" +
+	"PortalRule\x12-\n" +
+	"\bmetadata\x18\x01 \x01(\v2\x11.portals.MetadataR\bmetadata\x12%\n" +
+	"\x04spec\x18\x02 \x01(\v2\x11.portals.RuleSpecR\x04spec\"?\n" +
 	"\x12UpdateRulesRequest\x12)\n" +
-	"\x05rules\x18\x01 \x03(\v2\x13.portals.PortalRuleR\x05rules\"I\n" +
-	"\x13UpdateRulesResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x12\n" +
+	"\x05rules\x18\x01 \x03(\v2\x13.portals.PortalRuleR\x05rules\"\x15\n" +
+	"\x13UpdateRulesResponse\"\x12\n" +
 	"\x10ListRulesRequest\">\n" +
 	"\x11ListRulesResponse\x12)\n" +
 	"\x05rules\x18\x01 \x03(\v2\x13.portals.PortalRuleR\x05rules\"V\n" +
@@ -663,10 +610,8 @@ const file_pkg_portals_proto_configurator_proto_rawDesc = "" +
 	"block_exec\x18\x01 \x01(\bR\tblockExec\x12%\n" +
 	"\x0eallowed_images\x18\x02 \x03(\tR\rallowedImages\"K\n" +
 	"\x18SetSecurityPolicyRequest\x12/\n" +
-	"\x06policy\x18\x01 \x01(\v2\x17.portals.SecurityPolicyR\x06policy\"O\n" +
-	"\x19SetSecurityPolicyResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"\x1a\n" +
+	"\x06policy\x18\x01 \x01(\v2\x17.portals.SecurityPolicyR\x06policy\"\x1b\n" +
+	"\x19SetSecurityPolicyResponse\"\x1a\n" +
 	"\x18GetSecurityPolicyRequest\"L\n" +
 	"\x19GetSecurityPolicyResponse\x12/\n" +
 	"\x06policy\x18\x01 \x01(\v2\x17.portals.SecurityPolicyR\x06policy2\xdd\x02\n" +
