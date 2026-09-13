@@ -15,6 +15,8 @@
 package gitproxy
 
 import (
+	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -128,6 +130,180 @@ func TestClassifyGitRequest(t *testing.T) {
 			}
 			if actualType.IsCacheable() != tc.expectedCacheable {
 				t.Errorf("expected IsCacheable %v, got %v", tc.expectedCacheable, actualType.IsCacheable())
+			}
+		})
+	}
+}
+
+func makePktLine(s string) []byte {
+	return []byte(fmt.Sprintf("%04x%s", len(s)+4, s))
+}
+
+func TestParseFetchRequest(t *testing.T) {
+	var v2Valid bytes.Buffer
+	v2Valid.Write(makePktLine("command=fetch\n"))
+	v2Valid.Write(makePktLine("agent=git/2.47.0\n"))
+	v2Valid.WriteString("0001") // Delim
+	v2Valid.Write(makePktLine("thin-pack\n"))
+	v2Valid.Write(makePktLine("ofs-delta\n"))
+	v2Valid.Write(makePktLine("want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n"))
+	v2Valid.Write(makePktLine("have a94a8fe5ccb19ba61c4c0873d391e987982fbbd3\n"))
+	v2Valid.Write(makePktLine("done\n"))
+	v2Valid.WriteString("0000") // Flush
+
+	var v0Valid bytes.Buffer
+	v0Valid.Write(makePktLine("want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78 multi_ack_detailed side-band-64k ofs-delta\n"))
+	v0Valid.Write(makePktLine("have a94a8fe5ccb19ba61c4c0873d391e987982fbbd3\n"))
+	v0Valid.WriteString("0000") // Flush
+	v0Valid.Write(makePktLine("done\n"))
+
+	var v2UnknownCmd bytes.Buffer
+	v2UnknownCmd.Write(makePktLine("command=fetch\n"))
+	v2UnknownCmd.Write(makePktLine("unknown-command\n"))
+	v2UnknownCmd.Write(makePktLine("want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n"))
+	v2UnknownCmd.Write(makePktLine("done\n"))
+	v2UnknownCmd.WriteString("0000")
+
+	var v2Shallow bytes.Buffer
+	v2Shallow.Write(makePktLine("command=fetch\n"))
+	v2Shallow.Write(makePktLine("shallow 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n"))
+	v2Shallow.Write(makePktLine("want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n"))
+	v2Shallow.Write(makePktLine("done\n"))
+	v2Shallow.WriteString("0000")
+
+	var v2Deepen bytes.Buffer
+	v2Deepen.Write(makePktLine("command=fetch\n"))
+	v2Deepen.Write(makePktLine("deepen 1\n"))
+	v2Deepen.Write(makePktLine("want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n"))
+	v2Deepen.Write(makePktLine("done\n"))
+	v2Deepen.WriteString("0000")
+
+	var v2Filter bytes.Buffer
+	v2Filter.Write(makePktLine("command=fetch\n"))
+	v2Filter.Write(makePktLine("filter blob:none\n"))
+	v2Filter.Write(makePktLine("want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n"))
+	v2Filter.Write(makePktLine("done\n"))
+	v2Filter.WriteString("0000")
+
+	var v0UnknownCap bytes.Buffer
+	v0UnknownCap.Write(makePktLine("want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78 unknown_capability\n"))
+	v0UnknownCap.Write(makePktLine("done\n"))
+	v0UnknownCap.WriteString("0000")
+
+	var invalidOID bytes.Buffer
+	invalidOID.Write(makePktLine("want not-a-valid-oid\n"))
+	invalidOID.Write(makePktLine("done\n"))
+	invalidOID.WriteString("0000")
+
+	var noWants bytes.Buffer
+	noWants.Write(makePktLine("command=fetch\n"))
+	noWants.Write(makePktLine("done\n"))
+	noWants.WriteString("0000")
+
+	tests := []struct {
+		name        string
+		body        []byte
+		expectErr   bool
+		expectedReq *FetchRequest
+	}{
+		{
+			name: "Valid v2 fetch request",
+			body: v2Valid.Bytes(),
+			expectedReq: &FetchRequest{
+				Wants: []string{"7f83b1657ff1fc5354dc1008ecf50686d3c52b78"},
+				Haves: []string{"a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"},
+				IsV2:  true,
+				Done:  true,
+			},
+		},
+		{
+			name: "Valid v0/v1 fetch request with capabilities",
+			body: v0Valid.Bytes(),
+			expectedReq: &FetchRequest{
+				Wants: []string{"7f83b1657ff1fc5354dc1008ecf50686d3c52b78"},
+				Haves: []string{"a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"},
+				IsV2:  false,
+				Done:  true,
+			},
+		},
+		{
+			name:      "Reject unknown command in v2",
+			body:      v2UnknownCmd.Bytes(),
+			expectErr: true,
+		},
+		{
+			name:      "Reject shallow argument",
+			body:      v2Shallow.Bytes(),
+			expectErr: true,
+		},
+		{
+			name:      "Reject deepen argument",
+			body:      v2Deepen.Bytes(),
+			expectErr: true,
+		},
+		{
+			name:      "Reject filter argument",
+			body:      v2Filter.Bytes(),
+			expectErr: true,
+		},
+		{
+			name:      "Reject unknown capability on want line",
+			body:      v0UnknownCap.Bytes(),
+			expectErr: true,
+		},
+		{
+			name:      "Reject invalid OID format in want",
+			body:      invalidOID.Bytes(),
+			expectErr: true,
+		},
+		{
+			name:      "Reject empty request",
+			body:      []byte("0000"),
+			expectErr: true,
+		},
+		{
+			name:      "Reject request with no wants",
+			body:      noWants.Bytes(),
+			expectErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := ParseFetchRequest(tc.body)
+			if tc.expectErr {
+				if err == nil {
+					t.Fatalf("expected error for %s, but got none", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %s: %v", tc.name, err)
+			}
+
+			if parsed.IsV2 != tc.expectedReq.IsV2 {
+				t.Errorf("expected IsV2=%v, got %v", tc.expectedReq.IsV2, parsed.IsV2)
+			}
+			if parsed.Done != tc.expectedReq.Done {
+				t.Errorf("expected Done=%v, got %v", tc.expectedReq.Done, parsed.Done)
+			}
+			if len(parsed.Wants) != len(tc.expectedReq.Wants) {
+				t.Errorf("expected %d wants, got %d", len(tc.expectedReq.Wants), len(parsed.Wants))
+			} else {
+				for i, w := range tc.expectedReq.Wants {
+					if parsed.Wants[i] != w {
+						t.Errorf("want[%d]: expected %s, got %s", i, w, parsed.Wants[i])
+					}
+				}
+			}
+			if len(parsed.Haves) != len(tc.expectedReq.Haves) {
+				t.Errorf("expected %d haves, got %d", len(tc.expectedReq.Haves), len(parsed.Haves))
+			} else {
+				for i, h := range tc.expectedReq.Haves {
+					if parsed.Haves[i] != h {
+						t.Errorf("have[%d]: expected %s, got %s", i, h, parsed.Haves[i])
+					}
+				}
 			}
 		})
 	}

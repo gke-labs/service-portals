@@ -52,6 +52,8 @@ type Config struct {
 	DefaultAuthToken  string
 	Cache             cache.Cache
 	CacheTTL          time.Duration
+	RepoCacheDir      string
+	RepoCacheManager  *RepoCacheManager
 	Transport         http.RoundTripper
 	SetupProxy        func(*Server)
 }
@@ -60,6 +62,7 @@ type Config struct {
 type Server struct {
 	Config    Config
 	Transport http.RoundTripper
+	RepoCache *RepoCacheManager
 }
 
 // NewServer creates a new GitProxy Server.
@@ -77,9 +80,19 @@ func NewServer(config Config) *Server {
 		config.DefaultAuthHeader = "Authorization"
 	}
 
+	repoCache := config.RepoCacheManager
+	if repoCache == nil {
+		repoCacheDir := config.RepoCacheDir
+		if repoCacheDir == "" {
+			repoCacheDir = os.Getenv("CACHE_DIR")
+		}
+		repoCache = NewRepoCacheManager(repoCacheDir)
+	}
+
 	s := &Server{
 		Config:    config,
 		Transport: t,
+		RepoCache: repoCache,
 	}
 
 	if config.SetupProxy != nil {
@@ -117,6 +130,35 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reqType := ClassifyGitRequest(r, reqBody)
+
+	// Intelligent per-commit packfile caching for upload-pack fetch operations
+	if reqType == RequestTypeUploadPackFetch && s.RepoCache != nil {
+		fetchReq, parseErr := ParseFetchRequest(reqBody)
+		repoStore := s.RepoCache.GetRepoStore(targetURL.Path)
+
+		if parseErr == nil && len(fetchReq.Wants) > 0 && repoStore.HasAllCommits(fetchReq.Wants) {
+			objects, acks, err := repoStore.CollectObjectsForCommits(fetchReq.Wants, fetchReq.Haves)
+			if err == nil && len(objects) > 0 {
+				packfile, err := BuildPackfile(objects)
+				if err == nil {
+					respBytes := FormatSidebandPackfile(packfile, fetchReq.IsV2, acks, len(fetchReq.Haves) > 0)
+					w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+					w.Header().Set("X-Git-Cache", "HIT")
+					w.Header().Set("Cache-Control", "no-cache")
+					w.Header().Del("Content-Length")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(respBytes)
+					log.Printf("Git upload-pack cache HIT for %s (%d wants, %d haves -> %d objects)",
+						targetURL.Path, len(fetchReq.Wants), len(fetchReq.Haves), len(objects))
+					return
+				}
+				log.Printf("Failed to build packfile from cache for %s: %v", targetURL.Path, err)
+			} else {
+				log.Printf("Failed to collect objects from cache for %s: %v", targetURL.Path, err)
+			}
+		}
+	}
+
 	cacheable := reqType.IsCacheable() && s.Config.Cache != nil && s.Config.CacheTTL > 0
 
 	if cacheable {
@@ -140,7 +182,34 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(reqBody))
+	upstreamReqBody := reqBody
+	// If this is an upload-pack fetch missing some commits, augment with known haves from repo store
+	if reqType == RequestTypeUploadPackFetch && s.RepoCache != nil {
+		fetchReq, parseErr := ParseFetchRequest(reqBody)
+		if parseErr == nil && len(fetchReq.Wants) > 0 {
+			repoStore := s.RepoCache.GetRepoStore(targetURL.Path)
+			knownCommits := repoStore.GetKnownCommits()
+			if len(knownCommits) > 0 {
+				haveSet := make(map[string]bool)
+				var combinedHaves []string
+				for _, h := range fetchReq.Haves {
+					if !haveSet[h] {
+						haveSet[h] = true
+						combinedHaves = append(combinedHaves, h)
+					}
+				}
+				for _, h := range knownCommits {
+					if !haveSet[h] {
+						haveSet[h] = true
+						combinedHaves = append(combinedHaves, h)
+					}
+				}
+				upstreamReqBody = BuildUpstreamFetchRequest(fetchReq.Wants, combinedHaves, fetchReq.IsV2)
+			}
+		}
+	}
+
+	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL.String(), bytes.NewReader(upstreamReqBody))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create upstream request: %v", err), http.StatusInternalServerError)
 		return
@@ -182,48 +251,62 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if cacheable && resp.StatusCode == http.StatusOK {
 		w.Header().Set("X-Git-Cache", "MISS")
+
+		respBodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			log.Printf("Failed to read upstream response for %s: %v", targetURL.String(), readErr)
+			http.Error(w, "Failed to read upstream response", http.StatusBadGateway)
+			return
+		}
+
+		// If upload-pack fetch, ingest packfile into repo store
+		if reqType == RequestTypeUploadPackFetch && s.RepoCache != nil {
+			repoStore := s.RepoCache.GetRepoStore(targetURL.Path)
+			packData, packErr := ExtractPackfileFromResponse(respBodyBytes)
+			if packErr == nil {
+				newCommits, ingestErr := repoStore.IngestPackfile(packData)
+				if ingestErr == nil {
+					log.Printf("Ingested packfile for %s: %d new commits cached", targetURL.Path, len(newCommits))
+				} else {
+					log.Printf("Failed to ingest packfile for %s: %v", targetURL.Path, ingestErr)
+				}
+			}
+
+			// If upstream request was modified with extra haves, generate client response from repo store
+			if !bytes.Equal(upstreamReqBody, reqBody) {
+				fetchReq, _ := ParseFetchRequest(reqBody)
+				if fetchReq != nil && len(fetchReq.Wants) > 0 && repoStore.HasAllCommits(fetchReq.Wants) {
+					objects, acks, err := repoStore.CollectObjectsForCommits(fetchReq.Wants, fetchReq.Haves)
+					if err == nil && len(objects) > 0 {
+						packfile, err := BuildPackfile(objects)
+						if err == nil {
+							clientRespBytes := FormatSidebandPackfile(packfile, fetchReq.IsV2, acks, len(fetchReq.Haves) > 0)
+							w.Header().Del("Content-Length")
+							w.WriteHeader(http.StatusOK)
+							_, _ = w.Write(clientRespBytes)
+							return
+						}
+					}
+				}
+			}
+		}
+
+		// Default cache storage and write response
+		cachedResp := CachedResponse{
+			StatusCode: resp.StatusCode,
+			Header:     resp.Header.Clone(),
+			Body:       respBodyBytes,
+		}
+		var encBuf bytes.Buffer
+		if err := gob.NewEncoder(&encBuf).Encode(cachedResp); err == nil {
+			key := s.computeCacheKey(r, targetURL, reqBody)
+			s.Config.Cache.Set(key, encBuf.Bytes(), s.Config.CacheTTL)
+			log.Printf("Cache MISS (stored %d bytes) for %s %s", len(respBodyBytes), r.Method, targetURL.String())
+		}
+
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBodyBytes)))
 		w.WriteHeader(resp.StatusCode)
-
-		flusher, isFlusher := w.(http.Flusher)
-		var buf bytes.Buffer
-		tempBuf := make([]byte, 32*1024)
-		var streamErr error
-
-		for {
-			n, readErr := resp.Body.Read(tempBuf)
-			if n > 0 {
-				buf.Write(tempBuf[:n])
-				if _, writeErr := w.Write(tempBuf[:n]); writeErr != nil {
-					streamErr = writeErr
-					break
-				}
-				if isFlusher {
-					flusher.Flush()
-				}
-			}
-			if readErr != nil {
-				if readErr != io.EOF {
-					streamErr = readErr
-				}
-				break
-			}
-		}
-
-		if streamErr == nil {
-			cachedResp := CachedResponse{
-				StatusCode: resp.StatusCode,
-				Header:     resp.Header.Clone(),
-				Body:       buf.Bytes(),
-			}
-			var encBuf bytes.Buffer
-			if err := gob.NewEncoder(&encBuf).Encode(cachedResp); err == nil {
-				key := s.computeCacheKey(r, targetURL, reqBody)
-				s.Config.Cache.Set(key, encBuf.Bytes(), s.Config.CacheTTL)
-				log.Printf("Cache MISS (stored %d bytes) for %s %s", buf.Len(), r.Method, targetURL.String())
-			}
-		} else {
-			log.Printf("Stream error while proxying %s: %v", targetURL.String(), streamErr)
-		}
+		_, _ = w.Write(respBodyBytes)
 		return
 	}
 

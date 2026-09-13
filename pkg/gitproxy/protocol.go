@@ -16,6 +16,7 @@ package gitproxy
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -158,4 +159,152 @@ func parsePktLines(data []byte) []string {
 		pos += int(length)
 	}
 	return lines
+}
+
+// FetchRequest represents parsed parameters from a git-upload-pack fetch request.
+type FetchRequest struct {
+	Wants []string
+	Haves []string
+	IsV2  bool
+	Done  bool
+}
+
+// ParseFetchRequest parses wants, haves, and protocol version from a git-upload-pack request body,
+// strictly rejecting unrecognized commands, arguments, or capabilities.
+func ParseFetchRequest(body []byte) (*FetchRequest, error) {
+	lines := parsePktLines(body)
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("empty fetch request")
+	}
+
+	req := &FetchRequest{}
+	wantSet := make(map[string]bool)
+	haveSet := make(map[string]bool)
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		if trimmed == "command=fetch" {
+			req.IsV2 = true
+		} else if strings.HasPrefix(trimmed, "want ") {
+			fields := strings.Fields(trimmed[5:])
+			if len(fields) == 0 || !isHexOID(fields[0]) {
+				return nil, fmt.Errorf("invalid want line format: %q", line)
+			}
+			oid := fields[0]
+			if !wantSet[oid] {
+				wantSet[oid] = true
+				req.Wants = append(req.Wants, oid)
+			}
+			// In protocol v0/v1, capabilities may follow on the first want line
+			for _, cap := range fields[1:] {
+				if !isRecognizedCapability(cap) {
+					return nil, fmt.Errorf("unrecognized or unsupported capability: %q", cap)
+				}
+			}
+		} else if strings.HasPrefix(trimmed, "have ") {
+			fields := strings.Fields(trimmed[5:])
+			if len(fields) == 0 || !isHexOID(fields[0]) {
+				return nil, fmt.Errorf("invalid have line format: %q", line)
+			}
+			oid := fields[0]
+			if !haveSet[oid] {
+				haveSet[oid] = true
+				req.Haves = append(req.Haves, oid)
+			}
+		} else if trimmed == "done" {
+			req.Done = true
+		} else if isRecognizedV2Argument(trimmed) {
+			continue
+		} else {
+			return nil, fmt.Errorf("unrecognized or unsupported fetch request line: %q", line)
+		}
+	}
+
+	if len(req.Wants) == 0 {
+		return nil, fmt.Errorf("fetch request contains no valid want lines")
+	}
+
+	return req, nil
+}
+
+func isHexOID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func isRecognizedCapability(cap string) bool {
+	switch cap {
+	case "multi_ack", "multi_ack_detailed", "no-done",
+		"side-band", "side-band-64k", "thin-pack", "ofs-delta",
+		"no-progress", "include-tag":
+		return true
+	}
+	if strings.HasPrefix(cap, "agent=") ||
+		strings.HasPrefix(cap, "object-format=") ||
+		strings.HasPrefix(cap, "session-id=") ||
+		strings.HasPrefix(cap, "symref=") ||
+		strings.HasPrefix(cap, "clnt-os=") ||
+		strings.HasPrefix(cap, "clnt-version=") {
+		return true
+	}
+	return false
+}
+
+func isRecognizedV2Argument(arg string) bool {
+	switch arg {
+	case "thin-pack", "no-progress", "include-tag", "ofs-delta", "sideband-all", "wait-for-done":
+		return true
+	}
+	if strings.HasPrefix(arg, "agent=") ||
+		strings.HasPrefix(arg, "object-format=") ||
+		strings.HasPrefix(arg, "session-id=") {
+		return true
+	}
+	return false
+}
+
+// BuildUpstreamFetchRequest constructs a git-upload-pack fetch request body for upstream.
+func BuildUpstreamFetchRequest(wants []string, haves []string, isV2 bool) []byte {
+	var buf bytes.Buffer
+	if isV2 {
+		writePktLineString(&buf, "command=fetch\n")
+		writePktLineString(&buf, "agent=gitproxy\n")
+		writeDelimPkt(&buf)
+		writePktLineString(&buf, "thin-pack\n")
+		writePktLineString(&buf, "ofs-delta\n")
+		for _, want := range wants {
+			writePktLineString(&buf, "want "+want+"\n")
+		}
+		for _, have := range haves {
+			writePktLineString(&buf, "have "+have+"\n")
+		}
+		writePktLineString(&buf, "done\n")
+		writeFlushPkt(&buf)
+	} else {
+		for i, want := range wants {
+			if i == 0 {
+				writePktLineString(&buf, "want "+want+" multi_ack_detailed side-band-64k ofs-delta\n")
+			} else {
+				writePktLineString(&buf, "want "+want+"\n")
+			}
+		}
+		writeFlushPkt(&buf)
+		for _, have := range haves {
+			writePktLineString(&buf, "have "+have+"\n")
+		}
+		writePktLineString(&buf, "done\n")
+	}
+	return buf.Bytes()
 }

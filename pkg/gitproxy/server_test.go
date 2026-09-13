@@ -389,3 +389,178 @@ func TestGitCliWithProxy(t *testing.T) {
 
 	_ = proxyRepoURL
 }
+
+func TestGitProxyIncrementalCachingAndPruning(t *testing.T) {
+	gitBackendPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed, skipping CLI test")
+	}
+
+	// 1. Create a bare git repository as upstream
+	upstreamDir := t.TempDir()
+	gitDir := filepath.Join(upstreamDir, "repo.git")
+
+	initCmd := exec.Command("git", "init", "--bare", "-b", "main", gitDir)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare failed: %v, output: %s", err, out)
+	}
+	exec.Command("git", "-C", gitDir, "config", "http.receivepack", "true").Run()
+	exec.Command("git", "-C", gitDir, "config", "http.uploadpack", "true").Run()
+
+	// Seed bare repo with Commit C1
+	seedDir := t.TempDir()
+	exec.Command("git", "init", seedDir).Run()
+	exec.Command("git", "-C", seedDir, "config", "user.email", "test@example.com").Run()
+	exec.Command("git", "-C", seedDir, "config", "user.name", "Test User").Run()
+	os.WriteFile(filepath.Join(seedDir, "file1.txt"), []byte("commit 1 content"), 0644)
+	exec.Command("git", "-C", seedDir, "add", ".").Run()
+	exec.Command("git", "-C", seedDir, "commit", "-m", "Commit 1").Run()
+	exec.Command("git", "-C", seedDir, "push", gitDir, "HEAD:main").Run()
+
+	var fetchHits int32
+
+	httpBackendHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/git-upload-pack") && r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			if HasFetchCommand(body) {
+				atomic.AddInt32(&fetchHits, 1)
+			}
+		}
+
+		cgiHandler := &cgi.Handler{
+			Path: gitBackendPath,
+			Args: []string{"http-backend"},
+			Env: []string{
+				"GIT_PROJECT_ROOT=" + upstreamDir,
+				"GIT_HTTP_EXPORT_ALL=true",
+				"REMOTE_USER=test",
+			},
+		}
+		cgiHandler.ServeHTTP(w, r)
+	})
+
+	upstreamServer := httptest.NewServer(httpBackendHandler)
+	defer upstreamServer.Close()
+
+	c := cache.NewInMemoryCache(1 * time.Minute)
+	proxyServer := httptest.NewServer(NewServer(Config{
+		DefaultTargetURL: upstreamServer.URL,
+		Cache:            c,
+		CacheTTL:         10 * time.Minute,
+		Transport:        upstreamServer.Client().Transport,
+	}))
+	defer proxyServer.Close()
+
+	clientDir := t.TempDir()
+	upstreamRepoURL := fmt.Sprintf("%s/repo.git", upstreamServer.URL)
+
+	// Client 1 clones C1 via proxy -> MISS (fetchHits = 1)
+	clone1Dir := filepath.Join(clientDir, "clone1")
+	cloneCmd1 := exec.Command("git",
+		"-c", fmt.Sprintf("url.%s/.insteadOf=%s/", proxyServer.URL, upstreamServer.URL),
+		"clone", upstreamRepoURL, clone1Dir)
+	if out, err := cloneCmd1.CombinedOutput(); err != nil {
+		t.Fatalf("first clone failed: %v, output: %s", err, out)
+	}
+
+	if hits := atomic.LoadInt32(&fetchHits); hits != 1 {
+		t.Fatalf("expected 1 fetch hit after clone 1, got %d", hits)
+	}
+
+	// Create commit C2 and C3 on upstream
+	os.WriteFile(filepath.Join(seedDir, "file2.txt"), []byte("commit 2 content"), 0644)
+	exec.Command("git", "-C", seedDir, "add", ".").Run()
+	exec.Command("git", "-C", seedDir, "commit", "-m", "Commit 2").Run()
+	os.WriteFile(filepath.Join(seedDir, "file3.txt"), []byte("commit 3 content"), 0644)
+	exec.Command("git", "-C", seedDir, "add", ".").Run()
+	exec.Command("git", "-C", seedDir, "commit", "-m", "Commit 3").Run()
+	exec.Command("git", "-C", seedDir, "push", gitDir, "HEAD:main").Run()
+
+	// Client 2 clones from scratch (wants C3, haves none) -> Proxy fetches delta/full from upstream (fetchHits = 2)
+	clone2Dir := filepath.Join(clientDir, "clone2")
+	cloneCmd2 := exec.Command("git",
+		"-c", fmt.Sprintf("url.%s/.insteadOf=%s/", proxyServer.URL, upstreamServer.URL),
+		"clone", upstreamRepoURL, clone2Dir)
+	if out, err := cloneCmd2.CombinedOutput(); err != nil {
+		t.Fatalf("second clone failed: %v, output: %s", err, out)
+	}
+
+	if hits := atomic.LoadInt32(&fetchHits); hits != 2 {
+		t.Fatalf("expected 2 fetch hits after clone 2, got %d", hits)
+	}
+
+	// Client 1 (at C1) pulls to get C3 (wants C3, haves C1).
+	// Proxy MUST serve this ENTIRELY FROM CACHE (pruning C1 objects and sending C2+C3) without hitting upstream!
+	pullCmd1 := exec.Command("git", "-C", clone1Dir,
+		"-c", fmt.Sprintf("url.%s/.insteadOf=%s/", proxyServer.URL, upstreamServer.URL),
+		"pull")
+	if out, err := pullCmd1.CombinedOutput(); err != nil {
+		t.Fatalf("client 1 pull failed: %v, output: %s", err, out)
+	}
+
+	if hits := atomic.LoadInt32(&fetchHits); hits != 2 {
+		t.Fatalf("expected fetch hits to stay at 2 after client 1 pull from cache, got %d", hits)
+	}
+
+	// Verify client 1 has all files
+	for _, f := range []string{"file1.txt", "file2.txt", "file3.txt"} {
+		if _, err := os.Stat(filepath.Join(clone1Dir, f)); err != nil {
+			t.Errorf("expected %s in clone1 after pull, err: %v", f, err)
+		}
+	}
+
+	// Client 3 clones from scratch (wants C3, haves none).
+	// Proxy MUST serve Client 3 ENTIRELY FROM CACHE without hitting upstream!
+	clone3Dir := filepath.Join(clientDir, "clone3")
+	cloneCmd3 := exec.Command("git",
+		"-c", fmt.Sprintf("url.%s/.insteadOf=%s/", proxyServer.URL, upstreamServer.URL),
+		"clone", upstreamRepoURL, clone3Dir)
+	if out, err := cloneCmd3.CombinedOutput(); err != nil {
+		t.Fatalf("client 3 clone failed: %v, output: %s", err, out)
+	}
+
+	if hits := atomic.LoadInt32(&fetchHits); hits != 2 {
+		t.Fatalf("expected fetch hits to stay at 2 after client 3 clone from cache, got %d", hits)
+	}
+
+	for _, f := range []string{"file1.txt", "file2.txt", "file3.txt"} {
+		if _, err := os.Stat(filepath.Join(clone3Dir, f)); err != nil {
+			t.Errorf("expected %s in clone3 after clone, err: %v", f, err)
+		}
+	}
+
+	// Push commit C4 upstream
+	os.WriteFile(filepath.Join(seedDir, "file4.txt"), []byte("commit 4 content"), 0644)
+	exec.Command("git", "-C", seedDir, "add", ".").Run()
+	exec.Command("git", "-C", seedDir, "commit", "-m", "Commit 4").Run()
+	exec.Command("git", "-C", seedDir, "push", gitDir, "HEAD:main").Run()
+
+	// Client 1 pulls C4 (wants C4, haves C3). Proxy fetches only C4 delta from upstream (fetchHits = 3)
+	pullCmd1New := exec.Command("git", "-C", clone1Dir,
+		"-c", fmt.Sprintf("url.%s/.insteadOf=%s/", proxyServer.URL, upstreamServer.URL),
+		"pull")
+	if out, err := pullCmd1New.CombinedOutput(); err != nil {
+		t.Fatalf("client 1 second pull failed: %v, output: %s", err, out)
+	}
+
+	if hits := atomic.LoadInt32(&fetchHits); hits != 3 {
+		t.Fatalf("expected 3 fetch hits after pulling C4, got %d", hits)
+	}
+
+	// Client 2 pulls C4 (wants C4, haves C3). Proxy serves from cache!
+	pullCmd2New := exec.Command("git", "-C", clone2Dir,
+		"-c", fmt.Sprintf("url.%s/.insteadOf=%s/", proxyServer.URL, upstreamServer.URL),
+		"pull")
+	if out, err := pullCmd2New.CombinedOutput(); err != nil {
+		t.Fatalf("client 2 pull failed: %v, output: %s", err, out)
+	}
+
+	if hits := atomic.LoadInt32(&fetchHits); hits != 3 {
+		t.Fatalf("expected fetch hits to stay at 3 after client 2 pull from cache, got %d", hits)
+	}
+
+	if _, err := os.Stat(filepath.Join(clone2Dir, "file4.txt")); err != nil {
+		t.Errorf("expected file4.txt in clone2, err: %v", err)
+	}
+}
