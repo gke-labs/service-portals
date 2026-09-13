@@ -617,3 +617,315 @@ spec:
 		t.Error("GitHub HTTPS Logs do not contain correct token")
 	}
 }
+
+// TestGeminiPortal tests the end-to-end functionality of gemini-portal
+// using the mock-gemini server as a backend.
+func TestGeminiPortal(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "gemini-portal-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Paths relative to git root
+	h.DockerBuild("gemini-portal:e2e", filepath.Join(gitRoot, "gemini-portal/images/gemini-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("gemini-portal:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend (Toolbox Server in mock-gemini mode)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["mock-gemini"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+
+	// Deploy Gemini Portal Secrets
+	h.KubectlApplyContent(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gemini-portal-secret
+stringData:
+  token: gemini-mock-token
+`)
+
+	portalManifestPath := filepath.Join(gitRoot, "gemini-portal/k8s/manifests.yaml")
+	b, err := os.ReadFile(portalManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to read gemini portal manifest: %v", err)
+	}
+	portalManifest := string(b)
+	portalManifest = strings.ReplaceAll(portalManifest, "image: gemini-portal:latest", "image: gemini-portal:e2e\n        imagePullPolicy: Never")
+	portalManifest = strings.ReplaceAll(portalManifest, "value: \"https://generativelanguage.googleapis.com\"", "value: \"http://backend\"")
+
+	// Install cert-manager
+	h.t.Log("Installing cert-manager")
+	h.RunCommand("kubectl", "apply", "--server-side", "-f", "https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml")
+	// Wait for cert-manager pods to be created
+	time.Sleep(10 * time.Second)
+	// Wait for cert-manager pods to be ready
+	h.WaitForPodReady("app.kubernetes.io/instance=cert-manager", 3*time.Minute)
+
+	h.KubectlApplyContent(portalManifest)
+	h.WaitForDeployment("gemini-portal", 2*time.Minute)
+
+	// Wait for CA secret to be created by cert-manager
+	h.t.Log("Waiting for CA secret")
+	for i := 0; i < 30; i++ {
+		cmd := exec.Command("kubectl", "get", "secret", "gemini-portal-ca")
+		if err := cmd.Run(); err == nil {
+			break
+		}
+		if i == 29 {
+			t.Fatal("Timed out waiting for gemini-portal-ca secret")
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Restart gemini-portal to ensure it picks up the CA secret
+	h.RunCommand("kubectl", "rollout", "restart", "deployment/gemini-portal")
+	h.WaitForDeployment("gemini-portal", 2*time.Minute)
+
+	// Run Client
+	clientPodName := "test-client"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  labels:
+    app: test-client
+spec:
+  containers:
+  - name: toolbox
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/app/toolbox", "client", "https://backend/v1beta/models"]
+    env:
+    - name: HTTPS_PROXY
+      value: "http://gemini-portal:80"
+    - name: SSL_CERT_FILE
+      value: "/etc/ssl/certs/gemini-portal-ca.crt"
+    volumeMounts:
+    - name: ca-cert
+      mountPath: /etc/ssl/certs/gemini-portal-ca.crt
+      subPath: tls.crt
+  volumes:
+  - name: ca-cert
+    secret:
+      secretName: gemini-portal-ca
+  restartPolicy: Never
+`
+	h.KubectlApplyContent(clientManifest)
+	h.WaitForPodSuccess(clientPodName, 1*time.Minute)
+
+	logs := h.GetPodLogs(clientPodName)
+	t.Logf("Client logs: %s", logs)
+
+	// Verify
+	if !strings.Contains(logs, "X-Goog-Api-Key") {
+		t.Error("Logs do not contain X-Goog-Api-Key header")
+	}
+	if !strings.Contains(logs, "gemini-mock-token") {
+		t.Error("Logs do not contain correct gemini token")
+	}
+	if !strings.Contains(logs, "gemini-1.5-pro") {
+		t.Error("Logs do not contain expected mock models info")
+	}
+}
+
+// TestGithubPortal tests the end-to-end functionality of github-portal
+// using the mock-github server as a backend.
+func TestGithubPortal(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "github-portal-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Paths relative to git root
+	h.DockerBuild("github-portal:e2e", filepath.Join(gitRoot, "github-portal/images/github-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("github-portal:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend (Toolbox Server in mock-github mode)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["mock-github"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+
+	// Deploy GitHub Portal Secrets
+	h.KubectlApplyContent(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-portal-secret
+stringData:
+  token: github-mock-token
+`)
+
+	portalManifestPath := filepath.Join(gitRoot, "github-portal/k8s/manifests.yaml")
+	b, err := os.ReadFile(portalManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to read github portal manifest: %v", err)
+	}
+	portalManifest := string(b)
+	portalManifest = strings.ReplaceAll(portalManifest, "image: github-portal:latest", "image: github-portal:e2e\n        imagePullPolicy: Never")
+	portalManifest = strings.ReplaceAll(portalManifest, "value: \"https://api.github.com/\"", "value: \"http://backend\"")
+
+	// Install cert-manager
+	h.t.Log("Installing cert-manager")
+	h.RunCommand("kubectl", "apply", "--server-side", "-f", "https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml")
+	// Wait for cert-manager pods to be created
+	time.Sleep(10 * time.Second)
+	// Wait for cert-manager pods to be ready
+	h.WaitForPodReady("app.kubernetes.io/instance=cert-manager", 3*time.Minute)
+
+	h.KubectlApplyContent(portalManifest)
+	h.WaitForDeployment("github-portal", 2*time.Minute)
+
+	// Wait for CA secret to be created by cert-manager
+	h.t.Log("Waiting for CA secret")
+	for i := 0; i < 30; i++ {
+		cmd := exec.Command("kubectl", "get", "secret", "github-portal-ca")
+		if err := cmd.Run(); err == nil {
+			break
+		}
+		if i == 29 {
+			t.Fatal("Timed out waiting for github-portal-ca secret")
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Restart github-portal to ensure it picks up the CA secret
+	h.RunCommand("kubectl", "rollout", "restart", "deployment/github-portal")
+	h.WaitForDeployment("github-portal", 2*time.Minute)
+
+	// Run Client
+	clientPodName := "test-client"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  labels:
+    app: test-client
+spec:
+  containers:
+  - name: toolbox
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    command: ["/app/toolbox", "client", "https://backend/user"]
+    env:
+    - name: HTTPS_PROXY
+      value: "http://github-portal:80"
+    - name: SSL_CERT_FILE
+      value: "/etc/ssl/certs/github-portal-ca.crt"
+    volumeMounts:
+    - name: ca-cert
+      mountPath: /etc/ssl/certs/github-portal-ca.crt
+      subPath: tls.crt
+  volumes:
+  - name: ca-cert
+    secret:
+      secretName: github-portal-ca
+  restartPolicy: Never
+`
+	h.KubectlApplyContent(clientManifest)
+	h.WaitForPodSuccess(clientPodName, 1*time.Minute)
+
+	logs := h.GetPodLogs(clientPodName)
+	t.Logf("Client logs: %s", logs)
+
+	// Verify
+	if !strings.Contains(logs, "Authorization") {
+		t.Error("Logs do not contain Authorization header")
+	}
+	if !strings.Contains(logs, "Bearer github-mock-token") {
+		t.Error("Logs do not contain correct github token")
+	}
+	if !strings.Contains(logs, "mock-github-user") {
+		t.Error("Logs do not contain expected mock user info")
+	}
+}
