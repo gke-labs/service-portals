@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -24,14 +25,24 @@ import (
 
 type Harness struct {
 	ClusterName string
+	IPFamily    string // "ipv4" or "dual"
 	t           *testing.T
 }
 
 func NewHarness(t *testing.T, clusterName string) *Harness {
+	ipFamily := strings.ToLower(strings.TrimSpace(os.Getenv("E2E_IP_FAMILY")))
+	if ipFamily == "" {
+		ipFamily = "ipv4"
+	}
 	return &Harness{
 		ClusterName: clusterName,
+		IPFamily:    ipFamily,
 		t:           t,
 	}
+}
+
+func (h *Harness) IsDualStack() bool {
+	return h.IPFamily == "dual"
 }
 
 func (h *Harness) Setup() {
@@ -40,12 +51,43 @@ func (h *Harness) Setup() {
 	cmd := exec.Command("kind", "get", "clusters")
 	out, err := cmd.Output()
 	if err == nil && strings.Contains(string(out), h.ClusterName) {
-		h.t.Logf("Cluster %s already exists", h.ClusterName)
-		return
+		// Check whether existing cluster has matching IP family
+		cmdCheck := exec.Command("kubectl", "get", "nodes", "-o", "jsonpath={.items[0].spec.podCIDRs}")
+		outCheck, errCheck := cmdCheck.Output()
+		isClusterDual := errCheck == nil && strings.Contains(string(outCheck), ":")
+		if (h.IPFamily == "dual" && isClusterDual) || (h.IPFamily != "dual" && !isClusterDual) {
+			h.t.Logf("Cluster %s already exists with matching IP family (%s)", h.ClusterName, h.IPFamily)
+			return
+		}
+		h.t.Logf("Cluster %s exists but IP family does not match %s; recreating", h.ClusterName, h.IPFamily)
+		h.Teardown()
 	}
 
-	h.t.Logf("Creating cluster %s", h.ClusterName)
-	cmd = exec.Command("kind", "create", "cluster", "--name", h.ClusterName)
+	h.t.Logf("Creating cluster %s (IPFamily: %s)", h.ClusterName, h.IPFamily)
+	var configArgs []string
+	if h.IPFamily == "dual" {
+		tmpConfig, err := os.CreateTemp("", "kind-dual-*.yaml")
+		if err != nil {
+			h.t.Fatalf("Failed to create temporary kind config: %v", err)
+		}
+		defer os.Remove(tmpConfig.Name())
+
+		kindConfig := `kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  ipFamily: dual
+`
+		if _, err := tmpConfig.WriteString(kindConfig); err != nil {
+			h.t.Fatalf("Failed to write temporary kind config: %v", err)
+		}
+		if err := tmpConfig.Close(); err != nil {
+			h.t.Fatalf("Failed to close temporary kind config: %v", err)
+		}
+		configArgs = []string{"--config", tmpConfig.Name()}
+	}
+
+	createArgs := append([]string{"create", "cluster", "--name", h.ClusterName}, configArgs...)
+	cmd = exec.Command("kind", createArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		h.t.Fatalf("Failed to create cluster: %v\nOutput: %s", err, out)
 	}
@@ -167,6 +209,27 @@ func (h *Harness) GetServiceClusterIP(name string) string {
 		h.t.Fatalf("Failed to get ClusterIP for service %s: %v\nOutput: %s", name, err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func (h *Harness) GetServiceClusterIPs(name string) []string {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "get", "service", name, "-o", "jsonpath={.spec.clusterIPs[*]}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.t.Fatalf("Failed to get ClusterIPs for service %s: %v\nOutput: %s", name, err, out)
+	}
+	return strings.Fields(strings.TrimSpace(string(out)))
+}
+
+func (h *Harness) GetServiceIPv6ClusterIP(name string) string {
+	h.t.Helper()
+	ips := h.GetServiceClusterIPs(name)
+	for _, ip := range ips {
+		if strings.Contains(ip, ":") {
+			return ip
+		}
+	}
+	return ""
 }
 
 func (h *Harness) GetDeploymentLogs(name string) string {

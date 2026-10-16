@@ -120,7 +120,14 @@ Configured via environment variables on the `init-service-portals` container and
 | `CA_PRIVATE_DIR` | `/etc/service-portal/ca-private` | Destination directory where the CA certificate (`tls.crt`) and private key (`tls.key`) are written. Mounted only to the proxy container. |
 | `CHOWN_UID` | `-1` | UID to chown the `CA_PRIVATE_DIR` and `tls.key` to. In sidecar mode, set to `1337`. (`-1` leaves unchanged). |
 | `CHOWN_GID` | `-1` | GID to chown the `CA_PRIVATE_DIR` and `tls.key` to. In sidecar mode, set to `1337`. (`-1` leaves unchanged). |
-| `DNS_SERVER_IPS` | `/etc/resolv.conf` nameservers | Comma-separated list of DNS server IPs allowed for outbound UDP/TCP port 53 traffic. If unset, automatically reads nameservers from `/etc/resolv.conf`. All other DNS destinations are rejected by default. |
+| `DNS_SERVER_IPS` | Nameservers from `/etc/resolv.conf` | Comma-separated list of DNS server IP addresses allowed for outbound DNS requests (UDP/TCP port 53). Restricts DNS to designated resolvers (e.g. cluster DNS) to prevent DNS tunnelling. |
+| `ALLOW_METADATA` | `false` | When `false`, explicitly blocks access to cloud metadata IP ranges (`169.254.0.0/16`, AWS `fd00:ec2::254`, GCE `fd20:ce::254`, and link-local `fe80::/10`) before any allowlist rules. Set to `true` to opt into allowing metadata server access. |
+| `ALLOW_CIDRS` | `""` (empty) | Comma-separated list of IPv4 and IPv6 CIDRs the workload may reach directly without proxy interception or egress rejection (e.g. cluster service CIDRs). |
+| `ALLOW_PORTS` | `""` (empty) | Comma-separated list of additional TCP destination ports the workload may reach directly. |
+| `EGRESS_ACTION` | `REJECT` | Action to take when outbound traffic is not allowed: `REJECT` (fast failure with ICMP port unreachable) or `DROP` (silent packet drop). |
+| `ALLOW_UNFILTERED_IPV6` | `false` | When `false`, failure to apply `ip6tables` rules when IPv6 is enabled in the network namespace causes init to fail closed (`exit 1`). Set to `true` only as an escape hatch to allow container startup without IPv6 filtering. |
+
+> **Note on Egress Filtering & Idempotency**: Egress rules are applied via atomic full-table replaces with `iptables-restore` and `ip6tables-restore` using dedicated custom chains `PORTAL_OUTPUT` (in `nat`) and `PORTAL_EGRESS` (in `filter`), guaranteeing idempotency across restarts while replacing any pre-existing `nat` or `filter` rules in the pod's network namespace. Essential kernel ICMP/ICMPv6 control messages (IPv4 types 0, 3, 11; IPv6 types 1-4 and Neighbor Discovery 133-137) are allowed, while workload ping requests (`echo-request`) and unpermitted TCP/UDP egress are rejected. The effective ruleset is logged (`iptables-save`, `ip6tables-save`) on startup.
 
 #### CLI Flags (`cmd/init-service-portals`)
 

@@ -76,6 +76,10 @@ spec:
           value: "1337"
         - name: INTERCEPT_PORTS
           value: "80,443"
+        # DNS_SERVER_IPS defaults to nameservers discovered in /etc/resolv.conf at init time.
+        # Uncomment and configure explicitly only if overriding cluster DNS resolution:
+        # - name: DNS_SERVER_IPS
+        #   value: "10.96.0.10"
         - name: CHOWN_UID
           value: "1337"
         - name: CHOWN_GID

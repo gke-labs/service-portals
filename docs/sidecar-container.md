@@ -209,22 +209,31 @@ hostAliases:
 Kubernetes injects these entries into `/etc/hosts` in the pod. When the workload initiates a TCP connection to `gemini.backend:80` or `gemini.backend:443`, the kernel attempts to connect to `8.8.8.8`, which is instantly intercepted and redirected by `iptables`.
 
 ### 3. Transparent Redirection & Egress Filtering (`iptables`)
-The `init-service-portals` container sets up the following rules:
+The `init-service-portals` container sets up the following rules (mirrored in `ip6tables` for dual-stack IPv6). Rules are applied via atomic full-table replaces (`iptables-restore` and `ip6tables-restore`) using dedicated custom chains `PORTAL_OUTPUT` and `PORTAL_EGRESS`. This guarantees idempotency across container restarts, but also means any pre-existing `nat` or `filter` rules configured in the pod's network namespace by another component are replaced.
 
 #### Traffic Redirection (`nat` Table)
-1. Creates chain `PORTAL_OUTPUT` attached to `OUTPUT` for TCP.
+1. Creates dedicated chain `PORTAL_OUTPUT` attached to `OUTPUT` for TCP.
 2. Excludes loopback (`-o lo -j RETURN`).
 3. Excludes proxy UID `1337` (`-m owner --uid-owner 1337 -j RETURN`) to prevent infinite redirection loops.
 4. Redirects TCP destination port `443` to `8443` (`PROXY_HTTPS_PORT`).
 5. Redirects other specified TCP destination ports (e.g. `80`) to `8080` (`PROXY_PORT`).
 
 #### Bypass Prevention (`filter` Table)
-1. Allows loopback traffic (`-o lo -j ACCEPT`).
-2. Allows traffic to `127.0.0.1` and proxy ports `8080` and `8443`.
-3. Allows established and related connections (`-m conntrack --ctstate ESTABLISHED,RELATED`).
-4. Allows all outbound traffic from proxy UID `1337`.
-5. Allows DNS lookups on port 53 (UDP and TCP).
-6. **Rejects all other outbound TCP and UDP traffic** (`-j REJECT --reject-with icmp-port-unreachable`).
+1. Creates dedicated chain `PORTAL_EGRESS` attached to `OUTPUT`.
+2. Allows loopback traffic (`-o lo -j ACCEPT`).
+3. Allows traffic to localhost (`127.0.0.1` and `::1`).
+4. Allows established and related connections (`-m conntrack --ctstate ESTABLISHED,RELATED`).
+5. Allows all outbound traffic from proxy UID `1337`.
+6. Allows essential kernel-generated control messages:
+   - IPv4: destination-unreachable (3), time-exceeded (11), echo-reply (0).
+   - IPv6: error messages (1-4) and Neighbor Discovery (133-137: RS, RA, NS, NA, redirect).
+7. Blocks cloud metadata server IP ranges (IPv4 `169.254.0.0/16`, AWS IMDS `fd00:ec2::254/128`, GCE metadata `fd20:ce::254/128`) and IPv6 link-local destinations (`fe80::/10`, covering Azure WireServer at `fe80::1234:5678:9abc`) by default *after* Neighbor Discovery and *before* any allowlist rules (opt-in via `ALLOW_METADATA=true`).
+8. Restricts DNS lookups on port 53 (UDP and TCP) to designated DNS server IPs (`DNS_SERVER_IPS`, defaults to nameservers in `/etc/resolv.conf`).
+9. Allows direct egress to configured CIDRs (`ALLOW_CIDRS`) and extra TCP ports (`ALLOW_PORTS`).
+10. Rejects outbound ping requests (`echo-request`) from the workload while allowing loopback and proxy UID traffic.
+11. **Rejects all other outbound TCP and UDP traffic** (configurable via `EGRESS_ACTION=REJECT|DROP`, default `REJECT` with ICMP port unreachable).
+12. Fail-closed IPv6: If IPv6 is disabled in the netns (`/proc/sys/net/ipv6/conf/all/disable_ipv6=1`), IPv6 rules are skipped with an info log. Otherwise, failure to restore `ip6tables` rules is fatal (`exit 1`) unless opted out with `ALLOW_UNFILTERED_IPV6=true`.
+13. Dumps the effective ruleset (`iptables-save`, `ip6tables-save`) to pod logs on startup.
 
 ### 4. Sidecar Proxy Container (`all-in-one-portal`)
 The proxy container runs as UID `1337` and listens on:

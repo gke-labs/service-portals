@@ -87,21 +87,28 @@ To ensure traffic cannot bypass the proxy, the workload container must never be 
 ## Interception Mechanics
 
 ### 1. NAT Redirection (`iptables`)
-The `init-service-portals` container runs with `CAP_NET_ADMIN` privileges to configure `iptables` rules inside the shared pod network namespace before the application starts:
-- Creates a custom NAT chain `PORTAL_OUTPUT`.
+The `init-service-portals` container runs with `CAP_NET_ADMIN` privileges to configure `iptables` and `ip6tables` rules inside the shared pod network namespace before the application starts. Rules are applied via an atomic full-table replace (`iptables-restore` and `ip6tables-restore`), guaranteeing idempotency across container restarts while replacing any pre-existing `nat` or `filter` rules in the pod network namespace:
+- Creates a dedicated NAT chain `PORTAL_OUTPUT`.
 - Traffic on the loopback interface (`-o lo`) is untouched.
 - Traffic originating from `PROXY_UID` (`1337`) is excluded (`-m owner --uid-owner 1337 -j RETURN`) to prevent infinite redirection loops when the proxy establishes outbound connections.
 - Outbound TCP traffic destined for port `80` is redirected to local port `8080` (`PROXY_PORT`).
 - Outbound TCP traffic destined for port `443` is redirected to local port `8443` (`PROXY_HTTPS_PORT`).
 
 ### 2. Strict Egress Filtering
-To prevent malicious or compromised code in the workload from bypassing the proxy (for example, by directly connecting to an external server on port `8080` or `22`), `init-service-portals` configures strict egress filtering in the `filter` table:
+To prevent malicious or compromised code in the workload from bypassing the proxy (for example, by directly connecting to an external server on port `8080` or `22`), `init-service-portals` configures strict egress filtering in a dedicated `PORTAL_EGRESS` chain in the `filter` table:
 1. Allows loopback traffic (`-o lo -j ACCEPT`).
-2. Allows traffic to `127.0.0.1` and local proxy ports `8080` and `8443`.
+2. Allows traffic to localhost (`127.0.0.1` and `::1`).
 3. Allows established and related connections (`-m conntrack --ctstate ESTABLISHED,RELATED`).
 4. Allows all outbound traffic from `PROXY_UID` (`1337`).
-5. Allows DNS resolution queries on port 53 (UDP and TCP).
-6. **Rejects all other outbound TCP and UDP traffic** with `icmp-port-unreachable`.
+5. Allows essential kernel-generated ICMP/ICMPv6 control messages:
+   - IPv4: destination-unreachable (3), time-exceeded (11), echo-reply (0).
+   - IPv6: error messages (1-4) and Neighbor Discovery (133-137: RS, RA, NS, NA, redirect).
+6. Blocks cloud metadata server IP ranges (IPv4 `169.254.0.0/16`, AWS IMDS `fd00:ec2::254/128`, GCE metadata `fd20:ce::254/128`) and IPv6 link-local destinations (`fe80::/10`, covering Azure WireServer at `fe80::1234:5678:9abc`) by default *after* Neighbor Discovery and *before* any allowlist rules (opt-in via `ALLOW_METADATA=true`).
+7. Restricts DNS resolution queries on port 53 (UDP and TCP) to designated DNS servers (`DNS_SERVER_IPS`, defaulting to nameservers discovered in `/etc/resolv.conf`).
+8. Allows direct egress to configured CIDRs (`ALLOW_CIDRS`) and extra TCP ports (`ALLOW_PORTS`).
+9. Rejects outbound ping requests (`echo-request`) from the workload to prevent ICMP tunneling.
+10. **Rejects all other outbound TCP and UDP traffic** (configurable via `EGRESS_ACTION=REJECT|DROP`, default `REJECT` with ICMP port unreachable).
+11. Mirrors all rules in `ip6tables` with fail-closed behavior (unless IPv6 is disabled in the netns or opted out with `ALLOW_UNFILTERED_IPV6=true`), and logs the final ruleset via `iptables-save` and `ip6tables-save`.
 
 Any attempt by the workload to connect directly to external IP addresses or unauthorized ports is rejected at the packet level.
 

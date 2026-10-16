@@ -2,4 +2,5 @@
 set -e
 
 export RUN_E2E=1
+export E2E_IP_FAMILY="${E2E_IP_FAMILY:-ipv4}"
 go test -v ./tests/e2e/...

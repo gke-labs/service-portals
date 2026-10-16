@@ -18,7 +18,7 @@ COPY main.go .
 RUN CGO_ENABLED=0 GOOS=linux go build -o toolbox main.go
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates bind9-dnsutils && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates bind9-dnsutils iproute2 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/toolbox .
 ENTRYPOINT ["./toolbox"]
