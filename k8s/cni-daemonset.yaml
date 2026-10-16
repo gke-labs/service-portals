@@ -1,0 +1,113 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: service-portal-cni
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-portal-cni
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: service-portal-cni
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-portal-cni
+subjects:
+- kind: ServiceAccount
+  name: service-portal-cni
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: service-portal-node
+  namespace: kube-system
+  labels:
+    app: service-portal-node
+spec:
+  selector:
+    matchLabels:
+      app: service-portal-node
+  template:
+    metadata:
+      labels:
+        app: service-portal-node
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: service-portal-cni
+      initContainers:
+      - name: install-cni
+        image: service-portal-cni:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: cni-bin
+          mountPath: /host/opt/cni/bin
+        - name: cni-net-d
+          mountPath: /host/etc/cni/net.d
+      containers:
+      - name: service-portal-proxy
+        image: all-in-one-portal:latest
+        imagePullPolicy: IfNotPresent
+        args: ["--rules-dir=/etc/portals"]
+        ports:
+        - name: http
+          containerPort: 8080
+          hostPort: 8080
+        - name: https
+          containerPort: 8443
+          hostPort: 8443
+        env:
+        - name: PORT
+          value: "8080"
+        - name: HTTPS_PORT
+          value: "8443"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca/tls.key"
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+        - name: ca-key
+          mountPath: /etc/service-portal/ca
+          readOnly: true
+      volumes:
+      - name: cni-bin
+        hostPath:
+          path: /opt/cni/bin
+      - name: cni-net-d
+        hostPath:
+          path: /etc/cni/net.d
+      - name: rules-volume
+        secret:
+          secretName: service-portal-rules
+      - name: ca-key
+        secret:
+          secretName: service-portal-ca

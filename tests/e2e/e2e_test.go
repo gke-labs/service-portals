@@ -15,6 +15,13 @@
 package e2e
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -987,4 +994,481 @@ spec:
 		}
 		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
 	})
+}
+
+func generateTestCA() (certPEM, keyPEM []byte, err error) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "service-portal-ca",
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, nil, err
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	return certPEM, keyPEM, nil
+}
+
+func TestCNIPluginEgressDenied(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "cni-plugin-egress-denied-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Paths relative to git root
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("service-portal-cni:e2e", filepath.Join(gitRoot, "images/service-portal-cni/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("service-portal-cni:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// 1. Generate Root CA for node proxy and workload trust
+	caCertPEM, caKeyPEM, err := generateTestCA()
+	if err != nil {
+		t.Fatalf("Failed to generate test CA: %v", err)
+	}
+
+	h.KubectlApplyContent(fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-ca
+type: kubernetes.io/tls
+stringData:
+  tls.crt: |
+%s
+  tls.key: |
+%s
+`, indent(string(caCertPEM), "    "), indent(string(caKeyPEM), "    ")))
+
+	// 2. Deploy Portal Rules Secret
+	h.KubectlApplyContent(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-rules
+stringData:
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: http://backend
+      authToken: gemini-cni-token
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: http://backend
+      authToken: github-cni-token
+`)
+
+	// 3. Deploy CNI installer and node proxy DaemonSet
+	h.KubectlApplyContent(`
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: service-portal-cni
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-portal-cni
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: service-portal-cni
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-portal-cni
+subjects:
+- kind: ServiceAccount
+  name: service-portal-cni
+  namespace: default
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: service-portal-node
+  labels:
+    app: service-portal-node
+spec:
+  selector:
+    matchLabels:
+      app: service-portal-node
+  template:
+    metadata:
+      labels:
+        app: service-portal-node
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: service-portal-cni
+      initContainers:
+      - name: install-cni
+        image: service-portal-cni:e2e
+        imagePullPolicy: Never
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: cni-bin
+          mountPath: /host/opt/cni/bin
+        - name: cni-net-d
+          mountPath: /host/etc/cni/net.d
+      containers:
+      - name: service-portal-proxy
+        image: all-in-one-portal:e2e
+        imagePullPolicy: Never
+        args: ["--rules-dir=/etc/portals"]
+        ports:
+        - name: http
+          containerPort: 8080
+          hostPort: 8080
+        - name: https
+          containerPort: 8443
+          hostPort: 8443
+        env:
+        - name: PORT
+          value: "8080"
+        - name: HTTPS_PORT
+          value: "8443"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca/tls.key"
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+        - name: ca-key
+          mountPath: /etc/service-portal/ca
+          readOnly: true
+      volumes:
+      - name: cni-bin
+        hostPath:
+          path: /opt/cni/bin
+      - name: cni-net-d
+        hostPath:
+          path: /etc/cni/net.d
+      - name: rules-volume
+        secret:
+          secretName: service-portal-rules
+      - name: ca-key
+        secret:
+          secretName: service-portal-ca
+`)
+
+	h.t.Log("Waiting for service-portal-node DaemonSet to be ready")
+	h.RunCommand("kubectl", "rollout", "status", "daemonset/service-portal-node", "--timeout=2m")
+
+	// 4. Deploy Backend (Toolbox Server with two ports: 80 and 8080)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: alt
+    port: 8080
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+	time.Sleep(5 * time.Second)
+
+	backendClusterIP := h.GetServiceClusterIP("backend")
+	t.Logf("Backend ClusterIP: %s", backendClusterIP)
+
+	// 5. Deploy Workload Client Pod (NO init containers, NO NET_ADMIN, NO sidecar proxy!)
+	clientPodName := "test-client-cni-deny"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-cni-deny
+  labels:
+    app: test-client-cni-deny
+    portals.gke.io/intercept: "true"
+spec:
+  hostAliases:
+  - ip: "8.8.8.8"
+    hostnames:
+    - "gemini.backend"
+    - "github.backend"
+    - "other.backend"
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
+    command: ["/bin/sh", "-c", "sleep 3600"]
+    volumeMounts:
+    - name: ca-cert
+      mountPath: /etc/service-portal/ca
+      readOnly: true
+  volumes:
+  - name: ca-cert
+    secret:
+      secretName: service-portal-ca
+`
+	h.KubectlApplyContent(clientManifest)
+	h.WaitForPodReady("app=test-client-cni-deny", 2*time.Minute)
+
+	// Case 1: Direct IP, intercepted port (must fail and never reach backend)
+	t.Run("DirectIP_InterceptedPort_HTTP", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://"+backendClusterIP+":80/direct-ip-http")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IP HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IP HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ip-http") {
+			t.Fatalf("backend access log contains /direct-ip-http, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("DirectIP_InterceptedPort_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://"+backendClusterIP+":443/direct-ip-https")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IP HTTPS request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IP HTTPS request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ip-https") {
+			t.Fatalf("backend access log contains /direct-ip-https, request unexpectedly reached backend")
+		}
+	})
+
+	// Case 2: Unlisted hostname, intercepted port (must fail and never reach backend)
+	t.Run("UnlistedHostname_InterceptedPort_HTTP", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://other.backend/unlisted-http")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected unlisted host HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("unlisted host HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/unlisted-http") {
+			t.Fatalf("backend access log contains /unlisted-http, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("UnlistedHostname_InterceptedPort_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://other.backend/unlisted-https")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected unlisted host HTTPS request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("unlisted host HTTPS request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/unlisted-https") {
+			t.Fatalf("backend access log contains /unlisted-https, request unexpectedly reached backend")
+		}
+	})
+
+	// Case 3: Non-intercepted port (must be rejected by egress filter)
+	t.Run("NonInterceptedPort_HTTP_8080", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://backend:8080/non-intercepted-8080")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-intercepted port HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("non-intercepted port HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/non-intercepted-8080") {
+			t.Fatalf("backend access log contains /non-intercepted-8080, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("NonInterceptedPort_RawTCP_9999", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "tcp", backendClusterIP+":9999", "3s")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected raw TCP connection to port 9999 to fail, but it succeeded: %s", out)
+		}
+		t.Logf("raw TCP connection to port 9999 failed as expected: %v (output: %s)", err, out)
+	})
+
+	// Case 4: Arbitrary DNS (must fail, but cluster DNS resolution must work)
+	t.Run("ArbitraryDNS_Blocked", func(t *testing.T) {
+		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "dns", "8.8.8.8", "example.com", "3s")
+		outProbe, errProbe := cmdProbe.CombinedOutput()
+		if errProbe == nil {
+			t.Fatalf("expected DNS probe to 8.8.8.8 to fail, but it succeeded: %s", outProbe)
+		}
+		t.Logf("toolbox probe dns to 8.8.8.8 failed as expected: %v (output: %s)", errProbe, outProbe)
+
+		cmdNslookup := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"nslookup", "example.com", "8.8.8.8")
+		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
+		if errNslookup == nil {
+			t.Fatalf("expected nslookup to 8.8.8.8 to fail, but it succeeded: %s", outNslookup)
+		}
+		t.Logf("nslookup to 8.8.8.8 failed as expected: %v (output: %s)", errNslookup, outNslookup)
+	})
+
+	t.Run("ClusterDNS_Allowed", func(t *testing.T) {
+		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "dns", "cluster", "backend", "5s")
+		outProbe, errProbe := cmdProbe.CombinedOutput()
+		if errProbe != nil {
+			t.Fatalf("expected cluster DNS probe to succeed, but failed: %v (output: %s)", errProbe, outProbe)
+		}
+		t.Logf("cluster DNS probe succeeded: %s", outProbe)
+
+		cmdNslookup := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"nslookup", "backend")
+		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
+		if errNslookup != nil {
+			t.Fatalf("expected cluster nslookup to succeed, but failed: %v (output: %s)", errNslookup, outNslookup)
+		}
+		t.Logf("cluster nslookup succeeded: %s", outNslookup)
+	})
+
+	// Case 5: Positive control in the same test (asserts health and rule functionality)
+	t.Run("PositiveControl_GeminiHTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-S", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-O-", "https://gemini.backend/positive-control")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control request failed: %v (output: %s)", err, out)
+		}
+		logs := string(out)
+		t.Logf("positive control output: %s", logs)
+
+		if !strings.Contains(logs, "Authorization") {
+			t.Errorf("positive control output missing Authorization header: %s", logs)
+		}
+		if !strings.Contains(logs, "Bearer gemini-cni-token") {
+			t.Errorf("positive control output missing expected token: %s", logs)
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/positive-control") {
+			t.Fatalf("backend access log missing /positive-control")
+		}
+	})
+
+	// Case 6: Bypass attempt
+	t.Run("BypassAttempt_Disallowed", func(t *testing.T) {
+		// 1. Assert workload container UID is 1000
+		cmdUID := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "id", "-u")
+		outUID, errUID := cmdUID.CombinedOutput()
+		if errUID != nil {
+			t.Fatalf("failed to get workload UID: %v (output: %s)", errUID, outUID)
+		}
+		uid := strings.TrimSpace(string(outUID))
+		if uid != "1000" {
+			t.Errorf("expected workload UID to be 1000, got %s", uid)
+		}
+
+		// 2. Assert allowPrivilegeEscalation: false via NoNewPrivs kernel flag
+		cmdNoNewPrivs := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"grep", "NoNewPrivs", "/proc/self/status")
+		outNoNewPrivs, errNoNewPrivs := cmdNoNewPrivs.CombinedOutput()
+		if errNoNewPrivs != nil {
+			t.Fatalf("failed to read /proc/self/status for NoNewPrivs: %v (output: %s)", errNoNewPrivs, outNoNewPrivs)
+		}
+		status := strings.TrimSpace(string(outNoNewPrivs))
+		t.Logf("workload NoNewPrivs status: %s", status)
+		if !strings.Contains(status, "NoNewPrivs:\t1") && !strings.Contains(status, "NoNewPrivs: 1") {
+			t.Fatalf("expected NoNewPrivs to be 1 (allowPrivilegeEscalation: false), got: %q", status)
+		}
+
+		// 3. Workload cannot run iptables or tamper with rules (no CAP_NET_ADMIN)
+		cmdIptables := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"iptables", "-L")
+		outIptables, errIptables := cmdIptables.CombinedOutput()
+		if errIptables == nil {
+			t.Fatalf("expected iptables -L to fail inside unprivileged workload container, but succeeded: %s", outIptables)
+		}
+		t.Logf("iptables in unprivileged container failed as expected: %v (output: %s)", errIptables, outIptables)
+	})
+}
+
+func indent(s, prefix string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
 }
