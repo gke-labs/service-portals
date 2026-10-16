@@ -86,25 +86,32 @@ To ensure traffic cannot bypass the proxy, the workload container must never be 
 
 ## Interception Mechanics
 
-### 1. NAT Redirection (`iptables`)
+### 1. Sidecar DNS Resolution & Loopback Binding
+Rather than requiring artificial host aliases or pre-registering dummy IPs in `/etc/hosts`, the sidecar runs an embedded DNS server on `127.0.0.1:53` (UDP and TCP):
+- The pod is configured with `dnsPolicy: None` and `dnsConfig.nameservers: ["127.0.0.1"]`.
+- When the workload queries a hostname matching a configured `PortalRule` (e.g. `api.github.com`), the sidecar DNS server answers with the proxy's dedicated loopback alias `127.0.0.2` (`PROXY_BIND_ADDR`), preventing collisions with services running on `127.0.0.1`.
+- For unlisted domains, the sidecar DNS returns `NXDOMAIN` by default (or forwards to cluster upstream resolvers when `defaultAction: Allow`).
+- **Loop Prevention**: The proxy's upstream dialer uses an explicit `net.Resolver` connected directly to cluster DNS servers (discovered via `/etc/service-portal/upstream-resolv.conf` or `UPSTREAM_DNS_SERVERS`), guaranteeing that outbound connections for real hostnames (such as `api.github.com`) do not loop through the proxy's own local DNS responder.
+
+### 2. NAT Redirection (`iptables`)
 The `init-service-portals` container runs with `CAP_NET_ADMIN` privileges to configure `iptables` and `ip6tables` rules inside the shared pod network namespace before the application starts. Rules are applied via an atomic full-table replace (`iptables-restore` and `ip6tables-restore`), guaranteeing idempotency across container restarts while replacing any pre-existing `nat` or `filter` rules in the pod network namespace:
 - Creates a dedicated NAT chain `PORTAL_OUTPUT`.
-- Traffic on the loopback interface (`-o lo`) is untouched.
+- Traffic on the loopback interface is excluded except for `PROXY_BIND_ADDR` (`-o lo ! -d 127.0.0.2 -j RETURN`).
 - Traffic originating from `PROXY_UID` (`1337`) is excluded (`-m owner --uid-owner 1337 -j RETURN`) to prevent infinite redirection loops when the proxy establishes outbound connections.
-- Outbound TCP traffic destined for port `80` is redirected to local port `8080` (`PROXY_PORT`).
-- Outbound TCP traffic destined for port `443` is redirected to local port `8443` (`PROXY_HTTPS_PORT`).
+- With the safe sysctl `net.ipv4.ip_unprivileged_port_start=0`, the proxy binds directly to ports `80` and `443` on `127.0.0.2`. When sysctl is unavailable, iptables redirects port `80` to `8080` and `443` to `8443`.
+- NAT redirection is optional and can be disabled via `INTERCEPT_PORTS=""`.
 
-### 2. Strict Egress Filtering
+### 3. Strict Egress Filtering
 To prevent malicious or compromised code in the workload from bypassing the proxy (for example, by directly connecting to an external server on port `8080` or `22`), `init-service-portals` configures strict egress filtering in a dedicated `PORTAL_EGRESS` chain in the `filter` table:
-1. Allows loopback traffic (`-o lo -j ACCEPT`).
+1. Allows loopback traffic (`-o lo -j ACCEPT`), allowing workload communication with the local DNS responder on `127.0.0.1:53` and proxy on `127.0.0.2`.
 2. Allows traffic to localhost (`127.0.0.1` and `::1`).
 3. Allows established and related connections (`-m conntrack --ctstate ESTABLISHED,RELATED`).
-4. Allows all outbound traffic from `PROXY_UID` (`1337`).
+4. Allows all outbound traffic from `PROXY_UID` (`1337`) (including upstream DNS lookups and external API egress).
 5. Allows essential kernel-generated ICMP/ICMPv6 control messages:
    - IPv4: destination-unreachable (3), time-exceeded (11), echo-reply (0).
-   - IPv6: error messages (1-4) and Neighbor Discovery (133-137: RS, RA, NS, NA, redirect).
+   - IPv6: error messages (1-4), MLD (130-132, 143), and Neighbor Discovery (133-137: RS, RA, NS, NA, redirect).
 6. Blocks cloud metadata server IP ranges (IPv4 `169.254.0.0/16`, AWS IMDS `fd00:ec2::254/128`, GCE metadata `fd20:ce::254/128`) and IPv6 link-local destinations (`fe80::/10`, covering Azure WireServer at `fe80::1234:5678:9abc`) by default *after* Neighbor Discovery and *before* any allowlist rules (opt-in via `ALLOW_METADATA=true`).
-7. Restricts DNS resolution queries on port 53 (UDP and TCP) to designated DNS servers (`DNS_SERVER_IPS`, defaulting to nameservers discovered in `/etc/resolv.conf`).
+7. **Rejects all port 53 egress from the workload**: because the workload's only resolver is local loopback (`127.0.0.1:53`), any attempt to contact cluster or external DNS directly is rejected, closing DNS exfiltration channels. Upstream cluster DNS queries on port 53 are permitted solely for `PROXY_UID` (`1337`).
 8. Allows direct egress to configured CIDRs (`ALLOW_CIDRS`) and extra TCP ports (`ALLOW_PORTS`).
 9. Rejects outbound ping requests (`echo-request`) from the workload to prevent ICMP tunneling.
 10. **Rejects all other outbound TCP and UDP traffic** (configurable via `EGRESS_ACTION=REJECT|DROP`, default `REJECT` with ICMP port unreachable).
@@ -112,7 +119,7 @@ To prevent malicious or compromised code in the workload from bypassing the prox
 
 Any attempt by the workload to connect directly to external IP addresses or unauthorized ports is rejected at the packet level.
 
-### 3. Dynamic SNI TLS Minting
+### 4. Dynamic SNI TLS Minting
 When the workload issues an HTTPS request to an intercepted host (e.g., `https://gemini.backend` or `https://api.github.com`):
 1. The TCP connection is redirected by iptables to `all-in-one-portal` on port `8443`.
 2. The proxy inspects the Server Name Indication (SNI) in the TLS `ClientHello`.

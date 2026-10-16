@@ -92,6 +92,11 @@ These variables configure the HTTP/HTTPS proxy servers.
 | :--- | :--- | :--- |
 | `PORT` | `8080` | Port to listen on for standard HTTP requests and transparently redirected port 80 traffic. |
 | `HTTPS_PORT` | `8443` | Port to listen on for TLS connections and transparently redirected port 443 traffic. Always started; if `CA_CERT_PATH` and `CA_KEY_PATH` are not configured, the listener is active but incoming TLS handshakes fail with a certificate signing error. |
+| `PROXY_BIND_ADDR` / `--proxy-bind-addr` | `127.0.0.2` (in sidecar) / `""` | Dedicated loopback IP address to bind HTTP and HTTPS listeners, avoiding collisions with services the workload runs on `127.0.0.1`. |
+| `SERVE_DNS` / `--serve-dns` | `true` (all-in-one) / `false` | When true, starts the embedded DNS server on `DNS_BIND_ADDR` to answer queries for configured rule hosts. |
+| `DNS_BIND_ADDR` / `--dns-bind-addr` | `127.0.0.1:53` | Address and port to bind embedded DNS server (UDP and TCP). |
+| `DEFAULT_ACTION` / `--default-action` | `Deny` | Action for DNS queries not matching any configured rule: `Deny` (returns `NXDOMAIN`) or `Allow` (forwards to upstream DNS). |
+| `UPSTREAM_DNS_SERVERS` | Auto-detected | Comma-separated list of cluster DNS servers for proxy upstream dialer and DNS forwarding (discovered from `/etc/service-portal/upstream-resolv.conf` or non-loopback entries in `/etc/resolv.conf`). |
 | `RULES_DIR` / `--rules-dir` | `""` | Directory containing `PortalRule` YAML files. The `--rules-dir` flag takes precedence over the environment variable. |
 | `TARGET_URL` | *See below* | Fallback / default target URL. With a rules directory (`--rules-dir` / `RULES_DIR`), both `all-in-one-portal` and `service-portal` (as well as provider-specific portals) deny unmatched hosts unless `TARGET_URL` is explicitly set in the environment. Without a rules directory, defaults to:<br>• `service-portal` & `all-in-one-portal`: `https://generativelanguage.googleapis.com`<br>• `gemini-portal`: `https://generativelanguage.googleapis.com`<br>• `anthropic-portal`: `https://api.anthropic.com`<br>• `github-portal`: `https://api.github.com/` |
 | `UPSTREAM_AUTH_TOKEN` | `""` | Default token injected into requests when falling through to `TARGET_URL`. |
@@ -115,12 +120,13 @@ Configured via environment variables on the `init-service-portals` container and
 | `PROXY_PORT` | `8080` | Local port to which intercepted HTTP traffic is redirected. |
 | `PROXY_HTTPS_PORT` | `8443` | Local port to which intercepted HTTPS traffic (port 443) is redirected. |
 | `PROXY_UID` | `1337` | UID of the proxy container. Outbound packets owned by this UID are bypassed in NAT and allowed outbound in egress filtering. |
-| `INTERCEPT_PORTS` | `80` | Comma-separated list of TCP ports to redirect (e.g. `80,443`), or `*` for wildcard interception (redirects 443 to `PROXY_HTTPS_PORT` and all other ports to `PROXY_PORT`). |
+| `PROXY_BIND_ADDR` | `127.0.0.2` | Dedicated loopback IP address bound by the proxy. Loopback traffic to addresses other than this IP is not redirected. |
+| `INTERCEPT_PORTS` | `80` | Comma-separated list of TCP ports to redirect (e.g. `80,443`), or `*` for wildcard interception. Set to empty string `""` to disable NAT redirection entirely. |
 | `CA_DIR` | `/etc/service-portal/ca` | Destination directory where the public CA certificate (`tls.crt`) is written. Mounted to the workload container. |
 | `CA_PRIVATE_DIR` | `/etc/service-portal/ca-private` | Destination directory where the CA certificate (`tls.crt`) and private key (`tls.key`) are written. Mounted only to the proxy container. |
 | `CHOWN_UID` | `-1` | UID to chown the `CA_PRIVATE_DIR` and `tls.key` to. In sidecar mode, set to `1337`. (`-1` leaves unchanged). |
 | `CHOWN_GID` | `-1` | GID to chown the `CA_PRIVATE_DIR` and `tls.key` to. In sidecar mode, set to `1337`. (`-1` leaves unchanged). |
-| `DNS_SERVER_IPS` | Nameservers from `/etc/resolv.conf` | Comma-separated list of DNS server IP addresses allowed for outbound DNS requests (UDP/TCP port 53). Restricts DNS to designated resolvers (e.g. cluster DNS) to prevent DNS tunnelling. |
+| `DNS_SERVER_IPS` | Nameservers from `/etc/resolv.conf` | Comma-separated list of DNS server IP addresses used by the proxy sidecar's upstream resolver. Outbound port 53 egress from the workload is rejected entirely (the workload only resolves via local loopback `127.0.0.1:53`). |
 | `ALLOW_METADATA` | `false` | When `false`, explicitly blocks access to cloud metadata IP ranges (`169.254.0.0/16`, AWS `fd00:ec2::254`, GCE `fd20:ce::254`, and link-local `fe80::/10`) before any allowlist rules. Set to `true` to opt into allowing metadata server access. |
 | `ALLOW_CIDRS` | `""` (empty) | Comma-separated list of IPv4 and IPv6 CIDRs the workload may reach directly without proxy interception or egress rejection (e.g. cluster service CIDRs). |
 | `ALLOW_PORTS` | `""` (empty) | Comma-separated list of additional TCP destination ports the workload may reach directly. |

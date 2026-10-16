@@ -15,6 +15,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -51,17 +52,136 @@ type HTTPProxy struct {
 	Transport http.RoundTripper
 }
 
+// ParseResolvConf parses nameservers from a resolv.conf format file, excluding loopback addresses.
+func ParseResolvConf(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var servers []string
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "nameserver" {
+			ip := net.ParseIP(fields[1])
+			if ip != nil && !ip.IsLoopback() {
+				servers = append(servers, fields[1])
+			}
+		}
+	}
+	return servers, nil
+}
+
+// ResolveUpstreamDNSServers discovers configured upstream DNS servers.
+// It checks UPSTREAM_DNS_SERVERS, DNS_SERVER_IPS, /etc/service-portal/upstream-resolv.conf,
+// and /etc/resolv.conf, filtering out loopback addresses to prevent proxy routing loops.
+func ResolveUpstreamDNSServers() []string {
+	if env := os.Getenv("UPSTREAM_DNS_SERVERS"); env != "" {
+		return filterLoopbackServers(splitAndTrim(env))
+	}
+	if env := os.Getenv("DNS_SERVER_IPS"); env != "" {
+		return filterLoopbackServers(splitAndTrim(env))
+	}
+	if servers, err := ParseResolvConf("/etc/service-portal/ca/upstream-resolv.conf"); err == nil && len(servers) > 0 {
+		return servers
+	}
+	if servers, err := ParseResolvConf("/etc/service-portal/upstream-resolv.conf"); err == nil && len(servers) > 0 {
+		return servers
+	}
+	if servers, err := ParseResolvConf("/etc/resolv.conf"); err == nil && len(servers) > 0 {
+		return servers
+	}
+	return nil
+}
+
+func filterLoopbackServers(servers []string) []string {
+	var filtered []string
+	for _, s := range servers {
+		host, _, err := net.SplitHostPort(s)
+		if err != nil {
+			host = s
+		}
+		ip := net.ParseIP(host)
+		if ip != nil && ip.IsLoopback() {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	return filtered
+}
+
+// NewUpstreamResolver creates a net.Resolver whose Dial function connects directly
+// to the specified upstream DNS server(s).
+func NewUpstreamResolver(servers []string) *net.Resolver {
+	if len(servers) == 0 {
+		return nil
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{
+				Timeout: 5 * time.Second,
+			}
+			var lastErr error
+			for _, s := range servers {
+				target := s
+				if !strings.Contains(target, ":") {
+					target = net.JoinHostPort(target, "53")
+				}
+				conn, err := d.DialContext(ctx, network, target)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
+	}
+}
+
+// NewTransport creates an http.Transport configured with the given DNS resolver.
+func NewTransport(resolver *net.Resolver) *http.Transport {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Resolver:  resolver,
+	}
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
 func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, caKeyPath string) (*HTTPProxy, error) {
+	return NewHTTPProxyWithResolver(targetURL, authToken, authHeader, caCertPath, caKeyPath, nil)
+}
+
+func NewHTTPProxyWithResolver(targetURL *url.URL, authToken, authHeader string, caCertPath, caKeyPath string, resolver *net.Resolver) (*HTTPProxy, error) {
+	if resolver == nil {
+		servers := ResolveUpstreamDNSServers()
+		resolver = NewUpstreamResolver(servers)
+	}
+
+	var transport http.RoundTripper = NewTransport(resolver)
+	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+		transport = otelhttp.NewTransport(transport)
+	}
+
 	p := &HTTPProxy{
 		TargetURL:  targetURL,
 		AuthToken:  authToken,
 		AuthHeader: authHeader,
 		certs:      make(map[string]*tls.Certificate),
-		Transport:  http.DefaultTransport,
-	}
-
-	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
-		p.Transport = otelhttp.NewTransport(p.Transport)
+		Transport:  transport,
 	}
 
 	if caCertPath != "" && caKeyPath != "" {

@@ -19,14 +19,17 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gke-labs/service-portals/pkg/cache"
+	"github.com/gke-labs/service-portals/pkg/dns"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -38,25 +41,31 @@ type CertificateProvider interface {
 }
 
 type Config struct {
-	DefaultTargetURL  string
-	DefaultAuthHeader string
-	SetupProxy        func(*proxy.HTTPProxy)
-	CacheTTL          time.Duration
-	RulesDir          string
+	DefaultTargetURL   string
+	DefaultAuthHeader  string
+	SetupProxy         func(*proxy.HTTPProxy)
+	CacheTTL           time.Duration
+	RulesDir           string
+	ProxyBindAddr      string
+	DNSBindAddr        string
+	ServeDNS           bool
+	DefaultAction      string
+	UpstreamDNSServers []string
 }
 
 func Run(ctx context.Context, config Config) error {
+	target := os.Getenv("TARGET_URL")
+	if target == "" {
+		target = config.DefaultTargetURL
+	}
+
 	rulesDir := config.RulesDir
 	if rulesDir == "" {
 		rulesDir = os.Getenv("RULES_DIR")
 	}
 
-	target := os.Getenv("TARGET_URL")
 	if target == "" && rulesDir == "" {
-		target = config.DefaultTargetURL
-		if target == "" {
-			target = "https://generativelanguage.googleapis.com"
-		}
+		return fmt.Errorf("TARGET_URL or RULES_DIR must be configured")
 	}
 
 	upstreamAuthToken := os.Getenv("UPSTREAM_AUTH_TOKEN")
@@ -76,6 +85,12 @@ func Run(ctx context.Context, config Config) error {
 	caCertPath := os.Getenv("CA_CERT_PATH")
 	caKeyPath := os.Getenv("CA_KEY_PATH")
 
+	upstreamDNSServers := config.UpstreamDNSServers
+	if len(upstreamDNSServers) == 0 {
+		upstreamDNSServers = proxy.ResolveUpstreamDNSServers()
+	}
+	upstreamResolver := proxy.NewUpstreamResolver(upstreamDNSServers)
+
 	var fallback *proxy.HTTPProxy
 	if target != "" {
 		targetURL, err := url.Parse(target)
@@ -83,7 +98,7 @@ func Run(ctx context.Context, config Config) error {
 			return fmt.Errorf("invalid TARGET_URL: %w", err)
 		}
 
-		p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
+		p, err := proxy.NewHTTPProxyWithResolver(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath, upstreamResolver)
 		if err != nil {
 			return fmt.Errorf("failed to create proxy: %w", err)
 		}
@@ -122,12 +137,14 @@ func Run(ctx context.Context, config Config) error {
 	}
 
 	var handler http.Handler
+	var rr *RuleRouter
+
 	if rulesDir != "" {
 		var fallbackHandler http.Handler
 		if fallback != nil {
 			fallbackHandler = fallback
 		}
-		rr := NewRuleRouter(rulesDir, fallbackHandler, caCertPath, caKeyPath, cacheTTL, c)
+		rr = NewRuleRouterWithResolver(rulesDir, fallbackHandler, caCertPath, caKeyPath, cacheTTL, c, upstreamResolver)
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}
@@ -151,8 +168,10 @@ func Run(ctx context.Context, config Config) error {
 		}()
 
 		handler = rr
-	} else {
+	} else if fallback != nil {
 		handler = fallback
+	} else {
+		return fmt.Errorf("either TARGET_URL or RULES_DIR must be configured")
 	}
 
 	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
@@ -169,6 +188,18 @@ func Run(ctx context.Context, config Config) error {
 		httpsPort = "8443"
 	}
 
+	proxyBindAddr := config.ProxyBindAddr
+	if proxyBindAddr == "" {
+		proxyBindAddr = os.Getenv("PROXY_BIND_ADDR")
+	}
+
+	httpAddr := ":" + port
+	httpsAddr := ":" + httpsPort
+	if proxyBindAddr != "" && proxyBindAddr != "0.0.0.0" {
+		httpAddr = net.JoinHostPort(proxyBindAddr, port)
+		httpsAddr = net.JoinHostPort(proxyBindAddr, httpsPort)
+	}
+
 	servedHandler := handler
 	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
 		servedHandler = otelhttp.NewHandler(handler, "service-portal")
@@ -176,14 +207,14 @@ func Run(ctx context.Context, config Config) error {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    httpAddr,
 		Handler: servedHandler,
 	}
 
 	var httpsSrv *http.Server
 	if certProv, ok := handler.(CertificateProvider); ok {
 		httpsSrv = &http.Server{
-			Addr:    ":" + httpsPort,
+			Addr:    httpsAddr,
 			Handler: servedHandler,
 			TLSConfig: &tls.Config{
 				GetCertificate: certProv.GetCertificate,
@@ -200,9 +231,74 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
-	errChan := make(chan error, 2)
+	serveDNS := config.ServeDNS
+	if env := os.Getenv("SERVE_DNS"); env != "" {
+		serveDNS = (env == "true" || env == "1")
+	}
+
+	var dnsSrv *dns.Server
+	if serveDNS {
+		dnsBindAddr := config.DNSBindAddr
+		if dnsBindAddr == "" {
+			dnsBindAddr = os.Getenv("DNS_BIND_ADDR")
+		}
+		if dnsBindAddr == "" {
+			dnsBindAddr = "127.0.0.1:53"
+		}
+
+		defaultAction := config.DefaultAction
+		if defaultAction == "" {
+			defaultAction = os.Getenv("DEFAULT_ACTION")
+		}
+		if defaultAction == "" {
+			defaultAction = "Deny"
+		}
+
+		var matcher dns.RuleMatcher
+		if rr != nil {
+			matcher = rr
+		} else if fallback != nil && fallback.TargetURL != nil {
+			matcher = dns.RuleMatcherFunc(func(host string) bool {
+				targetHost := strings.ToLower(proxy.HostWithoutPort(fallback.TargetURL.Host))
+				return targetHost != "" && host == targetHost
+			})
+		}
+
+		dnsProxyIPStr := proxyBindAddr
+		if dnsProxyIPStr == "" || dnsProxyIPStr == "0.0.0.0" {
+			dnsProxyIPStr = "127.0.0.2"
+		}
+		dnsProxyIP := net.ParseIP(dnsProxyIPStr)
+
+		var dnsProxyIPv6 net.IP
+		if v6Str := os.Getenv("PROXY_BIND_ADDR_V6"); v6Str != "" {
+			dnsProxyIPv6 = net.ParseIP(v6Str)
+		} else {
+			dnsProxyIPv6 = net.ParseIP("::1")
+		}
+
+		dnsCfg := dns.Config{
+			BindAddr:        dnsBindAddr,
+			ProxyIPv4:       dnsProxyIP,
+			ProxyIPv6:       dnsProxyIPv6,
+			Matcher:         matcher,
+			DefaultAction:   defaultAction,
+			UpstreamServers: upstreamDNSServers,
+		}
+		var err error
+		dnsSrv, err = dns.NewServer(dnsCfg)
+		if err != nil {
+			return fmt.Errorf("failed to create DNS server: %w", err)
+		}
+		if err := dnsSrv.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start DNS server on %s: %w", dnsBindAddr, err)
+		}
+		log.Printf("Starting sidecar DNS server on %s (proxy IP: %s, defaultAction: %s)", dnsBindAddr, dnsProxyIP, defaultAction)
+	}
+
+	errChan := make(chan error, 3)
 	go func() {
-		log.Printf("Starting HTTP proxy on :%s forwarding to %s", port, targetDesc)
+		log.Printf("Starting HTTP proxy on %s forwarding to %s", srv.Addr, targetDesc)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("HTTP server failed: %w", err)
 		}
@@ -210,7 +306,7 @@ func Run(ctx context.Context, config Config) error {
 
 	if httpsSrv != nil {
 		go func() {
-			log.Printf("Starting HTTPS proxy on :%s forwarding to %s", httpsPort, targetDesc)
+			log.Printf("Starting HTTPS proxy on %s forwarding to %s", httpsSrv.Addr, targetDesc)
 			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				errChan <- fmt.Errorf("HTTPS server failed: %w", err)
 			}
@@ -224,6 +320,11 @@ func Run(ctx context.Context, config Config) error {
 		log.Println("Shutting down servers...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if dnsSrv != nil {
+			if err := dnsSrv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("DNS server shutdown failed: %v", err)
+			}
+		}
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown failed: %v", err)
 		}

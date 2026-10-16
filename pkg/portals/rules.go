@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -68,10 +69,16 @@ type RuleRouter struct {
 	caKeyPath  string
 	cacheTTL   time.Duration
 	cache      *cache.InMemoryCache
+	resolver   *net.Resolver
 }
 
 // NewRuleRouter creates a new RuleRouter instance.
 func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath string, cacheTTL time.Duration, c *cache.InMemoryCache) *RuleRouter {
+	return NewRuleRouterWithResolver(rulesDir, fallback, caCertPath, caKeyPath, cacheTTL, c, nil)
+}
+
+// NewRuleRouterWithResolver creates a new RuleRouter instance with an explicit upstream resolver.
+func NewRuleRouterWithResolver(rulesDir string, fallback http.Handler, caCertPath, caKeyPath string, cacheTTL time.Duration, c *cache.InMemoryCache, resolver *net.Resolver) *RuleRouter {
 	return &RuleRouter{
 		routes:     make(map[string]*Rule),
 		fallback:   fallback,
@@ -80,6 +87,7 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 		caKeyPath:  caKeyPath,
 		cacheTTL:   cacheTTL,
 		cache:      c,
+		resolver:   resolver,
 	}
 }
 
@@ -155,7 +163,7 @@ func (rr *RuleRouter) loadRules() error {
 				authHeader = "Authorization"
 			}
 
-			p, err := proxy.NewHTTPProxy(rewriteURL, rule.Spec.AuthToken, authHeader, rr.caCertPath, rr.caKeyPath)
+			p, err := proxy.NewHTTPProxyWithResolver(rewriteURL, rule.Spec.AuthToken, authHeader, rr.caCertPath, rr.caKeyPath, rr.resolver)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("failed to create proxy for rule %q: %w", rule.Metadata.Name, err))
 				continue
@@ -259,4 +267,35 @@ func (rr *RuleRouter) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificat
 	}
 
 	return nil, fmt.Errorf("no rule matches host %q and no fallback configured to sign certificate", host)
+}
+
+// MatchHost reports whether host matches a configured rule or fallback target.
+func (rr *RuleRouter) MatchHost(host string) bool {
+	host = proxy.HostWithoutPort(host)
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+
+	rr.mu.RLock()
+	defer rr.mu.RUnlock()
+
+	if _, ok := rr.routes[host]; ok {
+		return true
+	}
+
+	for rHost := range rr.routes {
+		if strings.HasPrefix(rHost, "*.") {
+			suffix := strings.TrimPrefix(rHost, "*")
+			if strings.HasSuffix(host, suffix) {
+				return true
+			}
+		}
+	}
+
+	if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok && fallbackProxy.TargetURL != nil {
+		targetHost := strings.ToLower(proxy.HostWithoutPort(fallbackProxy.TargetURL.Host))
+		if targetHost != "" && targetHost == host {
+			return true
+		}
+	}
+
+	return false
 }

@@ -23,8 +23,7 @@ stringData:
     metadata:
       name: gemini
     spec:
-      host: gemini.backend
-      rewriteUrl: https://generativelanguage.googleapis.com
+      host: generativelanguage.googleapis.com
       authToken: gemini-api-key-here
   github-rule.yaml: |
     apiVersion: portals.gke.io/v1alpha1
@@ -32,8 +31,7 @@ stringData:
     metadata:
       name: github
     spec:
-      host: github.backend
-      rewriteUrl: https://api.github.com
+      host: api.github.com
       authToken: github-token-here
 ---
 apiVersion: apps/v1
@@ -52,14 +50,26 @@ spec:
       labels:
         app: workload-with-sidecar
     spec:
-      # Use hostAliases to map backend hostnames to dummy IPs so that they resolve
-      # in the pod and trigger TCP connection attempts on port 80/443, which are then
-      # transparently intercepted by iptables.
-      hostAliases:
-      - ip: "8.8.8.8" # or any arbitrary IP; iptables will intercept all TCP traffic on target ports
-        hostnames:
-        - "gemini.backend"
-        - "github.backend"
+      # Pod DNS is configured to query the local sidecar DNS server on 127.0.0.1:53.
+      # The sidecar resolves configured PortalRule hosts to the proxy's dedicated loopback address (127.0.0.2),
+      # and answers NXDOMAIN for unlisted domains (or forwards to upstream when defaultAction: Allow).
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - "127.0.0.1"
+        searches:
+        - default.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+        options:
+        - name: ndots
+          value: "5"
+
+      # Safe sysctl allows non-root proxy UID 1337 to bind ports 80, 443, and 53 directly.
+      securityContext:
+        sysctls:
+        - name: net.ipv4.ip_unprivileged_port_start
+          value: "0"
 
       initContainers:
       # The init container configures the iptables rules and generates the Root CA
@@ -69,11 +79,13 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - name: PROXY_PORT
-          value: "8080"
+          value: "80"
         - name: PROXY_HTTPS_PORT
-          value: "8443"
+          value: "443"
         - name: PROXY_UID
           value: "1337"
+        - name: PROXY_BIND_ADDR
+          value: "127.0.0.2"
         - name: INTERCEPT_PORTS
           value: "80,443"
         # DNS_SERVER_IPS defaults to nameservers discovered in /etc/resolv.conf at init time.
@@ -99,7 +111,7 @@ spec:
       containers:
       # 1. The Workload Container: representing the actual application that is consuming
       # external services. It has no access to the API tokens, and simply makes
-      # standard HTTP requests to `http://gemini.backend`.
+      # standard HTTP/HTTPS requests to real hostnames like `https://api.github.com`.
       # NOTE: It is best practice to configure the workload container with a securityContext
       # that prevents it from running as the proxy UID (1337) and prevents privilege escalation
       # (disabling setuid/setgid binaries). This ensures that any process inside the workload
@@ -130,11 +142,25 @@ spec:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
         ports:
-        - containerPort: 8080
+        - containerPort: 80
           name: proxy
-        - containerPort: 8443
+        - containerPort: 443
           name: proxy-https
+        - containerPort: 53
+          name: dns-udp
+          protocol: UDP
+        - containerPort: 53
+          name: dns-tcp
+          protocol: TCP
         env:
+        - name: PORT
+          value: "80"
+        - name: HTTPS_PORT
+          value: "443"
+        - name: PROXY_BIND_ADDR
+          value: "127.0.0.2"
+        - name: UPSTREAM_DNS_SERVERS
+          value: "10.96.0.10"
         - name: CA_CERT_PATH
           value: "/etc/service-portal/ca-private/tls.crt"
         - name: CA_KEY_PATH
