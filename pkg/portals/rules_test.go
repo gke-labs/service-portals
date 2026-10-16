@@ -16,6 +16,7 @@ package portals
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -679,4 +680,88 @@ spec:
 			t.Error("expected non-nil cert for unmatched host with fallback")
 		}
 	})
+}
+
+func TestRuleRouter_MatchHost(t *testing.T) {
+	rulesDir := t.TempDir()
+	ruleContent := `
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: github
+spec:
+  host: api.github.com
+  rewriteUrl: https://api.github.com
+`
+	if err := os.WriteFile(filepath.Join(rulesDir, "github.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule file: %v", err)
+	}
+
+	fallbackURL, _ := url.Parse("https://generativelanguage.googleapis.com")
+	fallbackProxy, err := proxy.NewHTTPProxy(fallbackURL, "", "", "", "")
+	if err != nil {
+		t.Fatalf("failed to create fallback proxy: %v", err)
+	}
+
+	rr := NewRuleRouter(rulesDir, fallbackProxy, "", "", 0, nil)
+	if err := rr.loadRules(); err != nil {
+		t.Fatalf("failed to load rules: %v", err)
+	}
+
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"api.github.com", true},
+		{"API.GitHub.com.", true},                     // mixed-case with trailing dot
+		{"Api.Github.Com:443", true},                   // mixed-case with port
+		{"generativelanguage.googleapis.com", true},   // fallback target
+		{"GenerativeLanguage.GoogleAPIs.com.", true},   // fallback target mixed-case with trailing dot
+		{"GenerativeLanguage.GoogleAPIs.com:443", true},// fallback target mixed-case with port
+		{"unmatched.example.com", false},
+		{"unmatched.example.com.", false},
+		{"github.com", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			got := rr.MatchHost(tt.host)
+			if got != tt.want {
+				t.Errorf("MatchHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRun_ServeDNS_FailClosed_NoUpstreamResolver(t *testing.T) {
+	t.Setenv("UPSTREAM_DNS_SERVERS", "127.0.0.1:53")
+	t.Setenv("DNS_SERVER_IPS", "")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	err := Run(ctx, Config{
+		ServeDNS: true,
+	})
+	if err == nil {
+		t.Fatal("expected Run to fail closed when ServeDNS is true and no upstream resolver found, got nil")
+	}
+	if !strings.Contains(err.Error(), "upstream") {
+		t.Errorf("expected error mentioning upstream, got: %v", err)
+	}
+}
+
+func TestRun_DefaultTargetURL_WhenUnset(t *testing.T) {
+	t.Setenv("TARGET_URL", "")
+	t.Setenv("RULES_DIR", "")
+	t.Setenv("PORT", "0")
+	t.Setenv("HTTPS_PORT", "0")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // cancel immediately so Run returns without blocking
+
+	// Should not return "TARGET_URL or RULES_DIR must be configured"
+	err := Run(ctx, Config{})
+	if err != nil && strings.Contains(err.Error(), "must be configured") {
+		t.Fatalf("expected default target URL behavior, got error: %v", err)
+	}
 }
