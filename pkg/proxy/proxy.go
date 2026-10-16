@@ -15,6 +15,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -51,17 +52,152 @@ type HTTPProxy struct {
 	Transport http.RoundTripper
 }
 
+// ParseResolvConf parses nameservers from a resolv.conf format file, excluding loopback addresses.
+func ParseResolvConf(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var servers []string
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "nameserver" {
+			ip := net.ParseIP(fields[1])
+			if ip != nil && !ip.IsLoopback() {
+				servers = append(servers, fields[1])
+			}
+		}
+	}
+	return servers, nil
+}
+
+// ResolveUpstreamDNSServers discovers configured upstream DNS servers.
+// It checks UPSTREAM_DNS_SERVERS, DNS_SERVER_IPS, /etc/service-portal/upstream/upstream-resolv.conf,
+// and /etc/resolv.conf, filtering out loopback addresses to prevent proxy routing loops.
+func ResolveUpstreamDNSServers() ([]string, error) {
+	if env := os.Getenv("UPSTREAM_DNS_SERVERS"); env != "" {
+		servers := filterLoopbackServers(splitAndTrim(env))
+		if len(servers) == 0 {
+			return nil, fmt.Errorf("no usable upstream DNS servers found in UPSTREAM_DNS_SERVERS: all addresses are loopback")
+		}
+		return servers, nil
+	}
+	if env := os.Getenv("DNS_SERVER_IPS"); env != "" {
+		servers := filterLoopbackServers(splitAndTrim(env))
+		if len(servers) == 0 {
+			return nil, fmt.Errorf("no usable upstream DNS servers found in DNS_SERVER_IPS: all addresses are loopback")
+		}
+		return servers, nil
+	}
+	if servers, err := ParseResolvConf("/etc/service-portal/upstream/upstream-resolv.conf"); err == nil && len(servers) > 0 {
+		return servers, nil
+	}
+	resolvConfPath := "/etc/resolv.conf"
+	if env := os.Getenv("RESOLV_CONF"); env != "" {
+		resolvConfPath = env
+	}
+	if servers, err := ParseResolvConf(resolvConfPath); err == nil && len(servers) > 0 {
+		return servers, nil
+	}
+	return nil, fmt.Errorf("no usable upstream DNS servers found (all nameservers are loopback or unconfigured)")
+}
+
+func filterLoopbackServers(servers []string) []string {
+	var filtered []string
+	for _, s := range servers {
+		host, _, err := net.SplitHostPort(s)
+		if err != nil {
+			host = s
+		}
+		ip := net.ParseIP(host)
+		if ip != nil && ip.IsLoopback() {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	return filtered
+}
+
+// NewUpstreamResolver creates a net.Resolver whose Dial function connects directly
+// to the specified upstream DNS server(s).
+func NewUpstreamResolver(servers []string) *net.Resolver {
+	if len(servers) == 0 {
+		return nil
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{
+				Timeout: 5 * time.Second,
+			}
+			var lastErr error
+			for _, s := range servers {
+				target := s
+				if _, _, err := net.SplitHostPort(target); err != nil {
+					target = net.JoinHostPort(target, "53")
+				}
+				conn, err := d.DialContext(ctx, network, target)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, lastErr
+		},
+	}
+}
+
+// NewTransport creates an http.Transport configured with the given DNS resolver.
+func NewTransport(resolver *net.Resolver) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Resolver:  resolver,
+	}
+	transport.DialContext = dialer.DialContext
+	return transport
+}
+
 func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, caKeyPath string) (*HTTPProxy, error) {
+	servers, err := ResolveUpstreamDNSServers()
+	var resolver *net.Resolver
+	if err != nil {
+		log.Printf("No usable upstream DNS servers found, falling back to default resolver: %v", err)
+	} else {
+		resolver = NewUpstreamResolver(servers)
+	}
+	return newHTTPProxy(targetURL, authToken, authHeader, caCertPath, caKeyPath, resolver)
+}
+
+func NewHTTPProxyWithResolver(targetURL *url.URL, authToken, authHeader string, caCertPath, caKeyPath string, resolver *net.Resolver) (*HTTPProxy, error) {
+	if resolver == nil {
+		servers, err := ResolveUpstreamDNSServers()
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve upstream DNS servers: %w", err)
+		}
+		resolver = NewUpstreamResolver(servers)
+	}
+	return newHTTPProxy(targetURL, authToken, authHeader, caCertPath, caKeyPath, resolver)
+}
+
+func newHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, caKeyPath string, resolver *net.Resolver) (*HTTPProxy, error) {
+	var transport http.RoundTripper = NewTransport(resolver)
+	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+		transport = otelhttp.NewTransport(transport)
+	}
+
 	p := &HTTPProxy{
 		TargetURL:  targetURL,
 		AuthToken:  authToken,
 		AuthHeader: authHeader,
 		certs:      make(map[string]*tls.Certificate),
-		Transport:  http.DefaultTransport,
-	}
-
-	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
-		p.Transport = otelhttp.NewTransport(p.Transport)
+		Transport:  transport,
 	}
 
 	if caCertPath != "" && caKeyPath != "" {
