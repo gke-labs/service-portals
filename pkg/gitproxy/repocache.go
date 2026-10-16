@@ -28,8 +28,10 @@ type RepoStore struct {
 	objects       map[string]*RawObject
 	commits       map[string]*CommitInfo
 	treeEntries   map[string][]string // tree OID -> child OIDs
-	commitObjects map[string][]string // commit OID -> all reachable object OIDs
-	dir           string              // optional storage directory
+	commitObjects map[string][]string // commit OID -> all reachable object OIDs (bounded memo)
+	memoMu        sync.Mutex
+	memoKeys      []string
+	dir           string // optional storage directory
 }
 
 // NewRepoStore creates a new RepoStore.
@@ -106,33 +108,40 @@ func (s *RepoStore) IngestPackfile(packData []byte) ([]string, error) {
 
 	// 1. Store all raw objects
 	for _, obj := range objects {
-		s.objects[obj.OID] = obj
-
 		if obj.Type == ObjTree {
-			childOIDs, err := ParseTreeEntries(obj.Data)
+			data, err := obj.DecompressedData()
+			if err != nil {
+				return nil, fmt.Errorf("failed to decompress tree object %s: %w", obj.OID, err)
+			}
+			childOIDs, err := ParseTreeEntries(data)
 			if err != nil {
 				// Abort ingestion: an incomplete tree graph could lead HasAllCommits to lie and BuildPackfile to serve partial packs.
 				return nil, fmt.Errorf("failed to parse tree entries for %s: %w", obj.OID, err)
 			}
 			s.treeEntries[obj.OID] = childOIDs
 		} else if obj.Type == ObjCommit {
-			info := ParseCommitObject(obj.OID, obj.Data)
+			data, err := obj.DecompressedData()
+			if err != nil {
+				return nil, fmt.Errorf("failed to decompress commit object %s: %w", obj.OID, err)
+			}
+			info := ParseCommitObject(obj.OID, data)
 			s.commits[obj.OID] = info
 			newCommits = append(newCommits, obj.OID)
 		}
-	}
 
-	// 2. Compute reachable objects for all commits in store
-	for _, commit := range s.commits {
-		s.computeReachableObjects(commit)
+		// Keep object compressed in memory: clear uncompressed Data once parsed
+		if len(obj.Compressed) > 0 {
+			obj.Data = nil
+		}
+		s.objects[obj.OID] = obj
 	}
 
 	return newCommits, nil
 }
 
-// computeReachableObjects computes and caches all object OIDs reachable from a commit.
-// Caller must hold s.mu write lock.
-func (s *RepoStore) computeReachableObjects(commit *CommitInfo) {
+// computeReachableObjects computes all object OIDs reachable from a commit.
+// Caller must hold s.mu read or write lock.
+func (s *RepoStore) computeReachableObjects(commit *CommitInfo) []string {
 	visited := make(map[string]bool)
 	var objectList []string
 
@@ -162,12 +171,48 @@ func (s *RepoStore) computeReachableObjects(commit *CommitInfo) {
 
 				if childObj, ok := s.objects[childOID]; ok && childObj.Type == ObjTree {
 					queue = append(queue, childOID)
+				} else if len(s.treeEntries[childOID]) > 0 {
+					queue = append(queue, childOID)
 				}
 			}
 		}
 	}
 
-	s.commitObjects[commit.OID] = objectList
+	return objectList
+}
+
+// getReachableObjects returns all object OIDs reachable from a commit OID,
+// using a bounded LRU memo to prevent quadratic memory retention.
+// Caller must hold s.mu read lock.
+func (s *RepoStore) getReachableObjects(commitOID string) []string {
+	s.memoMu.Lock()
+	if objs, ok := s.commitObjects[commitOID]; ok && len(objs) > 0 {
+		s.memoMu.Unlock()
+		return objs
+	}
+	s.memoMu.Unlock()
+
+	var objectList []string
+	if commitInfo, ok := s.commits[commitOID]; ok {
+		objectList = s.computeReachableObjects(commitInfo)
+	} else {
+		objectList = []string{commitOID}
+	}
+
+	s.memoMu.Lock()
+	defer s.memoMu.Unlock()
+
+	const maxMemoEntries = 64
+	if len(s.commitObjects) >= maxMemoEntries && len(s.memoKeys) > 0 {
+		evictKey := s.memoKeys[0]
+		s.memoKeys = s.memoKeys[1:]
+		delete(s.commitObjects, evictKey)
+	}
+
+	s.commitObjects[commitOID] = objectList
+	s.memoKeys = append(s.memoKeys, commitOID)
+
+	return objectList
 }
 
 // CollectObjectsForCommits collects all objects needed to satisfy `wants` given client `haves`.
@@ -231,7 +276,7 @@ func (s *RepoStore) CollectObjectsForCommits(wants []string, haves []string) ([]
 	// 3. Determine objects already present in client (from excluded commits)
 	haveObjects := make(map[string]bool)
 	for excCommit := range excludedCommits {
-		for _, oid := range s.commitObjects[excCommit] {
+		for _, oid := range s.getReachableObjects(excCommit) {
 			haveObjects[oid] = true
 		}
 	}
@@ -241,7 +286,7 @@ func (s *RepoStore) CollectObjectsForCommits(wants []string, haves []string) ([]
 	var finalObjectOIDs []string
 
 	for commitOID := range neededCommits {
-		for _, oid := range s.commitObjects[commitOID] {
+		for _, oid := range s.getReachableObjects(commitOID) {
 			if !haveObjects[oid] && !neededObjects[oid] {
 				neededObjects[oid] = true
 				finalObjectOIDs = append(finalObjectOIDs, oid)
@@ -269,6 +314,30 @@ func (s *RepoStore) CollectObjectsForCommits(wants []string, haves []string) ([]
 	}
 
 	return objects, acks, nil
+}
+
+// ResidentBytes returns the sum of stored object byte slices in memory.
+// For objects stored compressed, this counts len(obj.Compressed);
+// for uncompressed objects, it counts len(obj.Data).
+func (s *RepoStore) ResidentBytes() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var total int64
+	for _, obj := range s.objects {
+		if obj.Data != nil {
+			total += int64(len(obj.Data))
+		}
+		if obj.Compressed != nil {
+			total += int64(len(obj.Compressed))
+		}
+	}
+	return total
+}
+
+// ResidentStoreSize is an alias for ResidentBytes.
+func (s *RepoStore) ResidentStoreSize() int64 {
+	return s.ResidentBytes()
 }
 
 // RepoCacheManager manages RepoStores for different repositories.
