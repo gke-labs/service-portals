@@ -796,6 +796,10 @@ spec:
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar-deny", 2*time.Minute)
 
+	runEgressDeniedAssertions(t, h, clientPodName, backendClusterIP, "gemini-sidecar-token")
+}
+
+func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendClusterIP, expectedToken string) {
 	// Case 1: Direct IP, intercepted port (must fail and never reach backend)
 	t.Run("DirectIP_InterceptedPort_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
@@ -927,7 +931,30 @@ spec:
 		t.Logf("cluster nslookup succeeded: %s", outNslookup)
 	})
 
-	// Case 5: Positive control in the same test (asserts health and rule functionality)
+	// Case 5: Positive controls in the same test (asserts health and rule functionality for HTTP and HTTPS)
+	t.Run("PositiveControl_GeminiHTTP", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://gemini.backend/positive-control-http")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control HTTP request failed: %v (output: %s)", err, out)
+		}
+		logs := string(out)
+		t.Logf("positive control HTTP output: %s", logs)
+
+		if !strings.Contains(logs, "Authorization") {
+			t.Errorf("positive control HTTP output missing Authorization header: %s", logs)
+		}
+		if !strings.Contains(logs, "Bearer "+expectedToken) {
+			t.Errorf("positive control HTTP output missing expected token (%s): %s", expectedToken, logs)
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/positive-control-http") {
+			t.Fatalf("backend access log missing /positive-control-http")
+		}
+	})
+
 	t.Run("PositiveControl_GeminiHTTPS", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
 			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://gemini.backend/positive-control")
@@ -941,8 +968,8 @@ spec:
 		if !strings.Contains(logs, "Authorization") {
 			t.Errorf("positive control output missing Authorization header: %s", logs)
 		}
-		if !strings.Contains(logs, "Bearer gemini-sidecar-token") {
-			t.Errorf("positive control output missing expected token: %s", logs)
+		if !strings.Contains(logs, "Bearer "+expectedToken) {
+			t.Errorf("positive control output missing expected token (%s): %s", expectedToken, logs)
 		}
 
 		backendLogs := h.GetDeploymentLogs("backend")
@@ -989,4 +1016,301 @@ spec:
 		}
 		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
 	})
+}
+
+func TestNRIPluginEgressDenied(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "nri-egress-denied-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Build and load images
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("init-service-portals:e2e", filepath.Join(gitRoot, "images/init-service-portals/Dockerfile"), gitRoot)
+	h.DockerBuild("portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/portal-nri-plugin/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("init-service-portals:e2e")
+	h.KindLoad("portal-nri-plugin:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend (Toolbox Server with two ports: 80 and 8080)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: alt
+    port: 8080
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+	time.Sleep(5 * time.Second)
+
+	backendClusterIP := h.GetServiceClusterIP("backend")
+	t.Logf("Backend ClusterIP: %s", backendClusterIP)
+
+	// Deploy Node-Agent DaemonSet (Proxy + NRI Plugin)
+	nodeAgentManifest := `
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portal-node-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: portal-node-agent
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: portal-node-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: portal-node-agent
+subjects:
+- kind: ServiceAccount
+  name: portal-node-agent
+  namespace: default
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nri-portal-deny-rules-secret
+stringData:
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: http://backend
+      authToken: gemini-nri-token
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: http://backend
+      authToken: github-nri-token
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: portal-node-agent
+  labels:
+    app: portal-node-agent
+spec:
+  selector:
+    matchLabels:
+      app: portal-node-agent
+  template:
+    metadata:
+      labels:
+        app: portal-node-agent
+    spec:
+      serviceAccountName: portal-node-agent
+      tolerations:
+      - key: "service-portal.gke.io/uninitialized"
+        operator: "Exists"
+        effect: "NoSchedule"
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      hostPID: true
+      initContainers:
+      - name: init-ca
+        image: init-service-portals:e2e
+        imagePullPolicy: Never
+        command: ["/usr/local/bin/init-service-portals"]
+        args: ["-cert-dir=/etc/service-portal/ca", "-key-dir=/etc/service-portal/ca", "-chown-uid=65532", "-chown-gid=65532"]
+        volumeMounts:
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+      containers:
+      - name: proxy
+        image: all-in-one-portal:e2e
+        imagePullPolicy: Never
+        env:
+        - name: PORT
+          value: "8080"
+        - name: HTTPS_PORT
+          value: "8443"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca/tls.key"
+        args: ["--rules-dir=/etc/portals"]
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+          readOnly: true
+      - name: nri-plugin
+        image: portal-nri-plugin:e2e
+        imagePullPolicy: Never
+        securityContext:
+          privileged: true
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NODE_TAINT
+          value: "service-portal.gke.io/uninitialized:NoSchedule"
+        - name: NRI_SOCKET_PATH
+          value: "/var/run/nri/nri.sock"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: INTERCEPT_LABEL
+          value: "service-portal.gke.io/intercept=true"
+        - name: INTERCEPT_HOSTS
+          value: "gemini.backend,github.backend,other.backend"
+        - name: INTERCEPT_IP
+          value: "8.8.8.8"
+        - name: PROXY_PORT
+          value: "8080"
+        - name: PROXY_HTTPS_PORT
+          value: "8443"
+        volumeMounts:
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+        - name: nri-socket
+          mountPath: /var/run/nri
+        - name: netns
+          mountPath: /run/netns
+          mountPropagation: HostToContainer
+        - name: kubelet-pods
+          mountPath: /var/lib/kubelet/pods
+          mountPropagation: HostToContainer
+        - name: containerd
+          mountPath: /var/lib/containerd
+      volumes:
+      - name: rules-volume
+        secret:
+          secretName: nri-portal-deny-rules-secret
+      - name: ca-volume
+        hostPath:
+          path: /etc/service-portal/ca
+          type: DirectoryOrCreate
+      - name: nri-socket
+        hostPath:
+          path: /var/run/nri
+      - name: netns
+        hostPath:
+          path: /run/netns
+      - name: kubelet-pods
+        hostPath:
+          path: /var/lib/kubelet/pods
+      - name: containerd
+        hostPath:
+          path: /var/lib/containerd
+`
+
+	// 1. Taint the node so uninitialized nodes cannot schedule opted-in pods
+	taintCmd := exec.Command("kubectl", "taint", "nodes", "--all", "service-portal.gke.io/uninitialized:NoSchedule", "--overwrite")
+	if out, err := taintCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to taint nodes: %v (output: %s)", err, out)
+	}
+
+	// 2. Deploy Client Pod with ONLY the intercept opt-in label:
+	// No init container, no sidecar container, no NET_ADMIN, no CA mounts, no hostAliases.
+	clientPodName := "test-client-nri-deny"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-nri-deny
+  labels:
+    app: test-client-nri-deny
+    service-portal.gke.io/intercept: "true"
+spec:
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`
+	h.KubectlApplyContent(clientManifest)
+
+	// 3. Assert the opted-in pod stays Pending while the taint is present
+	time.Sleep(3 * time.Second)
+	phaseCmd := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.status.phase}")
+	phaseOut, err := phaseCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to check client pod phase: %v (output: %s)", err, phaseOut)
+	}
+	if string(phaseOut) != "Pending" {
+		t.Fatalf("expected client pod to stay Pending while node is tainted, got %s", phaseOut)
+	}
+	t.Logf("Client pod is correctly Pending due to node taint: %s", phaseOut)
+
+	// 4. Deploy Node-Agent DaemonSet (with toleration and RBAC; connects to NRI, synchronizes, and removes taint)
+	h.KubectlApplyContent(nodeAgentManifest)
+	h.WaitForPodReady("app=portal-node-agent", 2*time.Minute)
+
+	// 5. Assert the client pod now schedules, transitions to Running, and becomes Ready
+	h.WaitForPodReady("app=test-client-nri-deny", 2*time.Minute)
+
+	// 6. Assert node taint was removed by portal-nri-plugin Synchronize
+	nodeTaintCheckCmd := exec.Command("kubectl", "get", "nodes", "-o", "jsonpath={.items[*].spec.taints}")
+	taintOut, _ := nodeTaintCheckCmd.CombinedOutput()
+	if strings.Contains(string(taintOut), "service-portal.gke.io/uninitialized") {
+		t.Fatalf("expected node taint service-portal.gke.io/uninitialized to be removed by plugin, but still found in: %s", taintOut)
+	}
+	t.Logf("Node taint verified removed: %s", taintOut)
+
+	runEgressDeniedAssertions(t, h, clientPodName, backendClusterIP, "gemini-nri-token")
 }
