@@ -170,6 +170,7 @@ The proxy intercepts the request, rewrites the destination to `https://generativ
 
 ## Documentation Index
 
+- **[PortalPolicy CRD & Specification](docs/portal-policy.md)**: Declarative per-pod policy for rules, secret references, and default-deny egress boundaries.
 - **[Architecture & Security Model](docs/architecture.md)**: Threat model, trust model, MITM mechanics, iptables egress filtering, and "Duck Identity".
 - **[Configuration Reference](docs/configuration.md)**: `PortalRule` specification, environment variables, flags, caching, and fallback behavior.
 - **[Deployment Modes](docs/deployment-modes.md)**: Comparison of Transparent Sidecar vs. Explicit Service vs. HTTP Proxy modes.
