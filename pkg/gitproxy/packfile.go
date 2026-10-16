@@ -15,6 +15,7 @@
 package gitproxy
 
 import (
+	"bufio"
 	"bytes"
 	"compress/zlib"
 	"crypto/sha1"
@@ -572,50 +573,63 @@ func BuildPackfile(objects []*RawObject) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// ExtractPackfileFromResponse extracts the raw packfile stream from a Git upload-pack response body.
-func ExtractPackfileFromResponse(respBody []byte) ([]byte, error) {
+// ExtractPackfileFromReader extracts the raw packfile stream from a Git upload-pack response body reader.
+func ExtractPackfileFromReader(r io.Reader) ([]byte, error) {
+	br := bufio.NewReader(r)
+
 	// First check if response is already raw PACK bytes
-	if bytes.HasPrefix(respBody, []byte("PACK")) {
-		return respBody, nil
+	peek, err := br.Peek(4)
+	if err == nil && bytes.Equal(peek, []byte("PACK")) {
+		return io.ReadAll(br)
 	}
 
 	var packBuf bytes.Buffer
-	pos := 0
+	for {
+		lenHex := make([]byte, 4)
+		if _, err := io.ReadFull(br, lenHex); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			return nil, err
+		}
 
-	for pos+4 <= len(respBody) {
-		lenHex := string(respBody[pos : pos+4])
-		length, err := hex.DecodeString(lenHex)
+		length, err := hex.DecodeString(string(lenHex))
 		if err != nil || len(length) != 2 {
 			break
 		}
 		pktLen := int(binary.BigEndian.Uint16(length))
-		if pktLen == 0 {
-			// Flush packet
-			pos += 4
-			continue
-		} else if pktLen == 1 || pktLen == 2 {
-			// Delim or response-end
-			pos += 4
+		if pktLen == 0 || pktLen == 1 || pktLen == 2 {
+			// Flush packet, delim, or response-end
 			continue
 		}
 
-		if pktLen < 4 || pos+pktLen > len(respBody) {
+		if pktLen < 4 {
 			break
 		}
 
-		packet := respBody[pos+4 : pos+pktLen]
-		if len(packet) > 0 {
-			band := packet[0]
-			if band == 1 {
-				// Sideband channel 1: Pack data
-				packBuf.Write(packet[1:])
-			}
+		packet := make([]byte, pktLen-4)
+		if _, err := io.ReadFull(br, packet); err != nil {
+			break
 		}
-		pos += pktLen
+
+		if len(packet) > 0 && packet[0] == 1 {
+			// Sideband channel 1: Pack data
+			packBuf.Write(packet[1:])
+		}
 	}
 
 	if packBuf.Len() > 0 {
 		return packBuf.Bytes(), nil
+	}
+
+	return nil, fmt.Errorf("no packfile found in upload-pack response")
+}
+
+// ExtractPackfileFromResponse extracts the raw packfile stream from a Git upload-pack response body.
+func ExtractPackfileFromResponse(respBody []byte) ([]byte, error) {
+	pack, err := ExtractPackfileFromReader(bytes.NewReader(respBody))
+	if err == nil {
+		return pack, nil
 	}
 
 	// Fallback: search for "PACK" in response body
@@ -623,7 +637,7 @@ func ExtractPackfileFromResponse(respBody []byte) ([]byte, error) {
 		return respBody[idx:], nil
 	}
 
-	return nil, fmt.Errorf("no packfile found in upload-pack response")
+	return nil, err
 }
 
 // FormatSidebandPackfile formats a packfile into sideband pkt-lines for Git protocol v0/v1 or v2.

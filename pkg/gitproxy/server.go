@@ -15,10 +15,12 @@
 package gitproxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -39,6 +41,23 @@ type CachedResponse struct {
 	StatusCode int
 	Header     http.Header
 	Body       []byte
+}
+
+// CachedHeader represents the metadata stored at the beginning of a streaming cache entry.
+type CachedHeader struct {
+	StatusCode int         `json:"status_code"`
+	Header     http.Header `json:"header"`
+}
+
+type cachedEntry struct {
+	StatusCode int
+	Header     http.Header
+	Body       io.ReadCloser
+}
+
+type bufferedReadCloser struct {
+	io.Reader
+	io.Closer
 }
 
 func init() {
@@ -167,25 +186,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if cacheable {
 		key := s.computeCacheKey(r, targetURL, reqBody)
-		if val, ok := s.Config.Cache.Get(key); ok {
-			var cachedResp CachedResponse
-			dec := gob.NewDecoder(bytes.NewReader(val))
-			if err := dec.Decode(&cachedResp); err != nil {
-				log.Printf("Failed to decode cache entry for %s: %v", key, err)
-			} else {
-				log.Printf("Cache HIT for %s %s", r.Method, targetURL.String())
-				for k, vv := range cachedResp.Header {
-					for _, v := range vv {
-						w.Header().Add(k, v)
-					}
+		if entry, ok := s.openCachedEntry(key); ok {
+			defer func() {
+				_ = entry.Body.Close()
+			}()
+			log.Printf("Cache HIT for %s %s", r.Method, targetURL.String())
+			for k, vv := range entry.Header {
+				for _, v := range vv {
+					w.Header().Add(k, v)
 				}
-				w.Header().Set("X-Git-Cache", "HIT")
-				w.WriteHeader(cachedResp.StatusCode)
-				if _, err := w.Write(cachedResp.Body); err != nil {
-					log.Printf("Failed to write cached response for %s: %v", key, err)
-				}
-				return
 			}
+			w.Header().Set("X-Git-Cache", "HIT")
+			w.Header().Del("Content-Length")
+			w.WriteHeader(entry.StatusCode)
+			if _, err := io.Copy(w, entry.Body); err != nil {
+				log.Printf("Failed to write cached response for %s: %v", key, err)
+			}
+			return
 		}
 	}
 
@@ -262,16 +279,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if cacheable && resp.StatusCode == http.StatusOK {
 		w.Header().Set("X-Git-Cache", "MISS")
+		w.Header().Del("Content-Length")
 
-		respBodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			log.Printf("Failed to read upstream response for %s: %v", targetURL.String(), readErr)
-			http.Error(w, "Failed to read upstream response", http.StatusBadGateway)
-			return
-		}
+		// If upstream request was modified with extra haves, response is for store, not client:
+		// keep buffering and ingesting as today, then serve from store.
+		if reqType == RequestTypeUploadPackFetch && s.RepoCache != nil && !bytes.Equal(upstreamReqBody, reqBody) {
+			respBodyBytes, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				log.Printf("Failed to read upstream response for %s: %v", targetURL.String(), readErr)
+				http.Error(w, "Failed to read upstream response", http.StatusBadGateway)
+				return
+			}
 
-		// If upload-pack fetch, ingest packfile into repo store
-		if reqType == RequestTypeUploadPackFetch && s.RepoCache != nil {
 			repoStore := s.RepoCache.GetRepoStore(targetURL.Path)
 			packData, packErr := ExtractPackfileFromResponse(respBodyBytes)
 			if packErr != nil {
@@ -285,42 +304,106 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			// If upstream request was modified with extra haves, generate client response from repo store
-			if !bytes.Equal(upstreamReqBody, reqBody) {
-				clientRespBytes, err := buildFetchFromStore(repoStore, reqBody)
-				if err != nil {
-					log.Printf("Failed to serve cache-assisted fetch for %s: %v", targetURL.Path, err)
-					http.Error(w, "cache-assisted fetch failed", http.StatusBadGateway)
-					return
-				}
-				w.Header().Del("Content-Length")
-				w.WriteHeader(http.StatusOK)
-				if _, err := w.Write(clientRespBytes); err != nil {
-					log.Printf("Failed to write cache-assisted fetch response for %s: %v", targetURL.Path, err)
-				}
+			clientRespBytes, err := buildFetchFromStore(repoStore, reqBody)
+			if err != nil {
+				log.Printf("Failed to serve cache-assisted fetch for %s: %v", targetURL.Path, err)
+				http.Error(w, "cache-assisted fetch failed", http.StatusBadGateway)
 				return
+			}
+			w.Header().Del("Content-Length")
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write(clientRespBytes); err != nil {
+				log.Printf("Failed to write cache-assisted fetch response for %s: %v", targetURL.Path, err)
+			}
+			return
+		}
+
+		// Common case: stream upstream response to client, teeing into cache
+		key := s.computeCacheKey(r, targetURL, reqBody)
+		cw, cwErr := s.createCacheWriter(key, resp.StatusCode, resp.Header)
+		if cwErr != nil {
+			log.Printf("Failed to create cache writer for %s: %v", key, cwErr)
+		} else {
+			defer func() {
+				_ = cw.Abort()
+			}()
+		}
+
+		w.WriteHeader(resp.StatusCode)
+
+		var clientStream io.Reader = resp.Body
+		if cw != nil {
+			clientStream = io.TeeReader(resp.Body, cw)
+		}
+
+		flusher, isFlusher := w.(http.Flusher)
+		buf := make([]byte, 32*1024)
+		var streamErr error
+		var totalBytes int64
+
+		for {
+			n, rErr := clientStream.Read(buf)
+			if n > 0 {
+				totalBytes += int64(n)
+				if _, wErr := w.Write(buf[:n]); wErr != nil {
+					streamErr = wErr
+					break
+				}
+				if isFlusher {
+					flusher.Flush()
+				}
+			}
+			if rErr != nil {
+				if rErr != io.EOF {
+					streamErr = rErr
+				}
+				break
 			}
 		}
 
-		// Default cache storage and write response
-		cachedResp := CachedResponse{
-			StatusCode: resp.StatusCode,
-			Header:     resp.Header.Clone(),
-			Body:       respBodyBytes,
-		}
-		var encBuf bytes.Buffer
-		if err := gob.NewEncoder(&encBuf).Encode(cachedResp); err != nil {
-			log.Printf("Failed to encode response for cache for %s: %v", targetURL.String(), err)
-		} else {
-			key := s.computeCacheKey(r, targetURL, reqBody)
-			s.Config.Cache.Set(key, encBuf.Bytes(), s.Config.CacheTTL)
-			log.Printf("Cache MISS (stored %d bytes) for %s %s", len(respBodyBytes), r.Method, targetURL.String())
+		if streamErr != nil {
+			log.Printf("Failed to stream upstream response for %s: %v", targetURL.String(), streamErr)
+			if cw != nil {
+				_ = cw.Abort()
+			}
+			return
 		}
 
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBodyBytes)))
-		w.WriteHeader(resp.StatusCode)
-		if _, err := w.Write(respBodyBytes); err != nil {
-			log.Printf("Failed to write response for %s: %v", targetURL.String(), err)
+		// If upload-pack fetch, ingest packfile from the cached copy
+		if reqType == RequestTypeUploadPackFetch && s.RepoCache != nil {
+			repoStore := s.RepoCache.GetRepoStore(targetURL.Path)
+			if cw != nil {
+				bodyReader, rErr := cw.BodyReader()
+				if rErr != nil {
+					log.Printf("Failed to get body reader for %s: %v", targetURL.Path, rErr)
+					_ = cw.Abort()
+					return
+				}
+
+				packData, packErr := ExtractPackfileFromReader(bodyReader)
+				_ = bodyReader.Close()
+				if packErr != nil {
+					log.Printf("Failed to extract packfile from response for %s: %v", targetURL.Path, packErr)
+					_ = cw.Abort()
+					return
+				}
+
+				newCommits, ingestErr := repoStore.IngestPackfile(packData)
+				if ingestErr != nil {
+					log.Printf("Failed to ingest packfile for %s: %v", targetURL.Path, ingestErr)
+					_ = cw.Abort()
+					return
+				}
+				log.Printf("Ingested packfile for %s: %d new commits cached", targetURL.Path, len(newCommits))
+			}
+		}
+
+		if cw != nil {
+			if commitErr := cw.Commit(); commitErr != nil {
+				log.Printf("Failed to commit cache entry for %s: %v", key, commitErr)
+			} else {
+				log.Printf("Cache MISS (stored %d bytes) for %s %s", totalBytes, r.Method, targetURL.String())
+			}
 		}
 		return
 	}
@@ -346,6 +429,200 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	log.Printf("Proxied %s %s -> %s [%s]", r.Method, r.URL.Path, resp.Status, targetURL.String())
+}
+
+func (s *Server) openCachedEntry(key string) (*cachedEntry, bool) {
+	if s.Config.Cache == nil {
+		return nil, false
+	}
+
+	// Try Open first (streaming from disk or memory)
+	if opener, ok := s.Config.Cache.(interface {
+		Open(key string) (io.ReadSeekCloser, error)
+	}); ok {
+		f, err := opener.Open(key)
+		if err == nil {
+			br := bufio.NewReader(f)
+			metaLine, err := br.ReadBytes('\n')
+			if err == nil {
+				var meta CachedHeader
+				if jsonErr := json.Unmarshal(bytes.TrimSpace(metaLine), &meta); jsonErr == nil && meta.StatusCode > 0 {
+					return &cachedEntry{
+						StatusCode: meta.StatusCode,
+						Header:     meta.Header,
+						Body:       &bufferedReadCloser{Reader: br, Closer: f},
+					}, true
+				}
+			}
+			// If not JSON metadata format, rewind and try legacy gob
+			if _, seekErr := f.Seek(0, io.SeekStart); seekErr == nil {
+				var cachedResp CachedResponse
+				dec := gob.NewDecoder(f)
+				if dec.Decode(&cachedResp) == nil {
+					_ = f.Close()
+					return &cachedEntry{
+						StatusCode: cachedResp.StatusCode,
+						Header:     cachedResp.Header,
+						Body:       io.NopCloser(bytes.NewReader(cachedResp.Body)),
+					}, true
+				}
+			}
+			_ = f.Close()
+		}
+	}
+
+	// Fallback to Get
+	val, ok := s.Config.Cache.Get(key)
+	if !ok {
+		return nil, false
+	}
+
+	// Check if JSON line 1
+	idx := bytes.IndexByte(val, '\n')
+	if idx != -1 {
+		var meta CachedHeader
+		if jsonErr := json.Unmarshal(bytes.TrimSpace(val[:idx]), &meta); jsonErr == nil && meta.StatusCode > 0 {
+			return &cachedEntry{
+				StatusCode: meta.StatusCode,
+				Header:     meta.Header,
+				Body:       io.NopCloser(bytes.NewReader(val[idx+1:])),
+			}, true
+		}
+	}
+
+	// Fallback to legacy gob
+	var cachedResp CachedResponse
+	dec := gob.NewDecoder(bytes.NewReader(val))
+	if dec.Decode(&cachedResp) == nil {
+		return &cachedEntry{
+			StatusCode: cachedResp.StatusCode,
+			Header:     cachedResp.Header,
+			Body:       io.NopCloser(bytes.NewReader(cachedResp.Body)),
+		}, true
+	}
+
+	return nil, false
+}
+
+type serverCacheWriter struct {
+	writer      cache.CacheWriter
+	headerBytes int
+}
+
+func (s *Server) createCacheWriter(key string, statusCode int, header http.Header) (*serverCacheWriter, error) {
+	if s.Config.Cache == nil {
+		return nil, fmt.Errorf("cache is nil")
+	}
+
+	var cw cache.CacheWriter
+	var err error
+	if sc, ok := s.Config.Cache.(cache.StreamableCache); ok {
+		cw, err = sc.NewWriter(key, s.Config.CacheTTL)
+	} else {
+		cw = &genericCacheWriter{
+			cache: s.Config.Cache,
+			key:   key,
+			ttl:   s.Config.CacheTTL,
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	meta := CachedHeader{
+		StatusCode: statusCode,
+		Header:     header.Clone(),
+	}
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		_ = cw.Abort()
+		return nil, err
+	}
+	metaLine := append(metaBytes, '\n')
+	if _, err := cw.Write(metaLine); err != nil {
+		_ = cw.Abort()
+		return nil, err
+	}
+
+	return &serverCacheWriter{
+		writer:      cw,
+		headerBytes: len(metaLine),
+	}, nil
+}
+
+func (w *serverCacheWriter) Write(p []byte) (int, error) {
+	return w.writer.Write(p)
+}
+
+func (w *serverCacheWriter) Commit() error {
+	return w.writer.Commit()
+}
+
+func (w *serverCacheWriter) Abort() error {
+	return w.writer.Abort()
+}
+
+func (w *serverCacheWriter) BodyReader() (io.ReadCloser, error) {
+	readerHolder, ok := w.writer.(interface {
+		Reader() (io.ReadCloser, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("cache writer does not support reading data before commit")
+	}
+
+	rc, err := readerHolder.Reader()
+	if err != nil {
+		return nil, err
+	}
+
+	br := bufio.NewReader(rc)
+	if _, err := br.ReadBytes('\n'); err != nil {
+		_ = rc.Close()
+		return nil, err
+	}
+
+	return &bufferedReadCloser{Reader: br, Closer: rc}, nil
+}
+
+type genericCacheWriter struct {
+	cache   cache.Cache
+	key     string
+	ttl     time.Duration
+	buf     bytes.Buffer
+	aborted bool
+	closed  bool
+}
+
+func (w *genericCacheWriter) Write(p []byte) (int, error) {
+	if w.aborted || w.closed {
+		return 0, fmt.Errorf("writer is closed")
+	}
+	return w.buf.Write(p)
+}
+
+func (w *genericCacheWriter) Reader() (io.ReadCloser, error) {
+	if w.aborted {
+		return nil, fmt.Errorf("writer was aborted")
+	}
+	return io.NopCloser(bytes.NewReader(w.buf.Bytes())), nil
+}
+
+func (w *genericCacheWriter) Abort() error {
+	w.aborted = true
+	w.buf.Reset()
+	return nil
+}
+
+func (w *genericCacheWriter) Commit() error {
+	if w.aborted {
+		return fmt.Errorf("cannot commit aborted writer")
+	}
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	w.cache.Set(w.key, w.buf.Bytes(), w.ttl)
+	return nil
 }
 
 func buildFetchFromStore(repoStore *RepoStore, reqBody []byte) ([]byte, error) {

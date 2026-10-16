@@ -85,11 +85,21 @@ func TestGitProxyRefRequestsNeverCached(t *testing.T) {
 func TestGitProxyUploadPackFetchCached(t *testing.T) {
 	var upstreamHits int32
 
+	wantCommitData := []byte("tree 4444444444444444444444444444444444444444\nauthor Alice <a@example.com> 1700000000 +0000\ncommitter Alice <a@example.com> 1700000000 +0000\n\nCommit\n")
+	wantCommitOID := ComputeOID(ObjCommit, wantCommitData)
+	commitObj := &RawObject{Type: ObjCommit, Data: wantCommitData, OID: wantCommitOID}
+	backendPack, err := BuildPackfile([]*RawObject{commitObj})
+	if err != nil {
+		t.Fatalf("BuildPackfile failed: %v", err)
+	}
+
+	backendResp := FormatSidebandPackfile(backendPack, false, nil, false)
+
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&upstreamHits, 1)
 		w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("PACK-DATA-BINARY-STREAM-CONTENT"))
+		_, _ = w.Write(backendResp)
 	}))
 	defer backend.Close()
 
@@ -102,7 +112,7 @@ func TestGitProxyUploadPackFetchCached(t *testing.T) {
 		Transport:        backend.Client().Transport,
 	})
 
-	fetchBody := []byte("0032want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n00000009done\n")
+	fetchBody := []byte(fmt.Sprintf("0032want %s\n00000009done\n", wantCommitOID))
 
 	// First fetch request -> MISS
 	req1 := httptest.NewRequest("POST", fmt.Sprintf("/%s/repo.git/git-upload-pack", u.Host), bytes.NewReader(fetchBody))
@@ -112,8 +122,8 @@ func TestGitProxyUploadPackFetchCached(t *testing.T) {
 	if w1.Header().Get("X-Git-Cache") != "MISS" {
 		t.Errorf("expected X-Git-Cache: MISS on first request, got %s", w1.Header().Get("X-Git-Cache"))
 	}
-	if w1.Body.String() != "PACK-DATA-BINARY-STREAM-CONTENT" {
-		t.Errorf("unexpected body: %s", w1.Body.String())
+	if !bytes.Equal(w1.Body.Bytes(), backendResp) {
+		t.Errorf("unexpected body on MISS: %v", w1.Body.Bytes())
 	}
 
 	// Second fetch request with same body -> HIT
@@ -124,8 +134,8 @@ func TestGitProxyUploadPackFetchCached(t *testing.T) {
 	if w2.Header().Get("X-Git-Cache") != "HIT" {
 		t.Errorf("expected X-Git-Cache: HIT on second request, got %s", w2.Header().Get("X-Git-Cache"))
 	}
-	if w2.Body.String() != "PACK-DATA-BINARY-STREAM-CONTENT" {
-		t.Errorf("unexpected body: %s", w2.Body.String())
+	if !bytes.Equal(w2.Body.Bytes(), backendResp) {
+		t.Errorf("unexpected body on HIT: %v", w2.Body.Bytes())
 	}
 
 	if atomic.LoadInt32(&upstreamHits) != 1 {
@@ -755,5 +765,236 @@ func TestGitProxyIncrementalCachingAndPruning(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(clone2Dir, "file4.txt")); err != nil {
 		t.Errorf("expected file4.txt in clone2, err: %v", err)
+	}
+}
+
+func TestGitProxyCacheMissStreamsLargeBody(t *testing.T) {
+	const bodySize = 5 * 1024 * 1024 // 5 MB
+	const chunkSize = 64 * 1024      // 64 KB
+	largePayload := make([]byte, bodySize)
+	for i := range largePayload {
+		largePayload[i] = byte(i % 251)
+	}
+
+	var upstreamHits int32
+	chunk1Sent := make(chan struct{})
+	clientReadChunk1 := make(chan struct{})
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamHits, 1)
+		w.Header().Set("Content-Type", "application/x-git-packed-objects")
+		w.WriteHeader(http.StatusOK)
+
+		flusher, isFlusher := w.(http.Flusher)
+
+		// Send chunk 1
+		_, _ = w.Write(largePayload[:chunkSize])
+		if isFlusher {
+			flusher.Flush()
+		}
+		close(chunk1Sent)
+
+		// Wait for client to receive chunk 1 before sending the rest
+		select {
+		case <-clientReadChunk1:
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for client to read chunk 1")
+			return
+		}
+
+		// Send the remaining chunks
+		for offset := chunkSize; offset < bodySize; offset += chunkSize {
+			end := offset + chunkSize
+			if end > bodySize {
+				end = bodySize
+			}
+			_, _ = w.Write(largePayload[offset:end])
+			if isFlusher {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer backend.Close()
+
+	tmpDir := t.TempDir()
+	diskCache, err := cache.NewDiskCache(tmpDir, 10*time.Minute, 1*time.Minute)
+	if err != nil {
+		t.Fatalf("failed to create disk cache: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(NewServer(Config{
+		DefaultTargetURL: backend.URL,
+		Cache:            diskCache,
+		CacheTTL:         10 * time.Minute,
+		Transport:        backend.Client().Transport,
+	}))
+	defer proxyServer.Close()
+
+	u, _ := url.Parse(backend.URL)
+	packPath := fmt.Sprintf("/%s/repo.git/objects/pack/pack-1111222233334444555566667777888899990000.pack", u.Host)
+
+	// Request 1: Cache MISS that streams
+	resp1, err := http.Get(proxyServer.URL + packPath)
+	if err != nil {
+		t.Fatalf("failed GET request 1: %v", err)
+	}
+	defer resp1.Body.Close()
+
+	if resp1.Header.Get("X-Git-Cache") != "MISS" {
+		t.Errorf("expected X-Git-Cache: MISS on request 1, got %s", resp1.Header.Get("X-Git-Cache"))
+	}
+
+	// Read chunk 1
+	chunk1Buf := make([]byte, chunkSize)
+	if _, err := io.ReadFull(resp1.Body, chunk1Buf); err != nil {
+		t.Fatalf("failed reading chunk 1: %v", err)
+	}
+	if !bytes.Equal(chunk1Buf, largePayload[:chunkSize]) {
+		t.Fatalf("chunk 1 mismatch")
+	}
+
+	// Signal backend to proceed with sending the remaining chunks
+	close(clientReadChunk1)
+
+	// Read the remaining bytes
+	remainingBuf, err := io.ReadAll(resp1.Body)
+	if err != nil {
+		t.Fatalf("failed reading remaining bytes: %v", err)
+	}
+	receivedTotal := append(chunk1Buf, remainingBuf...)
+	if len(receivedTotal) != bodySize {
+		t.Fatalf("expected %d bytes, got %d", bodySize, len(receivedTotal))
+	}
+	if !bytes.Equal(receivedTotal, largePayload) {
+		t.Fatalf("streamed body mismatch")
+	}
+
+	// Request 2: Cache HIT
+	resp2, err := http.Get(proxyServer.URL + packPath)
+	if err != nil {
+		t.Fatalf("failed GET request 2: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.Header.Get("X-Git-Cache") != "HIT" {
+		t.Errorf("expected X-Git-Cache: HIT on request 2, got %s", resp2.Header.Get("X-Git-Cache"))
+	}
+	hitBody, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		t.Fatalf("failed reading hit body: %v", err)
+	}
+	if len(hitBody) != bodySize {
+		t.Fatalf("expected %d bytes on HIT, got %d", bodySize, len(hitBody))
+	}
+	if !bytes.Equal(hitBody, largePayload) {
+		t.Fatalf("hit body mismatch with original payload")
+	}
+
+	if hits := atomic.LoadInt32(&upstreamHits); hits != 1 {
+		t.Fatalf("expected exactly 1 upstream hit, got %d", hits)
+	}
+}
+
+func TestGitProxyCacheMissBackendErrorLeavesNoCacheEntry(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("backend does not support hijacking")
+		}
+		conn, bufrw, err := hj.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Send HTTP 200 OK headers with chunked encoding
+		_, _ = bufrw.WriteString("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/x-git-packed-objects\r\n\r\n")
+		// Write partial chunk without terminal 0-length chunk
+		_, _ = bufrw.WriteString(fmt.Sprintf("%x\r\n", 32*1024))
+		_, _ = bufrw.Write(make([]byte, 32*1024))
+		_, _ = bufrw.WriteString("\r\n")
+		_ = bufrw.Flush()
+		// Abruptly close connection without terminal 0\r\n\r\n chunk
+		_ = conn.Close()
+	}))
+	defer backend.Close()
+
+	tmpDir := t.TempDir()
+	diskCache, err := cache.NewDiskCache(tmpDir, 10*time.Minute, 1*time.Minute)
+	if err != nil {
+		t.Fatalf("failed to create disk cache: %v", err)
+	}
+
+	s := NewServer(Config{
+		DefaultTargetURL: backend.URL,
+		Cache:            diskCache,
+		CacheTTL:         10 * time.Minute,
+		Transport:        backend.Client().Transport,
+	})
+
+	u, _ := url.Parse(backend.URL)
+	packPath := fmt.Sprintf("/%s/repo.git/objects/pack/pack-abcdefabcdefabcdefabcdefabcdefabcdefabcd.pack", u.Host)
+	req := httptest.NewRequest("GET", packPath, nil)
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	// Check cache under this request's key
+	targetURL, _ := ResolveUpstreamURL(req, backend.URL)
+	key := s.computeCacheKey(req, targetURL, nil)
+
+	if _, ok := diskCache.Get(key); ok {
+		t.Fatalf("expected no cache entry after backend error mid-body, but found entry")
+	}
+	if _, ok := s.openCachedEntry(key); ok {
+		t.Fatalf("expected openCachedEntry to return false after backend error mid-body")
+	}
+}
+
+func TestGitProxyCacheMissMalformedPackLeavesNoCacheEntry(t *testing.T) {
+	malformedPack := []byte("PACK-MALFORMED-PACKFILE-DATA-HERE")
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(malformedPack)
+	}))
+	defer backend.Close()
+
+	u, _ := url.Parse(backend.URL)
+	tmpDir := t.TempDir()
+	diskCache, err := cache.NewDiskCache(tmpDir, 10*time.Minute, 1*time.Minute)
+	if err != nil {
+		t.Fatalf("failed to create disk cache: %v", err)
+	}
+
+	s := NewServer(Config{
+		DefaultTargetURL: backend.URL,
+		Cache:            diskCache,
+		CacheTTL:         10 * time.Minute,
+		Transport:        backend.Client().Transport,
+	})
+
+	fetchBody := []byte("0032want 7f83b1657ff1fc5354dc1008ecf50686d3c52b78\n00000009done\n")
+	req := httptest.NewRequest("POST", fmt.Sprintf("/%s/repo.git/git-upload-pack", u.Host), bytes.NewReader(fetchBody))
+	w := httptest.NewRecorder()
+
+	s.ServeHTTP(w, req)
+
+	// Client stream should NOT be aborted (client receives the bytes)
+	if w.Header().Get("X-Git-Cache") != "MISS" {
+		t.Errorf("expected X-Git-Cache: MISS, got %s", w.Header().Get("X-Git-Cache"))
+	}
+	if !bytes.Equal(w.Body.Bytes(), malformedPack) {
+		t.Errorf("expected client to receive malformed pack bytes, got %q", w.Body.String())
+	}
+
+	// But cache entry must NOT be committed
+	targetURL, _ := ResolveUpstreamURL(req, backend.URL)
+	key := s.computeCacheKey(req, targetURL, fetchBody)
+
+	if _, ok := diskCache.Get(key); ok {
+		t.Fatalf("expected no committed cache entry after failed ingest, but found entry")
+	}
+	if _, ok := s.openCachedEntry(key); ok {
+		t.Fatalf("expected openCachedEntry to return false after failed ingest")
 	}
 }

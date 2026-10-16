@@ -33,6 +33,25 @@ type Cache interface {
 	Delete(key string)
 }
 
+// CacheWriter is a streaming writer for atomically adding entries to a cache.
+type CacheWriter interface {
+	io.Writer
+	Commit() error
+	Abort() error
+}
+
+// CacheEntryReader allows reading back the data written to a CacheWriter before or after commit.
+type CacheEntryReader interface {
+	Reader() (io.ReadCloser, error)
+}
+
+// StreamableCache is an optional interface that Cache implementations can implement
+// to support streaming writes.
+type StreamableCache interface {
+	Cache
+	NewWriter(key string, ttl time.Duration) (CacheWriter, error)
+}
+
 type cacheItem struct {
 	value      []byte
 	expiration time.Time
@@ -43,6 +62,7 @@ type InMemoryCache struct {
 	mu              sync.RWMutex
 	items           map[string]cacheItem
 	cleanupInterval time.Duration
+	maxItemSize     int64
 }
 
 // NewInMemoryCache creates a new InMemoryCache and starts a background janitor to clean up expired items.
@@ -53,9 +73,128 @@ func NewInMemoryCache(cleanupInterval time.Duration) *InMemoryCache {
 	c := &InMemoryCache{
 		items:           make(map[string]cacheItem),
 		cleanupInterval: cleanupInterval,
+		maxItemSize:     50 * 1024 * 1024, // 50MB default cap
 	}
 	go c.janitor()
 	return c
+}
+
+// SetMaxItemSize configures the maximum item size for in-memory caching.
+// A value of 0 or negative removes the cap.
+func (c *InMemoryCache) SetMaxItemSize(size int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.maxItemSize = size
+}
+
+type inMemoryReadSeekCloser struct {
+	*bytes.Reader
+}
+
+func (r *inMemoryReadSeekCloser) Close() error {
+	return nil
+}
+
+// Open retrieves an item from the in-memory cache as an io.ReadSeekCloser.
+func (c *InMemoryCache) Open(key string) (io.ReadSeekCloser, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	item, ok := c.items[key]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	if time.Now().After(item.expiration) {
+		return nil, os.ErrNotExist
+	}
+	return &inMemoryReadSeekCloser{Reader: bytes.NewReader(item.value)}, nil
+}
+
+type inMemoryCacheWriter struct {
+	cache       *InMemoryCache
+	key         string
+	ttl         time.Duration
+	buf         bytes.Buffer
+	maxItemSize int64
+	exceeded    bool
+	closed      bool
+	aborted     bool
+}
+
+func (w *inMemoryCacheWriter) Write(p []byte) (int, error) {
+	if w.aborted || w.closed {
+		return 0, fmt.Errorf("writer is closed")
+	}
+	if w.maxItemSize > 0 && int64(w.buf.Len()+len(p)) > w.maxItemSize {
+		w.exceeded = true
+		return len(p), nil
+	}
+	return w.buf.Write(p)
+}
+
+func (w *inMemoryCacheWriter) Reader() (io.ReadCloser, error) {
+	if w.aborted {
+		return nil, fmt.Errorf("writer was aborted")
+	}
+	if w.exceeded {
+		return nil, fmt.Errorf("cache item exceeded size cap")
+	}
+	return io.NopCloser(bytes.NewReader(w.buf.Bytes())), nil
+}
+
+func (w *inMemoryCacheWriter) Abort() error {
+	w.aborted = true
+	w.buf.Reset()
+	return nil
+}
+
+func (w *inMemoryCacheWriter) Commit() error {
+	if w.aborted {
+		return fmt.Errorf("cannot commit aborted writer")
+	}
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if w.exceeded {
+		w.buf.Reset()
+		return nil
+	}
+	ttl := w.ttl
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	w.cache.Set(w.key, w.buf.Bytes(), ttl)
+	return nil
+}
+
+// NewWriter creates a new CacheWriter for streaming data into the in-memory cache.
+func (c *InMemoryCache) NewWriter(key string, ttl time.Duration) (CacheWriter, error) {
+	c.mu.RLock()
+	maxItemSize := c.maxItemSize
+	c.mu.RUnlock()
+	return &inMemoryCacheWriter{
+		cache:       c,
+		key:         key,
+		ttl:         ttl,
+		maxItemSize: maxItemSize,
+	}, nil
+}
+
+// Put streams an item into the in-memory cache from an io.Reader.
+func (c *InMemoryCache) Put(key string, r io.Reader) error {
+	w, err := c.NewWriter(key, 0)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = w.Abort()
+	}()
+
+	if _, err := io.Copy(w, r); err != nil {
+		return err
+	}
+	return w.Commit()
 }
 
 // Get retrieves an item from the cache.
@@ -198,41 +337,103 @@ func (c *DiskCache) Get(key string) ([]byte, bool) {
 	return val, true
 }
 
+type diskCacheWriter struct {
+	cache   *DiskCache
+	key     string
+	ttl     time.Duration
+	tmpFile *os.File
+	path    string
+	closed  bool
+	aborted bool
+}
+
+func (w *diskCacheWriter) Write(p []byte) (int, error) {
+	if w.aborted || w.closed {
+		return 0, fmt.Errorf("writer is closed")
+	}
+	return w.tmpFile.Write(p)
+}
+
+func (w *diskCacheWriter) Reader() (io.ReadCloser, error) {
+	if w.aborted {
+		return nil, fmt.Errorf("writer was aborted")
+	}
+	if err := w.tmpFile.Sync(); err != nil {
+		return nil, err
+	}
+	return os.Open(w.path)
+}
+
+func (w *diskCacheWriter) Abort() error {
+	if w.aborted || w.closed {
+		return nil
+	}
+	w.aborted = true
+	if err := w.tmpFile.Close(); err != nil {
+		log.Printf("cache: failed to close temp file %s on abort: %v", w.path, err)
+	}
+	if err := os.Remove(w.path); err != nil && !os.IsNotExist(err) {
+		log.Printf("cache: failed to remove temp file %s on abort: %v", w.path, err)
+	}
+	return nil
+}
+
+func (w *diskCacheWriter) Commit() error {
+	if w.aborted {
+		return fmt.Errorf("cannot commit aborted writer")
+	}
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+
+	if err := w.tmpFile.Close(); err != nil {
+		if remErr := os.Remove(w.path); remErr != nil && !os.IsNotExist(remErr) {
+			log.Printf("cache: failed to remove temp file %s: %v", w.path, remErr)
+		}
+		return err
+	}
+
+	p := w.cache.keyPath(w.key)
+	now := time.Now()
+	if err := os.Chtimes(w.path, now, now); err != nil {
+		log.Printf("cache: failed to touch temp file %s: %v", w.path, err)
+	}
+
+	w.cache.mu.Lock()
+	defer w.cache.mu.Unlock()
+	return os.Rename(w.path, p)
+}
+
+// NewWriter creates a new CacheWriter for streaming data into the disk cache.
+func (c *DiskCache) NewWriter(key string, ttl time.Duration) (CacheWriter, error) {
+	tmpFile, err := os.CreateTemp(c.dir, "tmp-cache-*")
+	if err != nil {
+		return nil, err
+	}
+	return &diskCacheWriter{
+		cache:   c,
+		key:     key,
+		ttl:     ttl,
+		tmpFile: tmpFile,
+		path:    tmpFile.Name(),
+	}, nil
+}
+
 // Put streams an item into the disk cache from an io.Reader.
 func (c *DiskCache) Put(key string, r io.Reader) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	tmpFile, err := os.CreateTemp(c.dir, "tmp-cache-*")
+	w, err := c.NewWriter(key, c.defaultTTL)
 	if err != nil {
 		return err
 	}
-	tmpName := tmpFile.Name()
+	defer func() {
+		_ = w.Abort()
+	}()
 
-	if _, err := io.Copy(tmpFile, r); err != nil {
-		if err := tmpFile.Close(); err != nil {
-			log.Printf("cache: failed to close temp file %s: %v", tmpName, err)
-		}
-		if err := os.Remove(tmpName); err != nil {
-			log.Printf("cache: failed to remove temp file %s: %v", tmpName, err)
-		}
+	if _, err := io.Copy(w, r); err != nil {
 		return err
 	}
-
-	if err := tmpFile.Close(); err != nil {
-		if remErr := os.Remove(tmpName); remErr != nil {
-			log.Printf("cache: failed to remove temp file %s: %v", tmpName, remErr)
-		}
-		return err
-	}
-
-	p := c.keyPath(key)
-	now := time.Now()
-	if err := os.Chtimes(tmpName, now, now); err != nil {
-		log.Printf("cache: failed to touch temp file %s: %v", tmpName, err)
-	}
-
-	return os.Rename(tmpName, p)
+	return w.Commit()
 }
 
 // Set stores an item in the disk cache with a TTL.
