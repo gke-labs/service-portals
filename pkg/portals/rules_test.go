@@ -680,3 +680,148 @@ spec:
 		}
 	})
 }
+
+func TestExplicitProxyMode(t *testing.T) {
+	caCertPath, caKeyPath := createTestCA(t)
+
+	// Mock backend that records requests and echoes headers
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Received-Host", r.Host)
+		w.Header().Set("X-Received-Auth", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("backend-response-ok"))
+	}))
+	defer backend.Close()
+
+	rulesDir := t.TempDir()
+	ruleContent := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: gemini-rule
+spec:
+  host: "gemini.backend"
+  rewriteUrl: "%s"
+  authToken: "gemini-secret-token"
+`, backend.URL)
+
+	if err := os.WriteFile(filepath.Join(rulesDir, "gemini.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+
+	rr := NewRuleRouter(rulesDir, nil, caCertPath, caKeyPath, 0, nil)
+	if err := rr.loadRules(); err != nil {
+		t.Fatalf("failed to load rules: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(rr)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	caCertBytes, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("failed to read ca cert: %v", err)
+	}
+	rootCAs := x509.NewCertPool()
+	rootCAs.AppendCertsFromPEM(caCertBytes)
+
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				RootCAs: rootCAs,
+			},
+		},
+	}
+
+	// 1. CONNECT tunnel for HTTPS matched host (Issue #127 fix)
+	t.Run("CONNECT_HTTPS_MatchedHost", func(t *testing.T) {
+		resp, err := httpClient.Get("https://gemini.backend/test-connect")
+		if err != nil {
+			t.Fatalf("CONNECT request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200, got %d", resp.StatusCode)
+		}
+		if auth := resp.Header.Get("X-Received-Auth"); auth != "Bearer gemini-secret-token" {
+			t.Errorf("expected Bearer gemini-secret-token, got %q", auth)
+		}
+	})
+
+	// 2. Absolute-form HTTP matched host
+	t.Run("Absolute_HTTP_MatchedHost", func(t *testing.T) {
+		resp, err := httpClient.Get("http://gemini.backend/test-http")
+		if err != nil {
+			t.Fatalf("HTTP proxy request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200, got %d", resp.StatusCode)
+		}
+		if auth := resp.Header.Get("X-Received-Auth"); auth != "Bearer gemini-secret-token" {
+			t.Errorf("expected Bearer gemini-secret-token, got %q", auth)
+		}
+	})
+
+	// 3. Unmatched host denied (403 Forbidden)
+	t.Run("UnmatchedHost_Denied", func(t *testing.T) {
+		resp, err := httpClient.Get("http://unmatched.backend/test")
+		if err != nil {
+			// Connect tunnel may fail directly with 403
+			t.Logf("request correctly failed: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected status 403 Forbidden for unmatched host, got %d", resp.StatusCode)
+		}
+	})
+
+	// 4. Proxy-Authorization pod identity token
+	t.Run("ProxyAuthorization_Enforcement", func(t *testing.T) {
+		rrWithAuth := NewRuleRouter(rulesDir, nil, caCertPath, caKeyPath, 0, nil)
+		rrWithAuth.SetProxyAuthToken("workload-token-xyz")
+		if err := rrWithAuth.loadRules(); err != nil {
+			t.Fatalf("failed to load rules: %v", err)
+		}
+
+		proxyWithAuthServer := httptest.NewServer(rrWithAuth)
+		defer proxyWithAuthServer.Close()
+		authProxyURL, _ := url.Parse(proxyWithAuthServer.URL)
+
+		// Client without proxy auth -> 407
+		unauthedClient := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(authProxyURL),
+			},
+		}
+		resp, err := unauthedClient.Get("http://gemini.backend/test")
+		if err != nil {
+			t.Fatalf("unexpected transport error: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("expected status 407 Proxy Authentication Required, got %d", resp.StatusCode)
+		}
+
+		// Client with Proxy URL embedded auth (http://workload-token-xyz:x@proxy)
+		authedProxyURL, _ := url.Parse(authProxyURL.String())
+		authedProxyURL.User = url.UserPassword("workload-token-xyz", "ignored")
+		authedClient := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(authedProxyURL),
+			},
+		}
+		authedResp, err := authedClient.Get("http://gemini.backend/test")
+		if err != nil {
+			t.Fatalf("authenticated proxy request failed: %v", err)
+		}
+		authedResp.Body.Close()
+		if authedResp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200 for authenticated proxy request, got %d", authedResp.StatusCode)
+		}
+	})
+}

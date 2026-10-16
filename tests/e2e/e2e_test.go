@@ -15,6 +15,16 @@
 package e2e
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -796,6 +806,20 @@ spec:
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar-deny", 2*time.Minute)
 
+	runEgressDeniedAssertions(t, h, clientPodName, backendClusterIP, EgressDeniedTestOpts{
+		CACertPath:               "/etc/service-portal/ca/tls.crt",
+		CheckNetworkPolicyBypass: false,
+	})
+}
+
+type EgressDeniedTestOpts struct {
+	CACertPath               string
+	CheckNetworkPolicyBypass bool
+}
+
+func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName string, backendClusterIP string, opts EgressDeniedTestOpts) {
+	t.Helper()
+
 	// Case 1: Direct IP, intercepted port (must fail and never reach backend)
 	t.Run("DirectIP_InterceptedPort_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
@@ -814,7 +838,7 @@ spec:
 
 	t.Run("DirectIP_InterceptedPort_HTTPS", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://"+backendClusterIP+":443/direct-ip-https")
+			"wget", "-T", "5", "--ca-certificate="+opts.CACertPath, "-qO-", "https://"+backendClusterIP+":443/direct-ip-https")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("expected direct IP HTTPS request to fail, but it succeeded: %s", out)
@@ -845,7 +869,7 @@ spec:
 
 	t.Run("UnlistedHostname_InterceptedPort_HTTPS", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://other.backend/unlisted-https")
+			"wget", "-T", "5", "--ca-certificate="+opts.CACertPath, "-qO-", "https://other.backend/unlisted-https")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("expected unlisted host HTTPS request to fail, but it succeeded: %s", out)
@@ -928,7 +952,7 @@ spec:
 	// Case 5: Positive control in the same test (asserts health and rule functionality)
 	t.Run("PositiveControl_GeminiHTTPS", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://gemini.backend/positive-control")
+			"wget", "--ca-certificate="+opts.CACertPath, "-qO-", "https://gemini.backend/positive-control")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("positive control request failed: %v (output: %s)", err, out)
@@ -986,5 +1010,473 @@ spec:
 			t.Fatalf("expected su to UID 1337 to fail, but it succeeded: %s", outSu)
 		}
 		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
+
+		// 4. In application-level mode, verify that unsetting proxy env vars is blocked by NetworkPolicy
+		if opts.CheckNetworkPolicyBypass {
+			cmdBypass := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+				"env", "-u", "HTTP_PROXY", "-u", "HTTPS_PROXY", "-u", "http_proxy", "-u", "https_proxy",
+				"wget", "-T", "3", "-qO-", "http://"+backendClusterIP+":80/direct-bypass-netpol")
+			outBypass, errBypass := cmdBypass.CombinedOutput()
+			if errBypass == nil {
+				t.Fatalf("expected direct unproxied HTTP request to fail via NetworkPolicy, but it succeeded: %s", outBypass)
+			}
+			t.Logf("direct unproxied HTTP request failed as expected via NetworkPolicy: %v (output: %s)", errBypass, outBypass)
+
+			backendLogs := h.GetDeploymentLogs("backend")
+			if strings.Contains(backendLogs, "/direct-bypass-netpol") {
+				t.Fatalf("backend access log contains /direct-bypass-netpol, request unexpectedly bypassed NetworkPolicy")
+			}
+		}
+	})
+}
+
+func generateE2ETLSCert(t *testing.T, commonName string, dnsNames []string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate private key: %v", err)
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("failed to generate serial number: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName:   commonName,
+			Organization: []string{"E2E Test"},
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              dnsNames,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("failed to marshal private key: %v", err)
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
+
+	return certPEM, keyPEM
+}
+
+func TestApplicationLevelEgressDenied(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "applevel-egress-denied-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Build required container images
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("applevel-injector:e2e", filepath.Join(gitRoot, "images/applevel-injector/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("applevel-injector:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// 1. Deploy Backend (Toolbox Server with two ports: 80 and 8080)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: alt
+    port: 8080
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+	time.Sleep(5 * time.Second)
+
+	backendClusterIP := h.GetServiceClusterIP("backend")
+	t.Logf("Backend ClusterIP: %s", backendClusterIP)
+
+	// 2. Generate Proxy CA cert and key
+	proxyCACert, proxyCAKey := generateE2ETLSCert(t, "service-portal-ca", []string{
+		"service-portal",
+		"service-portal.default",
+		"service-portal.default.svc",
+		"service-portal.default.svc.cluster.local",
+	})
+
+	proxyCAManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-ca
+data:
+  tls.crt: %s
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-ca-key
+data:
+  tls.crt: %s
+  tls.key: %s
+`, base64.StdEncoding.EncodeToString(proxyCACert),
+		base64.StdEncoding.EncodeToString(proxyCACert),
+		base64.StdEncoding.EncodeToString(proxyCAKey))
+	h.KubectlApplyContent(proxyCAManifest)
+
+	// 3. Deploy standalone service-portal Deployment & Service
+	portalRulesSecret := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-rules-secret
+stringData:
+  gemini-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: gemini
+    spec:
+      host: gemini.backend
+      rewriteUrl: http://backend
+      authToken: gemini-sidecar-token
+  github-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: github
+    spec:
+      host: github.backend
+      rewriteUrl: http://backend
+      authToken: github-sidecar-token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-portal
+  labels:
+    app: service-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-portal
+  template:
+    metadata:
+      labels:
+        app: service-portal
+    spec:
+      containers:
+      - name: service-portal
+        image: all-in-one-portal:e2e
+        imagePullPolicy: Never
+        env:
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca-private/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca-private/tls.key"
+        - name: PROXY_PORT
+          value: "8080"
+        - name: PROXY_HTTPS_PORT
+          value: "8443"
+        args: ["--rules-dir=/etc/portals"]
+        ports:
+        - name: proxy
+          containerPort: 8080
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+        - name: ca-key
+          mountPath: /etc/service-portal/ca-private
+          readOnly: true
+      volumes:
+      - name: rules-volume
+        secret:
+          secretName: service-portal-rules-secret
+      - name: ca-key
+        secret:
+          secretName: service-portal-ca-key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-portal
+  labels:
+    app: service-portal
+spec:
+  selector:
+    app: service-portal
+  ports:
+  - name: proxy
+    port: 8080
+    targetPort: 8080
+`
+	h.KubectlApplyContent(portalRulesSecret)
+	h.WaitForDeployment("service-portal", 2*time.Minute)
+
+	// 4. Generate Webhook TLS cert and key
+	webhookCert, webhookKey := generateE2ETLSCert(t, "applevel-injector.default.svc", []string{
+		"applevel-injector",
+		"applevel-injector.default",
+		"applevel-injector.default.svc",
+		"applevel-injector.default.svc.cluster.local",
+	})
+
+	webhookManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: applevel-injector-tls
+data:
+  tls.crt: %s
+  tls.key: %s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: applevel-injector
+  labels:
+    app: applevel-injector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: applevel-injector
+  template:
+    metadata:
+      labels:
+        app: applevel-injector
+    spec:
+      containers:
+      - name: injector
+        image: applevel-injector:e2e
+        imagePullPolicy: Never
+        args:
+        - "--port=8443"
+        - "--tls-cert-file=/etc/webhook/certs/tls.crt"
+        - "--tls-key-file=/etc/webhook/certs/tls.key"
+        - "--proxy-url=http://service-portal.default.svc:8080"
+        - "--ca-secret-name=service-portal-ca"
+        ports:
+        - containerPort: 8443
+        volumeMounts:
+        - name: tls-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: applevel-injector-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: applevel-injector
+spec:
+  selector:
+    app: applevel-injector
+  ports:
+  - name: https
+    port: 8443
+    targetPort: 8443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: applevel-injector-webhook
+webhooks:
+- name: applevel.portals.gke.io
+  rules:
+  - apiGroups: [""]
+    apiVersions: ["v1"]
+    operations: ["CREATE"]
+    resources: ["pods"]
+    scope: "Namespaced"
+  clientConfig:
+    service:
+      name: applevel-injector
+      namespace: default
+      path: /mutate
+      port: 8443
+    caBundle: %s
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+  timeoutSeconds: 5
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: In
+      values: ["default"]
+`, base64.StdEncoding.EncodeToString(webhookCert),
+		base64.StdEncoding.EncodeToString(webhookKey),
+		base64.StdEncoding.EncodeToString(webhookCert))
+
+	h.KubectlApplyContent(webhookManifest)
+	h.WaitForDeployment("applevel-injector", 2*time.Minute)
+	time.Sleep(3 * time.Second)
+
+	// 5. Deploy NetworkPolicy enforcing default-deny egress
+	netpolManifest := `
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workload-applevel-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: test-client-applevel-deny
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: service-portal
+    ports:
+    - protocol: TCP
+      port: 8080
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+`
+	h.KubectlApplyContent(netpolManifest)
+
+	// 6. Deploy Client Pod with ONLY the opt-in label:
+	// NO init containers, NO NET_ADMIN, NO manual env or volume mounts
+	clientPodName := "test-client-applevel-deny"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-applevel-deny
+  labels:
+    app: test-client-applevel-deny
+    portal.gke.io/enabled: "true"
+spec:
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`
+	h.KubectlApplyContent(clientManifest)
+	h.WaitForPodReady("app=test-client-applevel-deny", 2*time.Minute)
+
+	// Verify pod spec in API server:
+	// - Must contain NO init containers
+	// - Container must have NO NET_ADMIN capability
+	// - Injected proxy env and CA mount must be present
+	podJSONOut, err := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to get pod JSON: %v (output: %s)", err, podJSONOut)
+	}
+
+	var podObj struct {
+		Spec struct {
+			InitContainers []any `json:"initContainers"`
+			Containers     []struct {
+				SecurityContext struct {
+					Capabilities struct {
+						Add []string `json:"add"`
+					} `json:"capabilities"`
+				} `json:"securityContext"`
+				Env []struct {
+					Name  string `json:"name"`
+					Value string `json:"value"`
+				} `json:"env"`
+			} `json:"containers"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(podJSONOut, &podObj); err != nil {
+		t.Fatalf("failed to parse pod JSON: %v", err)
+	}
+
+	if len(podObj.Spec.InitContainers) > 0 {
+		t.Fatalf("workload pod unexpectedly contains %d init containers", len(podObj.Spec.InitContainers))
+	}
+	for _, capName := range podObj.Spec.Containers[0].SecurityContext.Capabilities.Add {
+		if capName == "NET_ADMIN" {
+			t.Fatalf("workload container unexpectedly has NET_ADMIN capability")
+		}
+	}
+
+	hasHTTPProxy := false
+	hasCACert := false
+	for _, env := range podObj.Spec.Containers[0].Env {
+		if env.Name == "HTTP_PROXY" && strings.Contains(env.Value, "service-portal") {
+			hasHTTPProxy = true
+		}
+		if env.Name == "SSL_CERT_FILE" && env.Value == "/etc/service-portal/ca/tls.crt" {
+			hasCACert = true
+		}
+	}
+	if !hasHTTPProxy {
+		t.Fatalf("workload container missing injected HTTP_PROXY: %v", podObj.Spec.Containers[0].Env)
+	}
+	if !hasCACert {
+		t.Fatalf("workload container missing injected SSL_CERT_FILE: %v", podObj.Spec.Containers[0].Env)
+	}
+
+	// 7. Execute the common default-deny egress test suite
+	runEgressDeniedAssertions(t, h, clientPodName, backendClusterIP, EgressDeniedTestOpts{
+		CACertPath:               "/etc/service-portal/ca/tls.crt",
+		CheckNetworkPolicyBypass: true,
 	})
 }

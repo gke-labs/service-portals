@@ -75,6 +75,7 @@ func Run(ctx context.Context, config Config) error {
 
 	caCertPath := os.Getenv("CA_CERT_PATH")
 	caKeyPath := os.Getenv("CA_KEY_PATH")
+	proxyAuthToken := os.Getenv("PROXY_AUTH_TOKEN")
 
 	var fallback *proxy.HTTPProxy
 	if target != "" {
@@ -86,6 +87,9 @@ func Run(ctx context.Context, config Config) error {
 		p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
 		if err != nil {
 			return fmt.Errorf("failed to create proxy: %w", err)
+		}
+		if proxyAuthToken != "" {
+			p.RequiredProxyToken = proxyAuthToken
 		}
 		fallback = p
 	}
@@ -128,6 +132,9 @@ func Run(ctx context.Context, config Config) error {
 			fallbackHandler = fallback
 		}
 		rr := NewRuleRouter(rulesDir, fallbackHandler, caCertPath, caKeyPath, cacheTTL, c)
+		if proxyAuthToken != "" {
+			rr.SetProxyAuthToken(proxyAuthToken)
+		}
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}

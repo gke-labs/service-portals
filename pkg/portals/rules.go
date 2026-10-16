@@ -60,14 +60,15 @@ type Rule struct {
 
 // RuleRouter routes incoming HTTP/HTTPS requests to the appropriate proxy based on host rules.
 type RuleRouter struct {
-	mu         sync.RWMutex
-	routes     map[string]*Rule
-	fallback   http.Handler
-	rulesDir   string
-	caCertPath string
-	caKeyPath  string
-	cacheTTL   time.Duration
-	cache      *cache.InMemoryCache
+	mu             sync.RWMutex
+	routes         map[string]*Rule
+	fallback       http.Handler
+	rulesDir       string
+	caCertPath     string
+	caKeyPath      string
+	cacheTTL       time.Duration
+	cache          *cache.InMemoryCache
+	proxyAuthToken string
 }
 
 // NewRuleRouter creates a new RuleRouter instance.
@@ -81,6 +82,11 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 		cacheTTL:   cacheTTL,
 		cache:      c,
 	}
+}
+
+// SetProxyAuthToken sets the optional token required in Proxy-Authorization for explicit proxy requests.
+func (rr *RuleRouter) SetProxyAuthToken(token string) {
+	rr.proxyAuthToken = token
 }
 
 // loadRules reads YAML rules from the configured rulesDir and rebuilds the routing table.
@@ -160,6 +166,8 @@ func (rr *RuleRouter) loadRules() error {
 				errs = append(errs, fmt.Errorf("failed to create proxy for rule %q: %w", rule.Metadata.Name, err))
 				continue
 			}
+			p.ListenHost = rule.Spec.Host
+			p.RequiredProxyToken = rr.proxyAuthToken
 
 			// Rule-specific cacheTTL takes precedence. If specified, setup caching.
 			var cacheTTL time.Duration
@@ -208,6 +216,14 @@ func (rr *RuleRouter) loadRules() error {
 
 // ServeHTTP implements http.Handler to route the request based on Host.
 func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if rr.proxyAuthToken != "" {
+		if !proxy.ValidateProxyAuth(r.Header.Get("Proxy-Authorization"), rr.proxyAuthToken) {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="service-portal"`)
+			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+			return
+		}
+	}
+
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
