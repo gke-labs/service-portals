@@ -1,0 +1,74 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal-injector
+  namespace: service-portals
+  labels:
+    app: portal-injector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: portal-injector
+  template:
+    metadata:
+      labels:
+        app: portal-injector
+    spec:
+      serviceAccountName: portal-injector
+      containers:
+      - name: injector
+        image: portal-injector:latest
+        args:
+        - "--listen-addr=:8443"
+        - "--tls-cert-file=/etc/webhook/certs/tls.crt"
+        - "--tls-key-file=/etc/webhook/certs/tls.key"
+        - "--native-sidecars=true"
+        - "--default-init-image=init-service-portals:latest"
+        - "--default-proxy-image=all-in-one-portal:latest"
+        - "--dummy-ip=8.8.8.8"
+        ports:
+        - containerPort: 8443
+          name: webhook
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: portal-injector-webhook-cert

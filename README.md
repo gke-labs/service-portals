@@ -91,68 +91,94 @@ For a detailed architectural comparison and trade-offs, see [docs/deployment-mod
 
 ---
 
-## Quick Start: Transparent Sidecar
+## Quick Start: Transparent Sidecar with `PortalPolicy`
 
-Deploy a complete working sandbox pod with the transparent sidecar using `k8s/sidecar.yaml`:
+Using the mutating admission webhook ([docs/injector.md](docs/injector.md)), Service Portals is completely drop-in: you define a [`PortalPolicy`](docs/portal-policy.md) and deploy your workload container as normal—with **no sidecar or init container manifests written by hand**.
 
-### 1. Define Rules and Credentials
+### 1. Enable Injection on the Namespace
 
-Create a Kubernetes Secret containing your routing rules and upstream credentials:
+Label the target namespace to enable automatic sidecar injection:
+
+```bash
+kubectl label namespace sandboxes portals.gke.io/injection=enabled
+```
+
+### 2. Store Credentials in Secrets
+
+Store your real API keys or bearer tokens in standard Kubernetes Secrets:
+
+```bash
+kubectl create secret generic gemini-creds --from-literal=apiKey="YOUR_GEMINI_API_KEY" -n sandboxes
+kubectl create secret generic github-creds --from-literal=token="YOUR_GITHUB_TOKEN" -n sandboxes
+```
+
+### 3. Create a `PortalPolicy`
+
+Declare which pods are selected and how outbound hosts are routed and authenticated:
+
+```yaml
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalPolicy
+metadata:
+  name: agent-sandbox
+  namespace: sandboxes
+spec:
+  podSelector:
+    matchLabels:
+      app: agent
+  rules:
+  - host: gemini.backend
+    rewriteUrl: https://generativelanguage.googleapis.com
+    authHeader: x-goog-api-key
+    secretRef:
+      name: gemini-creds
+      key: apiKey
+  - host: github.backend
+    rewriteUrl: https://api.github.com
+    authHeader: Authorization
+    secretRef:
+      name: github-creds
+      key: token
+```
+
+### 4. Deploy Your Plain Workload
+
+Deploy your application manifest with **zero portal-specific configuration**:
 
 ```yaml
 apiVersion: v1
-kind: Secret
+kind: Pod
 metadata:
-  name: all-in-one-portal-sidecar-secret
-stringData:
-  gemini-rule.yaml: |
-    apiVersion: portals.gke.io/v1alpha1
-    kind: PortalRule
-    metadata:
-      name: gemini
-    spec:
-      host: gemini.backend
-      rewriteUrl: https://generativelanguage.googleapis.com
-      authToken: YOUR_GEMINI_API_KEY
-      authHeader: x-goog-api-key
-  github-rule.yaml: |
-    apiVersion: portals.gke.io/v1alpha1
-    kind: PortalRule
-    metadata:
-      name: github
-    spec:
-      host: github.backend
-      rewriteUrl: https://api.github.com
-      authToken: YOUR_GITHUB_TOKEN
+  name: my-agent
+  namespace: sandboxes
+  labels:
+    app: agent
+spec:
+  containers:
+  - name: workload
+    image: python:3.11-slim
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["sleep", "3600"]
 ```
 
-### 2. Deploy Pod with Sidecar
+The webhook automatically injects the `init-service-portals` init container, the native sidecar proxy (`service-portal-sidecar`), the pod CA volume and trust environment variables (`SSL_CERT_FILE`), `hostAliases`, and a generated rules secret.
 
-Apply the manifest:
+For manual deployment or understanding what this expands to under the hood, see [`k8s/sidecar.yaml`](k8s/sidecar.yaml) and [docs/sidecar-container.md](docs/sidecar-container.md).
 
-```bash
-kubectl apply -f k8s/sidecar.yaml
-```
+### 5. Test from Within the Sandbox
 
-The manifest configures:
-- `hostAliases` mapping `gemini.backend` and `github.backend` to dummy IPs so TCP connections are initiated.
-- An `initContainer` (`init-service-portals`) generating the pod-local CA and installing iptables redirection.
-- A sidecar container (`all-in-one-portal`) running as UID `1337` to intercept traffic and inject tokens.
-- A sandboxed workload container running as UID `1000` with `allowPrivilegeEscalation: false`.
-
-### 3. Test from Within the Sandbox
-
-Exec into the workload container. The application can query external services without possessing any real credentials:
+Exec into the workload container. Outbound requests are transparently intercepted and authenticated without the sandbox ever seeing the credentials:
 
 ```bash
 # HTTP request (intercepted on port 80 -> proxy 8080)
 wget -qO- http://gemini.backend/v1beta/models
 
-# HTTPS request (intercepted on port 443 -> proxy 8443)
-wget --ca-certificate=/etc/service-portal/ca/tls.crt -qO- https://gemini.backend/v1beta/models
+# HTTPS request (intercepted on port 443 -> proxy 8443, pod CA trusted automatically via SSL_CERT_FILE)
+wget -qO- https://gemini.backend/v1beta/models
 ```
-
-The proxy intercepts the request, rewrites the destination to `https://generativelanguage.googleapis.com`, injects `x-goog-api-key: YOUR_GEMINI_API_KEY`, and returns the response. The workload container never touches the secret.
 
 ---
 
@@ -170,6 +196,8 @@ The proxy intercepts the request, rewrites the destination to `https://generativ
 
 ## Documentation Index
 
+- **[PortalPolicy CRD Specification](docs/portal-policy.md)**: Full field reference and examples for declarative `PortalPolicy` resources.
+- **[Portal Injector Admission Webhook](docs/injector.md)**: Mutating/validating admission webhook guide, annotations, and security requirements.
 - **[Architecture & Security Model](docs/architecture.md)**: Threat model, trust model, MITM mechanics, iptables egress filtering, and "Duck Identity".
 - **[Configuration Reference](docs/configuration.md)**: `PortalRule` specification, environment variables, flags, caching, and fallback behavior.
 - **[Deployment Modes](docs/deployment-modes.md)**: Comparison of Transparent Sidecar vs. Explicit Service vs. HTTP Proxy modes.

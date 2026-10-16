@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -615,5 +616,311 @@ spec:
 	}
 	if !strings.Contains(logsGithubHTTPS, "Bearer github-sidecar-token") {
 		t.Error("GitHub HTTPS Logs do not contain correct token")
+	}
+}
+
+func TestInjectedSidecar(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
+	}
+
+	h := NewHarness(t, "injected-sidecar-e2e")
+	h.Setup()
+
+	gitRoot := h.GetGitRoot()
+
+	// Build and load all required images
+	h.DockerBuild("portal-injector:e2e", filepath.Join(gitRoot, "images/portal-injector/Dockerfile"), gitRoot)
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("init-service-portals:e2e", filepath.Join(gitRoot, "images/init-service-portals/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("portal-injector:e2e")
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("init-service-portals:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Install cert-manager
+	h.t.Log("Installing cert-manager")
+	h.RunCommand("kubectl", "apply", "--server-side", "-f", "https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml")
+	time.Sleep(10 * time.Second)
+	h.WaitForPodReady("app.kubernetes.io/instance=cert-manager", 3*time.Minute)
+
+	// Apply CRD
+	crdPath := filepath.Join(gitRoot, "k8s/crds/portals.gke.io_portalpolicies.yaml")
+	h.RunCommand("kubectl", "apply", "-f", crdPath)
+
+	// Deploy Backend (Toolbox Server)
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+	time.Sleep(5 * time.Second)
+
+	// Deploy Injector manifests
+	h.RunCommand("kubectl", "apply", "-f", filepath.Join(gitRoot, "k8s/injector/rbac.yaml"))
+	h.RunCommand("kubectl", "apply", "-f", filepath.Join(gitRoot, "k8s/injector/certificate.yaml"))
+	h.RunCommand("kubectl", "apply", "-f", filepath.Join(gitRoot, "k8s/injector/service.yaml"))
+	h.RunCommand("kubectl", "apply", "-f", filepath.Join(gitRoot, "k8s/injector/webhooks.yaml"))
+
+	injectorDeploy := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal-injector
+  namespace: service-portals
+  labels:
+    app: portal-injector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: portal-injector
+  template:
+    metadata:
+      labels:
+        app: portal-injector
+    spec:
+      serviceAccountName: portal-injector
+      containers:
+      - name: injector
+        image: portal-injector:e2e
+        imagePullPolicy: Never
+        args:
+        - "--listen-addr=:8443"
+        - "--tls-cert-file=/etc/webhook/certs/tls.crt"
+        - "--tls-key-file=/etc/webhook/certs/tls.key"
+        - "--native-sidecars=true"
+        - "--default-init-image=init-service-portals:e2e"
+        - "--default-proxy-image=all-in-one-portal:e2e"
+        - "--dummy-ip=8.8.8.8"
+        ports:
+        - containerPort: 8443
+          name: webhook
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: portal-injector-webhook-cert
+`
+	h.KubectlApplyContent(injectorDeploy)
+	h.RunCommand("kubectl", "rollout", "status", "deployment/portal-injector", "-n", "service-portals", "--timeout=2m")
+	time.Sleep(5 * time.Second)
+
+	// Create test namespace with injection enabled
+	testNS := "test-injected"
+	_ = exec.Command("kubectl", "create", "namespace", testNS).Run()
+	h.RunCommand("kubectl", "label", "namespace", testNS, "portals.gke.io/injection=enabled", "--overwrite")
+
+	// Create Secrets for token resolution
+	h.KubectlApplyContent(fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gemini-creds
+  namespace: %s
+stringData:
+  token: gemini-injected-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-creds
+  namespace: %s
+stringData:
+  token: github-injected-token
+`, testNS, testNS))
+
+	// Apply PortalPolicy
+	h.KubectlApplyContent(fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalPolicy
+metadata:
+  name: test-injected-policy
+  namespace: %s
+spec:
+  podSelector:
+    matchLabels:
+      app: agent
+  rules:
+  - host: gemini.backend
+    rewriteUrl: http://backend.default.svc.cluster.local
+    authHeader: Authorization
+    secretRef:
+      name: gemini-creds
+      key: token
+  - host: github.backend
+    rewriteUrl: http://backend.default.svc.cluster.local
+    authHeader: Authorization
+    secretRef:
+      name: github-creds
+      key: token
+  intercept:
+    ports: [80, 443]
+`, testNS))
+
+	// 1. Validation test: Attempt to create an invalid pod (running as user 1337) -> MUST be rejected!
+	invalidPodManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: invalid-pod
+  namespace: %s
+  labels:
+    app: agent
+spec:
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1337
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+    command: ["sleep", "10"]
+`, testNS)
+	cmdInvalid := exec.Command("kubectl", "apply", "-f", "-")
+	cmdInvalid.Stdin = strings.NewReader(invalidPodManifest)
+	outInvalid, err := cmdInvalid.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Expected invalid pod (runAsUser: 1337) to be rejected by webhook, but succeeded: %s", outInvalid)
+	}
+	t.Logf("Invalid pod successfully rejected: %s", outInvalid)
+	if !strings.Contains(string(outInvalid), "1337") {
+		t.Errorf("Expected rejection message to mention 1337, got: %s", outInvalid)
+	}
+
+	// 2. Deploy PLAIN workload pod: contains NO portal-specific bits at all!
+	clientPodName := "test-workload"
+	_ = exec.Command("kubectl", "delete", "pod", clientPodName, "-n", testNS, "--ignore-not-found").Run()
+
+	plainPodManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: agent
+spec:
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`, clientPodName, testNS)
+
+	h.KubectlApplyContent(plainPodManifest)
+	h.RunCommand("kubectl", "wait", "--namespace", testNS, "--for=condition=Ready", "pod/"+clientPodName, "--timeout=2m")
+
+	// Verify pod annotations were added
+	outAnno, err := exec.Command("kubectl", "get", "pod", clientPodName, "-n", testNS, "-o", "jsonpath={.metadata.annotations.portals\\.gke\\.io/status}").Output()
+	if err != nil || string(outAnno) != "injected" {
+		t.Fatalf("Expected pod annotation portals.gke.io/status=injected, got: %s (err: %v)", outAnno, err)
+	}
+
+	// Positive Control: HTTP and HTTPS requests to gemini.backend and github.backend
+	cmdGemini := exec.Command("kubectl", "exec", clientPodName, "-n", testNS, "-c", "workload", "--", "wget", "-qO-", "http://gemini.backend")
+	outGemini, err := cmdGemini.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Gemini HTTP request failed: %v. Output: %s", err, outGemini)
+	}
+	if !strings.Contains(string(outGemini), "Bearer gemini-injected-token") {
+		t.Errorf("Gemini HTTP Logs do not contain injected token: %s", outGemini)
+	}
+
+	cmdGeminiHTTPS := exec.Command("kubectl", "exec", clientPodName, "-n", testNS, "-c", "workload", "--", "wget", "-qO-", "https://gemini.backend")
+	outGeminiHTTPS, err := cmdGeminiHTTPS.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Gemini HTTPS request failed: %v. Output: %s", err, outGeminiHTTPS)
+	}
+	if !strings.Contains(string(outGeminiHTTPS), "Bearer gemini-injected-token") {
+		t.Errorf("Gemini HTTPS Logs do not contain injected token: %s", outGeminiHTTPS)
+	}
+
+	cmdGithub := exec.Command("kubectl", "exec", clientPodName, "-n", testNS, "-c", "workload", "--", "wget", "-qO-", "http://github.backend")
+	outGithub, err := cmdGithub.CombinedOutput()
+	if err != nil {
+		t.Fatalf("GitHub HTTP request failed: %v. Output: %s", err, outGithub)
+	}
+	if !strings.Contains(string(outGithub), "Bearer github-injected-token") {
+		t.Errorf("GitHub HTTP Logs do not contain injected token: %s", outGithub)
+	}
+
+	cmdGithubHTTPS := exec.Command("kubectl", "exec", clientPodName, "-n", testNS, "-c", "workload", "--", "wget", "-qO-", "https://github.backend")
+	outGithubHTTPS, err := cmdGithubHTTPS.CombinedOutput()
+	if err != nil {
+		t.Fatalf("GitHub HTTPS request failed: %v. Output: %s", err, outGithubHTTPS)
+	}
+	if !strings.Contains(string(outGithubHTTPS), "Bearer github-injected-token") {
+		t.Errorf("GitHub HTTPS Logs do not contain injected token: %s", outGithubHTTPS)
+	}
+
+	// Deny assertions (#147):
+	// 1. Non-intercepted port: wget to port 8080 should fail
+	cmdNonIntercept := exec.Command("kubectl", "exec", clientPodName, "-n", testNS, "-c", "workload", "--", "wget", "-T", "3", "http://backend.default.svc.cluster.local:8080/")
+	outNonIntercept, err := cmdNonIntercept.CombinedOutput()
+	if err == nil {
+		t.Errorf("Expected non-intercepted port connection to fail, but succeeded: %s", outNonIntercept)
+	} else {
+		t.Logf("Non-intercepted port correctly failed: %v (%s)", err, outNonIntercept)
+	}
+
+	// 2. Bypass attempt: workload runs as UID 1000 and cannot run as UID 1337
+	cmdBypass := exec.Command("kubectl", "exec", clientPodName, "-n", testNS, "-c", "workload", "--", "id", "-u")
+	outBypass, err := cmdBypass.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to check user ID: %v", err)
+	}
+	if strings.TrimSpace(string(outBypass)) != "1000" {
+		t.Errorf("Expected workload UID to be 1000, got: %s", outBypass)
 	}
 }
