@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -39,8 +40,11 @@ import (
 
 type HTTPProxy struct {
 	TargetURL  *url.URL
+	ListenHost string // Hostname this proxy rule listens for (spec.host)
 	AuthToken  string
 	AuthHeader string
+
+	RequiredProxyToken string // Optional token required in Proxy-Authorization header
 
 	caCert *x509.Certificate
 	caKey  crypto.PrivateKey
@@ -109,6 +113,14 @@ func (p *HTTPProxy) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate,
 }
 
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.RequiredProxyToken != "" {
+		if !ValidateProxyAuth(r.Header.Get("Proxy-Authorization"), p.RequiredProxyToken) {
+			w.Header().Set("Proxy-Authenticate", `Basic realm="service-portal"`)
+			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+			return
+		}
+	}
+
 	if r.Method == http.MethodConnect && p.caCert != nil {
 		p.handleConnect(w, r)
 		return
@@ -124,13 +136,14 @@ func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM 
 	}
 
 	forceTarget := false
-	if host == p.TargetURL.Host {
+	if host == p.TargetURL.Host || (p.ListenHost != "" && strings.EqualFold(HostWithoutPort(host), HostWithoutPort(p.ListenHost))) {
 		forceTarget = true
 	} else if !isMITM && r.URL.Host == "" {
 		forceTarget = true
 	}
 
 	outReq := r.Clone(r.Context())
+	outReq.RequestURI = ""
 	if forceTarget {
 		outReq.URL.Scheme = p.TargetURL.Scheme
 		outReq.URL.Host = p.TargetURL.Host
@@ -409,4 +422,40 @@ func (l *connectionHandler) Close() error {
 
 func (l *connectionHandler) Addr() net.Addr {
 	return l.conn.LocalAddr()
+}
+
+// ValidateProxyAuth verifies that the Proxy-Authorization header matches the expected token.
+// Supports Bearer <token>, Basic <base64(token)> and Basic <base64(user:pass)> where user or pass equals token.
+func ValidateProxyAuth(header, requiredToken string) bool {
+	if requiredToken == "" {
+		return true
+	}
+	if header == "" {
+		return false
+	}
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	authType := strings.ToLower(parts[0])
+	credential := strings.TrimSpace(parts[1])
+
+	switch authType {
+	case "bearer":
+		return credential == requiredToken
+	case "basic":
+		decoded, err := base64.StdEncoding.DecodeString(credential)
+		if err != nil {
+			return false
+		}
+		credStr := string(decoded)
+		userPass := strings.SplitN(credStr, ":", 2)
+		if userPass[0] == requiredToken {
+			return true
+		}
+		if len(userPass) == 2 && userPass[1] == requiredToken {
+			return true
+		}
+	}
+	return false
 }
