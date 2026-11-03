@@ -13,9 +13,9 @@
 3. **iptables Interception & Egress Enforcement (`entrypoint.sh`)**:
    - Applied via atomic full-table replaces with `iptables-restore` and `ip6tables-restore` using dedicated custom chains `PORTAL_OUTPUT` (in `nat`) and `PORTAL_EGRESS` (in `filter`), guaranteeing idempotency across restarts while replacing any pre-existing `nat` or `filter` rules in the pod's network namespace.
    - Fail-closed IPv6: If IPv6 is disabled in the network namespace (`/proc/sys/net/ipv6/conf/all/disable_ipv6=1`), IPv6 rules are skipped with an info log. Otherwise, failure to restore `ip6tables` rules is fatal (`exit 1`), preventing unfiltered IPv6 egress unless explicitly opted out with `ALLOW_UNFILTERED_IPV6=true`.
-   - Redirects configured TCP ports (e.g. 80 and 443, or `*`) to proxy ports (8080 HTTP, 8443 HTTPS).
-   - Excludes proxy UID 1337 and loopback from redirection and egress blocking.
-   - Restricts DNS (UDP/TCP port 53) to configured DNS servers (`DNS_SERVER_IPS`, defaults to nameservers discovered in `/etc/resolv.conf`), preventing exfiltration via arbitrary DNS resolvers.
+   - Redirects configured TCP ports (e.g. 80 and 443, or `*`) to proxy ports (8080 HTTP, 8443 HTTPS). When `INTERCEPT_PORTS` is empty (`""`), NAT redirection is omitted entirely.
+   - Excludes proxy UID 1337 and loopback from redirection and egress blocking (loopback traffic to `PROXY_BIND_ADDR`, default `127.0.0.2`, is redirected to the proxy).
+   - Rejects all workload outbound DNS queries (UDP/TCP port 53) to eliminate DNS exfiltration channels. The workload resolves exclusively via the local sidecar DNS on `127.0.0.1:53`. Upstream cluster DNS queries on port 53 are allowed solely for `PROXY_UID` (`1337`).
    - Allows essential kernel-generated ICMP and ICMPv6 control messages:
      - IPv4: destination-unreachable (3), time-exceeded (11), and echo-reply (0).
      - IPv6: error messages 1-4 (destination unreachable, packet too big, time exceeded, parameter problem) and Neighbor Discovery types 133-137 (RS, RA, NS, NA, redirect).
@@ -49,12 +49,13 @@ init-service-portals [flags]
 | `PROXY_PORT` | `8080` | Local port for HTTP traffic redirection. |
 | `PROXY_HTTPS_PORT` | `8443` | Local port for HTTPS traffic redirection. |
 | `PROXY_UID` | `1337` | UID of the proxy container, excluded from redirection and allowed outbound. |
-| `INTERCEPT_PORTS` | `80` | Ports to redirect (e.g. `80,443`), or `*` for all ports. |
+| `PROXY_BIND_ADDR` | `127.0.0.2` | Dedicated loopback IP address bound by the proxy. Loopback traffic to addresses other than this IP is not redirected. |
+| `INTERCEPT_PORTS` | `80` | Ports to redirect (e.g. `80,443`), or `*` for all ports. Set to empty string `""` to disable NAT redirection entirely. |
 | `CA_DIR` | `/etc/service-portal/ca` | Passed to `-cert-dir`. |
 | `CA_PRIVATE_DIR` | `/etc/service-portal/ca-private` | Passed to `-key-dir`. |
 | `CHOWN_UID` | `-1` | Passed to `-chown-uid`. |
 | `CHOWN_GID` | `-1` | Passed to `-chown-gid`. |
-| `DNS_SERVER_IPS` | Nameservers from `/etc/resolv.conf` | Comma-separated list of DNS server IP addresses allowed for outbound DNS requests (UDP/TCP port 53). Restricts DNS to designated resolvers (e.g. cluster DNS) to prevent DNS tunnelling. |
+| `DNS_SERVER_IPS` | Nameservers from `/etc/resolv.conf` | Legacy/alias for `UPSTREAM_DNS_SERVERS`. Workload port 53 egress is rejected entirely; upstream DNS is used by the proxy sidecar's upstream resolver (discovered from `/etc/service-portal/upstream/upstream-resolv.conf`, `UPSTREAM_DNS_SERVERS`, or `DNS_SERVER_IPS`). |
 | `ALLOW_METADATA` | `false` | When `false`, explicitly blocks access to cloud metadata IP ranges (`169.254.0.0/16`, AWS `fd00:ec2::254`, GCE `fd20:ce::254`, and link-local `fe80::/10`) before any allowlist rules. Set to `true` to opt into allowing metadata server access. |
 | `ALLOW_CIDRS` | `""` (empty) | Comma-separated list of IPv4 and IPv6 CIDRs the workload may reach directly without proxy interception or egress rejection (e.g. cluster service CIDRs). |
 | `ALLOW_PORTS` | `""` (empty) | Comma-separated list of additional TCP destination ports the workload may reach directly. |

@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -447,7 +448,12 @@ spec:
 	clientPodName := "test-client-sidecar"
 	h.DeletePod(clientPodName)
 
-	clientManifest := `
+	kubeDNSIP := h.GetServiceClusterIPInNamespace("kube-dns", "kube-system")
+	if kubeDNSIP == "" {
+		kubeDNSIP = "10.96.0.10"
+	}
+
+	clientManifest := fmt.Sprintf(`
 apiVersion: v1
 kind: Secret
 metadata:
@@ -468,7 +474,7 @@ stringData:
     metadata:
       name: github
     spec:
-      host: github.backend
+      host: api.github.com
       rewriteUrl: http://backend
       authToken: github-sidecar-token
 ---
@@ -479,24 +485,38 @@ metadata:
   labels:
     app: test-client-sidecar
 spec:
-  hostAliases:
-  - ip: "8.8.8.8"
-    hostnames:
-    - "gemini.backend"
-    - "github.backend"
+  dnsPolicy: None
+  dnsConfig:
+    nameservers:
+    - "127.0.0.1"
+    searches:
+    - default.svc.cluster.local
+    - svc.cluster.local
+    - cluster.local
+    options:
+    - name: ndots
+      value: "5"
+  securityContext:
+    sysctls:
+    - name: net.ipv4.ip_unprivileged_port_start
+      value: "0"
   initContainers:
   - name: init-service-portals
     image: init-service-portals:e2e
     imagePullPolicy: Never
     env:
     - name: PROXY_PORT
-      value: "8080"
+      value: "80"
     - name: PROXY_HTTPS_PORT
-      value: "8443"
+      value: "443"
     - name: PROXY_UID
       value: "1337"
+    - name: PROXY_BIND_ADDR
+      value: "127.0.0.2"
     - name: INTERCEPT_PORTS
       value: "80,443"
+    - name: DNS_SERVER_IPS
+      value: "%s"
     - name: CHOWN_UID
       value: "1337"
     - name: CHOWN_GID
@@ -510,6 +530,8 @@ spec:
       mountPath: /etc/service-portal/ca
     - name: ca-key
       mountPath: /etc/service-portal/ca-private
+    - name: upstream-dns
+      mountPath: /etc/service-portal/upstream
   containers:
   - name: workload
     image: toolbox:e2e
@@ -528,11 +550,32 @@ spec:
     securityContext:
       runAsUser: 1337
       runAsGroup: 1337
+    ports:
+    - containerPort: 80
+      name: proxy
+    - containerPort: 443
+      name: proxy-https
+    - containerPort: 53
+      name: dns-udp
+      protocol: UDP
+    - containerPort: 53
+      name: dns-tcp
+      protocol: TCP
     env:
+    - name: PORT
+      value: "80"
+    - name: HTTPS_PORT
+      value: "443"
+    - name: SERVE_DNS
+      value: "true"
     - name: CA_CERT_PATH
       value: "/etc/service-portal/ca-private/tls.crt"
     - name: CA_KEY_PATH
       value: "/etc/service-portal/ca-private/tls.key"
+    - name: PROXY_BIND_ADDR
+      value: "127.0.0.2"
+    - name: UPSTREAM_DNS_SERVERS
+      value: "%s"
     args: ["--rules-dir=/etc/portals"]
     volumeMounts:
     - name: rules-volume
@@ -540,6 +583,9 @@ spec:
       readOnly: true
     - name: ca-key
       mountPath: /etc/service-portal/ca-private
+      readOnly: true
+    - name: upstream-dns
+      mountPath: /etc/service-portal/upstream
       readOnly: true
   volumes:
   - name: rules-volume
@@ -549,7 +595,9 @@ spec:
     emptyDir: {}
   - name: ca-key
     emptyDir: {}
-`
+  - name: upstream-dns
+    emptyDir: {}
+`, kubeDNSIP, kubeDNSIP)
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar", 2*time.Minute)
 
@@ -585,8 +633,8 @@ spec:
 		t.Error("Gemini HTTPS Logs do not contain correct token")
 	}
 
-	// Test GitHub request via sidecar transparent proxying
-	cmdGithub := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "-qO-", "http://github.backend")
+	// Test GitHub request with real hostname api.github.com via sidecar DNS server (no hostAliases)
+	cmdGithub := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "-qO-", "http://api.github.com")
 	outGithub, err := cmdGithub.CombinedOutput()
 	if err != nil {
 		t.Fatalf("GitHub request failed: %v. Output: %s", err, outGithub)
@@ -601,8 +649,8 @@ spec:
 		t.Error("GitHub Logs do not contain correct token")
 	}
 
-	// Test GitHub HTTPS request via sidecar transparent proxying
-	cmdGithubHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://github.backend")
+	// Test GitHub HTTPS request with real hostname api.github.com via sidecar DNS server (no hostAliases)
+	cmdGithubHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://api.github.com")
 	outGithubHTTPS, err := cmdGithubHTTPS.CombinedOutput()
 	if err != nil {
 		t.Fatalf("GitHub HTTPS request failed: %v. Output: %s", err, outGithubHTTPS)
@@ -615,6 +663,44 @@ spec:
 	}
 	if !strings.Contains(logsGithubHTTPS, "Bearer github-sidecar-token") {
 		t.Error("GitHub HTTPS Logs do not contain correct token")
+	}
+
+	// Test: rule host resolves to proxy bind address (127.0.0.2) via sidecar DNS server
+	cmdRuleDNS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "/app/toolbox", "probe", "dns", "default", "api.github.com", "2s")
+	outRuleDNS, errRuleDNS := cmdRuleDNS.CombinedOutput()
+	if errRuleDNS != nil {
+		t.Errorf("Expected api.github.com to resolve via sidecar DNS: %v (%s)", errRuleDNS, outRuleDNS)
+	} else if !strings.Contains(string(outRuleDNS), "127.0.0.2") {
+		t.Errorf("Expected api.github.com to resolve to 127.0.0.2, got: %s", outRuleDNS)
+	} else {
+		t.Logf("Rule host api.github.com correctly resolved to 127.0.0.2 via sidecar DNS: %s", strings.TrimSpace(string(outRuleDNS)))
+	}
+
+	// Test: arbitrary DNS to an external resolver (8.8.8.8) must be rejected
+	cmdExternalDNS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "/app/toolbox", "probe", "dns", "8.8.8.8", "example.com", "2s")
+	outExternalDNS, errExternalDNS := cmdExternalDNS.CombinedOutput()
+	if errExternalDNS == nil {
+		t.Errorf("Expected arbitrary DNS to 8.8.8.8:53 to fail, but it succeeded. Output: %s", outExternalDNS)
+	} else {
+		t.Logf("Arbitrary DNS to external resolver was correctly rejected: %v (%s)", errExternalDNS, strings.TrimSpace(string(outExternalDNS)))
+	}
+
+	// Test: unlisted host resolution via local sidecar DNS (127.0.0.1:53) returns NXDOMAIN / fails
+	cmdUnlistedDNS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "/app/toolbox", "probe", "dns", "127.0.0.1", "unlisted.example.com", "2s")
+	outUnlistedDNS, errUnlistedDNS := cmdUnlistedDNS.CombinedOutput()
+	if errUnlistedDNS == nil {
+		t.Errorf("Expected unlisted DNS query via local DNS to fail with NXDOMAIN, but it succeeded. Output: %s", outUnlistedDNS)
+	} else {
+		t.Logf("Unlisted domain was correctly rejected with NXDOMAIN: %v (%s)", errUnlistedDNS, strings.TrimSpace(string(outUnlistedDNS)))
+	}
+
+	// Test: direct query to cluster DNS (kube-dns) from the workload must be rejected
+	cmdClusterDNS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "/app/toolbox", "probe", "dns", kubeDNSIP, "backend", "2s")
+	outClusterDNS, errClusterDNS := cmdClusterDNS.CombinedOutput()
+	if errClusterDNS == nil {
+		t.Errorf("Expected direct DNS query to cluster DNS %s:53 to fail, but it succeeded. Output: %s", kubeDNSIP, outClusterDNS)
+	} else {
+		t.Logf("Direct DNS query to cluster DNS was correctly rejected: %v (%s)", errClusterDNS, strings.TrimSpace(string(outClusterDNS)))
 	}
 }
 
@@ -685,11 +771,16 @@ spec:
 	backendClusterIP := h.GetServiceClusterIP("backend")
 	t.Logf("Backend ClusterIP: %s", backendClusterIP)
 
+	kubeDNSIP := h.GetServiceClusterIPInNamespace("kube-dns", "kube-system")
+	if kubeDNSIP == "" {
+		kubeDNSIP = "10.96.0.10"
+	}
+
 	// Deploy Client Pod with Sidecar
 	clientPodName := "test-client-sidecar-deny"
 	h.DeletePod(clientPodName)
 
-	clientManifest := `
+	clientManifest := fmt.Sprintf(`
 apiVersion: v1
 kind: Secret
 metadata:
@@ -721,25 +812,38 @@ metadata:
   labels:
     app: test-client-sidecar-deny
 spec:
-  hostAliases:
-  - ip: "8.8.8.8"
-    hostnames:
-    - "gemini.backend"
-    - "github.backend"
-    - "other.backend"
+  dnsPolicy: None
+  dnsConfig:
+    nameservers:
+    - "127.0.0.1"
+    searches:
+    - default.svc.cluster.local
+    - svc.cluster.local
+    - cluster.local
+    options:
+    - name: ndots
+      value: "5"
+  securityContext:
+    sysctls:
+    - name: net.ipv4.ip_unprivileged_port_start
+      value: "0"
   initContainers:
   - name: init-service-portals
     image: init-service-portals:e2e
     imagePullPolicy: Never
     env:
     - name: PROXY_PORT
-      value: "8080"
+      value: "80"
     - name: PROXY_HTTPS_PORT
-      value: "8443"
+      value: "443"
     - name: PROXY_UID
       value: "1337"
+    - name: PROXY_BIND_ADDR
+      value: "127.0.0.2"
     - name: INTERCEPT_PORTS
       value: "80,443"
+    - name: DNS_SERVER_IPS
+      value: "%s"
     - name: CHOWN_UID
       value: "1337"
     - name: CHOWN_GID
@@ -753,6 +857,8 @@ spec:
       mountPath: /etc/service-portal/ca
     - name: ca-key
       mountPath: /etc/service-portal/ca-private
+    - name: upstream-dns
+      mountPath: /etc/service-portal/upstream
   containers:
   - name: workload
     image: toolbox:e2e
@@ -771,11 +877,32 @@ spec:
     securityContext:
       runAsUser: 1337
       runAsGroup: 1337
+    ports:
+    - containerPort: 80
+      name: proxy
+    - containerPort: 443
+      name: proxy-https
+    - containerPort: 53
+      name: dns-udp
+      protocol: UDP
+    - containerPort: 53
+      name: dns-tcp
+      protocol: TCP
     env:
+    - name: PORT
+      value: "80"
+    - name: HTTPS_PORT
+      value: "443"
+    - name: SERVE_DNS
+      value: "true"
     - name: CA_CERT_PATH
       value: "/etc/service-portal/ca-private/tls.crt"
     - name: CA_KEY_PATH
       value: "/etc/service-portal/ca-private/tls.key"
+    - name: PROXY_BIND_ADDR
+      value: "127.0.0.2"
+    - name: UPSTREAM_DNS_SERVERS
+      value: "%s"
     args: ["--rules-dir=/etc/portals"]
     volumeMounts:
     - name: rules-volume
@@ -783,6 +910,9 @@ spec:
       readOnly: true
     - name: ca-key
       mountPath: /etc/service-portal/ca-private
+      readOnly: true
+    - name: upstream-dns
+      mountPath: /etc/service-portal/upstream
       readOnly: true
   volumes:
   - name: rules-volume
@@ -792,7 +922,9 @@ spec:
     emptyDir: {}
   - name: ca-key
     emptyDir: {}
-`
+  - name: upstream-dns
+    emptyDir: {}
+`, kubeDNSIP, kubeDNSIP)
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar-deny", 2*time.Minute)
 
@@ -884,7 +1016,11 @@ spec:
 		t.Logf("raw TCP connection to port 9999 failed as expected: %v (output: %s)", err, out)
 	})
 
-	// Case 4: Arbitrary DNS (must fail, but cluster DNS resolution must work)
+	// Case 4: DNS exfiltration prevention and sidecar DNS resolution.
+	// In the sidecar DNS serving model (dnsPolicy: None), workload DNS queries resolve
+	// exclusively via the local sidecar DNS server (127.0.0.1:53). Direct outbound DNS
+	// requests from the workload (including to cluster DNS) are rejected to eliminate
+	// DNS exfiltration channels.
 	t.Run("ArbitraryDNS_Blocked", func(t *testing.T) {
 		// Probe external DNS server (8.8.8.8) using toolbox probe
 		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
@@ -905,26 +1041,47 @@ spec:
 		t.Logf("nslookup to 8.8.8.8 failed as expected: %v (output: %s)", errNslookup, outNslookup)
 	})
 
-	t.Run("ClusterDNS_Allowed", func(t *testing.T) {
-		// Probe cluster DNS resolution using toolbox probe
+	t.Run("ClusterDNS_DirectQuery_Blocked", func(t *testing.T) {
+		// Direct query to CoreDNS ClusterIP from the workload must be rejected by egress filter
 		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"/app/toolbox", "probe", "dns", "cluster", "backend", "5s")
+			"/app/toolbox", "probe", "dns", kubeDNSIP, "backend", "3s")
 		outProbe, errProbe := cmdProbe.CombinedOutput()
-		if errProbe != nil {
-			h.DumpDNSDiagnostics(clientPodName, "workload")
-			t.Fatalf("expected cluster DNS probe to succeed, but failed: %v (output: %s)", errProbe, outProbe)
+		if errProbe == nil {
+			t.Fatalf("expected direct DNS probe to cluster DNS %s:53 to fail, but succeeded: %s", kubeDNSIP, outProbe)
 		}
-		t.Logf("cluster DNS probe succeeded: %s", outProbe)
+		t.Logf("direct query to cluster DNS was correctly rejected: %v (output: %s)", errProbe, outProbe)
 
-		// Assert nslookup via cluster DNS succeeds
+		// Also assert direct nslookup to cluster DNS fails
 		cmdNslookup := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"nslookup", "backend")
+			"nslookup", "backend", kubeDNSIP)
 		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
-		if errNslookup != nil {
-			h.DumpDNSDiagnostics(clientPodName, "workload")
-			t.Fatalf("expected cluster nslookup to succeed, but failed: %v (output: %s)", errNslookup, outNslookup)
+		if errNslookup == nil {
+			t.Fatalf("expected direct nslookup to cluster DNS %s to fail, but succeeded: %s", kubeDNSIP, outNslookup)
 		}
-		t.Logf("cluster nslookup succeeded: %s", outNslookup)
+		t.Logf("direct nslookup to cluster DNS was correctly rejected: %v (output: %s)", errNslookup, outNslookup)
+	})
+
+	t.Run("SidecarDNS_Resolution", func(t *testing.T) {
+		// 1. Configured rule host resolves to proxy bind address (127.0.0.2) via sidecar DNS
+		cmdRule := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "dns", "default", "gemini.backend", "3s")
+		outRule, errRule := cmdRule.CombinedOutput()
+		if errRule != nil {
+			t.Fatalf("expected rule host gemini.backend to resolve via sidecar DNS: %v (output: %s)", errRule, outRule)
+		}
+		if !strings.Contains(string(outRule), "127.0.0.2") {
+			t.Fatalf("expected gemini.backend to resolve to 127.0.0.2, got: %s", outRule)
+		}
+		t.Logf("rule host resolved to proxy IP via sidecar DNS: %s", strings.TrimSpace(string(outRule)))
+
+		// 2. Unlisted name receives NXDOMAIN via sidecar DNS
+		cmdUnlisted := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "dns", "default", "other.backend", "3s")
+		outUnlisted, errUnlisted := cmdUnlisted.CombinedOutput()
+		if errUnlisted == nil {
+			t.Fatalf("expected unlisted host other.backend to return NXDOMAIN, but succeeded: %s", outUnlisted)
+		}
+		t.Logf("unlisted host correctly returned NXDOMAIN: %v (output: %s)", errUnlisted, strings.TrimSpace(string(outUnlisted)))
 	})
 
 	// Case 5: Positive control in the same test (asserts health and rule functionality)
