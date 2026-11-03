@@ -30,6 +30,7 @@ EGRESS_ACTION=${EGRESS_ACTION:-REJECT}
 RESOLV_CONF=${RESOLV_CONF:-/etc/resolv.conf}
 IPV6_DISABLE_PATH=${IPV6_DISABLE_PATH:-/proc/sys/net/ipv6/conf/all/disable_ipv6}
 ALLOW_UNFILTERED_IPV6=${ALLOW_UNFILTERED_IPV6:-false}
+TEST_FAIL_IP6TABLES=${TEST_FAIL_IP6TABLES:-false}
 
 is_ipv6() {
   case "$1" in
@@ -239,6 +240,17 @@ apply_ipv6_rules() {
   if is_ipv6_disabled; then
     echo "IPv6 is disabled in this network namespace (${IPV6_DISABLE_PATH}=1); skipping ip6tables rules."
     return 0
+  fi
+
+  if [ "${TEST_FAIL_IP6TABLES}" = "true" ]; then
+    echo "Simulating ip6tables failure for test (TEST_FAIL_IP6TABLES=true)" >&2
+    if [ "${ALLOW_UNFILTERED_IPV6:-false}" = "true" ]; then
+      echo "WARNING: ip6tables-restore failed, but ALLOW_UNFILTERED_IPV6=true is set. IPv6 egress will be UNFILTERED!" >&2
+      return 0
+    else
+      echo "ERROR: Failed to apply ip6tables rules and IPv6 is enabled in this network namespace. Failing closed. Set ALLOW_UNFILTERED_IPV6=true to bypass." >&2
+      return 1
+    fi
   fi
 
   if ! command -v ip6tables-restore >/dev/null 2>&1; then
