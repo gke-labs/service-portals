@@ -278,6 +278,16 @@ func (h *Harness) GetServiceIPv4ClusterIP(name string) string {
 	return ""
 }
 
+func (h *Harness) GetServiceClusterIPInNamespace(name, namespace string) string {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "-n", namespace, "get", "service", name, "-o", "jsonpath={.spec.clusterIP}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.t.Fatalf("Failed to get ClusterIP for service %s in namespace %s: %v\nOutput: %s", name, namespace, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func (h *Harness) GetDeploymentLogs(name string) string {
 	h.t.Helper()
 	cmd := exec.Command("kubectl", "logs", "deployment/"+name)

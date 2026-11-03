@@ -18,9 +18,11 @@ set -eu
 PROXY_PORT=${PROXY_PORT:-8080}
 PROXY_HTTPS_PORT=${PROXY_HTTPS_PORT:-8443}
 PROXY_UID=${PROXY_UID:-1337}
-INTERCEPT_PORTS=${INTERCEPT_PORTS:-80}
+PROXY_BIND_ADDR=${PROXY_BIND_ADDR:-127.0.0.2}
+INTERCEPT_PORTS=${INTERCEPT_PORTS-80}
 CA_DIR=${CA_DIR:-/etc/service-portal/ca}
 CA_PRIVATE_DIR=${CA_PRIVATE_DIR:-/etc/service-portal/ca-private}
+UPSTREAM_DIR=${UPSTREAM_DIR:-/etc/service-portal/upstream}
 CHOWN_UID=${CHOWN_UID:--1}
 CHOWN_GID=${CHOWN_GID:--1}
 ALLOW_METADATA=${ALLOW_METADATA:-false}
@@ -50,30 +52,43 @@ is_ipv6_disabled() {
   return 1
 }
 
-resolve_dns_ips() {
-  if [ -n "${DNS_SERVER_IPS:-}" ]; then
-    echo "${DNS_SERVER_IPS}"
-  elif [ -f "${RESOLV_CONF}" ]; then
-    grep -E '^\s*nameserver\s+' "${RESOLV_CONF}" | awk '{print $2}' | tr '\n' ',' | sed 's/,$//'
-  else
-    echo ""
+copy_upstream_resolv_conf() {
+  upstream_dir="${UPSTREAM_DIR:-/etc/service-portal/upstream}"
+  resolv_conf="${RESOLV_CONF:-/etc/resolv.conf}"
+
+  if [ ! -d "${upstream_dir}" ]; then
+    echo "Upstream directory ${upstream_dir} does not exist; DNS serving will have no upstream resolver."
+    return 0
   fi
+
+  dest="${upstream_dir}/upstream-resolv.conf"
+  echo "Copying ${resolv_conf} to ${dest}..."
+  cp "${resolv_conf}" "${dest}"
+  if [ "${CHOWN_UID:--1}" -ge 0 ] 2>/dev/null; then
+    if [ "${CHOWN_GID:--1}" -ge 0 ] 2>/dev/null; then
+      chown "${CHOWN_UID}:${CHOWN_GID}" "${dest}"
+    else
+      chown "${CHOWN_UID}" "${dest}"
+    fi
+  fi
+  echo "Successfully copied ${resolv_conf} to ${dest}"
 }
 
 generate_rules() {
   family="$1"
 
-  action=$(echo "${EGRESS_ACTION}" | tr '[:lower:]' '[:upper:]')
-  if [ "$action" = "DROP" ]; then
-    v4_target="DROP"
-    v6_target="DROP"
-  else
-    v4_target="REJECT --reject-with icmp-port-unreachable"
-    v6_target="REJECT --reject-with icmp6-port-unreachable"
-  fi
+  case "${EGRESS_ACTION}" in
+    DROP|drop)
+      v4_target="DROP"
+      v6_target="DROP"
+      ;;
+    *)
+      v4_target="REJECT --reject-with icmp-port-unreachable"
+      v6_target="REJECT --reject-with icmp6-port-unreachable"
+      ;;
+  esac
 
-  if [ "$family" = "4" ] || [ "$family" = "v4" ]; then
-    family="4"
+  if [ "$family" = "4" ]; then
     target="$v4_target"
     localhost="127.0.0.1/32"
   else
@@ -89,23 +104,29 @@ generate_rules() {
   echo ":OUTPUT ACCEPT [0:0]"
   echo ":POSTROUTING ACCEPT [0:0]"
   echo ":PORTAL_OUTPUT - [0:0]"
-  echo "-A OUTPUT -p tcp -j PORTAL_OUTPUT"
-  echo "-A PORTAL_OUTPUT -o lo -j RETURN"
-  echo "-A PORTAL_OUTPUT -m owner --uid-owner ${PROXY_UID} -j RETURN"
+  if [ -n "${INTERCEPT_PORTS}" ]; then
+    echo "-A OUTPUT -p tcp -j PORTAL_OUTPUT"
+    if [ "$family" = "4" ]; then
+      echo "-A PORTAL_OUTPUT -o lo ! -d ${PROXY_BIND_ADDR} -j RETURN"
+    else
+      echo "-A PORTAL_OUTPUT -o lo -j RETURN"
+    fi
+    echo "-A PORTAL_OUTPUT -m owner --uid-owner ${PROXY_UID} -j RETURN"
 
-  if [ "${INTERCEPT_PORTS}" = "*" ]; then
-    echo "-A PORTAL_OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports ${PROXY_HTTPS_PORT}"
-    echo "-A PORTAL_OUTPUT -p tcp ! --dport 443 -j REDIRECT --to-ports ${PROXY_PORT}"
-  else
-    for port in $(echo "${INTERCEPT_PORTS}" | tr ',' ' '); do
-      if [ -n "$port" ]; then
-        if [ "$port" = "443" ]; then
-          echo "-A PORTAL_OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports ${PROXY_HTTPS_PORT}"
-        else
-          echo "-A PORTAL_OUTPUT -p tcp --dport ${port} -j REDIRECT --to-ports ${PROXY_PORT}"
+    if [ "${INTERCEPT_PORTS}" = "*" ]; then
+      echo "-A PORTAL_OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports ${PROXY_HTTPS_PORT}"
+      echo "-A PORTAL_OUTPUT -p tcp ! --dport 443 -j REDIRECT --to-ports ${PROXY_PORT}"
+    else
+      for port in $(echo "${INTERCEPT_PORTS}" | tr ',' ' '); do
+        if [ -n "$port" ]; then
+          if [ "$port" = "443" ]; then
+            echo "-A PORTAL_OUTPUT -p tcp --dport 443 -j REDIRECT --to-ports ${PROXY_HTTPS_PORT}"
+          else
+            echo "-A PORTAL_OUTPUT -p tcp --dport ${port} -j REDIRECT --to-ports ${PROXY_PORT}"
+          fi
         fi
-      fi
-    done
+      done
+    fi
   fi
   echo "COMMIT"
 
@@ -186,21 +207,7 @@ generate_rules() {
     fi
   fi
 
-  # 7. Allow DNS requests to cluster DNS server IPs
-  dns_ips=$(resolve_dns_ips)
-  for ip in $(echo "${dns_ips}" | tr ',' ' '); do
-    if [ -n "$ip" ]; then
-      if [ "$family" = "4" ] && ! is_ipv6 "$ip"; then
-        echo "-A PORTAL_EGRESS -d ${ip} -p udp --dport 53 -j ACCEPT"
-        echo "-A PORTAL_EGRESS -d ${ip} -p tcp --dport 53 -j ACCEPT"
-      elif [ "$family" = "6" ] && is_ipv6 "$ip"; then
-        echo "-A PORTAL_EGRESS -d ${ip} -p udp --dport 53 -j ACCEPT"
-        echo "-A PORTAL_EGRESS -d ${ip} -p tcp --dport 53 -j ACCEPT"
-      fi
-    fi
-  done
-
-  # 8. Allowed CIDRs
+  # 7. Allowed CIDRs
   for cidr in $(echo "${ALLOW_CIDRS}" | tr ',' ' '); do
     if [ -n "$cidr" ]; then
       if [ "$family" = "4" ] && ! is_ipv6 "$cidr"; then
@@ -211,21 +218,21 @@ generate_rules() {
     fi
   done
 
-  # 9. Allowed TCP ports
+  # 8. Allowed TCP ports
   for port in $(echo "${ALLOW_PORTS}" | tr ',' ' '); do
     if [ -n "$port" ]; then
       echo "-A PORTAL_EGRESS -p tcp --dport ${port} -j ACCEPT"
     fi
   done
 
-  # 10. Reject/drop remaining outbound ICMP from workload (e.g. echo-request)
+  # 9. Reject/drop remaining outbound ICMP from workload (e.g. echo-request)
   if [ "$family" = "4" ]; then
     echo "-A PORTAL_EGRESS -p icmp -j ${target}"
   else
     echo "-A PORTAL_EGRESS -p ipv6-icmp -j ${target}"
   fi
 
-  # 11. Reject/drop all other outbound TCP and UDP traffic
+  # 10. Reject/drop all other outbound TCP and UDP traffic
   echo "-A PORTAL_EGRESS -p tcp -j ${target}"
   echo "-A PORTAL_EGRESS -p udp -j ${target}"
   echo "COMMIT"
@@ -288,6 +295,10 @@ case "${1:-}" in
     generate_rules 6
     exit 0
     ;;
+  copy-upstream-resolv-conf|copy-resolv-conf)
+    copy_upstream_resolv_conf
+    exit $?
+    ;;
   apply-ipv6)
     apply_ipv6_rules
     exit $?
@@ -303,20 +314,19 @@ case "${1:-}" in
     ;;
 esac
 
+copy_upstream_resolv_conf
+
 if [ -x /usr/local/bin/init-service-portals ]; then
   echo "Generating CA certificate in ${CA_DIR} and private cert/key in ${CA_PRIVATE_DIR} with chown ${CHOWN_UID}:${CHOWN_GID}..."
   /usr/local/bin/init-service-portals -cert-dir "${CA_DIR}" -key-dir "${CA_PRIVATE_DIR}" -chown-uid "${CHOWN_UID}" -chown-gid "${CHOWN_GID}"
 fi
 
-DNS_SERVER_IPS=$(resolve_dns_ips)
-export DNS_SERVER_IPS
-
 echo "Configuring iptables rules..."
 echo "PROXY_PORT: ${PROXY_PORT}"
 echo "PROXY_HTTPS_PORT: ${PROXY_HTTPS_PORT}"
 echo "PROXY_UID: ${PROXY_UID}"
+echo "PROXY_BIND_ADDR: ${PROXY_BIND_ADDR}"
 echo "INTERCEPT_PORTS: ${INTERCEPT_PORTS}"
-echo "DNS_SERVER_IPS: ${DNS_SERVER_IPS}"
 echo "ALLOW_METADATA: ${ALLOW_METADATA}"
 echo "ALLOW_CIDRS: ${ALLOW_CIDRS}"
 echo "ALLOW_PORTS: ${ALLOW_PORTS}"
