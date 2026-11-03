@@ -1,25 +1,24 @@
 # Deployment Modes
 
-`service-portals` supports three primary deployment architectures to place the proxy in the traffic path between your workload and external services. This document compares the modes, explains how they work, and outlines their respective trade-offs.
+`service-portals` places an intercepting proxy in the outbound traffic path between your workload and external services to swap placeholder tokens with production credentials and enforce default-deny egress policies.
+
+The **Transparent Sidecar Mode** is the **current recommended deployment mode** and the only quick-start path. All other modes are either legacy architectures scheduled for removal or experimental/in-development paths leading toward the project's single-mode NRI convergence plan (see [Roadmap](roadmap.md)).
 
 ---
 
-## Comparison Matrix
+## Mode Summary & Status
 
-| Feature | Transparent Sidecar Mode (Primary) | Explicit Service Mode | Explicit HTTP Proxy Mode |
-| :--- | :--- | :--- | :--- |
-| **Primary Binary** | `cmd/all-in-one-portal` + `cmd/init-service-portals` | `cmd/service-portal` (or service-specific portal) | `cmd/service-portal` |
-| **Application Changes** | **None** (talks to configured hostnames) | **URL change** (`http://gemini-portal/`) | **Env vars** (`HTTP_PROXY`, `HTTPS_PROXY`) |
-| **K8s Privileges** | Requires `NET_ADMIN` for init container | Standard unprivileged pod (requires cert-manager for `k8s/manifests.yaml`) | Standard unprivileged pod |
-| **TLS Handling** | Intercepts port 443 via pod-local CA | Plain HTTP in-cluster; HTTPS upstream | Intercepts `CONNECT` via pod-local CA |
-| **Routing / Upstream** | Multi-host routing via `PortalRule` | Single upstream via `TARGET_URL` | Single upstream via `TARGET_URL` (other hosts pass through unmodified) |
-| **Egress Enforcement** | **Strict packet-level blocking** of other ports | None at pod level (relies on NetworkPolicy) | None at pod level (relies on NetworkPolicy) |
-| **Secret Scope** | Scoped to individual pod | Shared across all pods accessing Service | Scoped to pod or shared |
-| **Bypass Resistance** | **High** (iptables drops direct traffic) | Low (workload can still talk externally) | Low (workload can bypass proxy env vars) |
+| Mode | Status | Primary Binary / Mechanism | Privilege Requirements | Key Characteristics |
+| :--- | :--- | :--- | :--- | :--- |
+| **Transparent Sidecar Mode** | **Recommended (Current Default)** | `cmd/all-in-one-portal` + `cmd/init-service-portals` | `CAP_NET_ADMIN` for init container; workload is unprivileged | Zero application code changes; ephemeral pod-local CA; dynamic SNI TLS minting; packet-level default-deny egress filtering. |
+| **Explicit Service Mode** | *Legacy* (scheduled for removal) | `cmd/service-portal` or service-specific portals (`gemini-portal`, etc.) | Unprivileged pod | Centralized cluster `Service`; plain HTTP in cluster; shared secret blast radius; no packet-level egress enforcement. |
+| **Explicit HTTP Proxy Mode** | *Legacy* (scheduled for removal) | `cmd/service-portal` | Unprivileged pod | Workloads set `HTTP_PROXY`/`HTTPS_PROXY`; single-upstream `CONNECT` tunnel; no `PortalRule` multi-host routing; low bypass resistance. |
+| **Application-Level Interception** | *Historical (Not Pursued)* | Injected proxy env + Kubernetes `NetworkPolicy` | Zero privileges (PSA baseline & restricted) | Spiked in #164; not pursued. Zero-privilege proxy env and NetworkPolicy; no separate code path for Autopilot. |
+| **Per-Node NRI Mode** | *In Development, Future Default* | containerd NRI plugin DaemonSet (`#198`) | Node-level daemon; zero in-pod privileges | Target: host-side (#181); current prototype uses pod-netns rules. Target single mode; eliminates UID-1337 bypass. |
 
 ---
 
-## 1. Transparent Sidecar Mode (Primary)
+## 1. Transparent Sidecar Mode (Recommended)
 
 In transparent sidecar mode, each application pod runs two helper containers alongside the workload: an `init-service-portals` init container and an `all-in-one-portal` sidecar container.
 
@@ -44,7 +43,7 @@ In transparent sidecar mode, each application pod runs two helper containers alo
 1. **Init Container (`init-service-portals`)**:
    - Runs with `CAP_NET_ADMIN` privileges before application containers start.
    - Generates an ephemeral RSA-2048 Root CA certificate (`tls.crt`) in a shared `ca-cert` volume, and the CA private key (`tls.key`) in a `ca-private` volume chowned to UID `1337`.
-   - Installs `iptables` rules:
+   - Installs `iptables` and `ip6tables` rules:
      - Redirects port `80` to local port `8080` (HTTP).
      - Redirects port `443` to local port `8443` (HTTPS).
      - Excludes UID `1337` to avoid redirecting the proxy's own outbound requests.
@@ -63,88 +62,20 @@ In transparent sidecar mode, each application pod runs two helper containers alo
 
 ### Best Used For
 - **Sandboxed untrusted code (agents, CI jobs)** where you must guarantee that credentials cannot be stolen or bypassed, even if the code inside the workload is malicious or compromised.
+- See the [Sidecar Deployment Guide](sidecar-container.md) for complete manifests and configuration details.
 
 ---
 
-## 2. Explicit Service Mode (Shared In-Cluster Gateway)
+## 2. Other modes (legacy / experimental)
 
-In explicit service mode, the portal runs as a standalone Kubernetes Deployment exposed via a standard Kubernetes `Service` (e.g., `gemini-portal`).
+### Explicit Service Mode (Status: Legacy)
+*Status: legacy.* In explicit service mode, the proxy is deployed as a cluster-internal Kubernetes Service (via `k8s/manifests.yaml` or single-target binaries like `gemini-portal`, `anthropic-portal`, `github-portal`, or `cmd/service-portal`) that workloads explicitly address (e.g., `http://gemini-portal/v1/...`). While this avoids requiring `CAP_NET_ADMIN` in the workload pod, it lacks packet-level egress enforcement, passes plain HTTP across the cluster network, shares secrets across all consumers of the service, and provides no protection against direct egress bypasses. Explicit Service mode and its dedicated binaries are legacy and scheduled for complete removal once per-node NRI mode meets its acceptance bar (see [Roadmap](roadmap.md)).
 
-```
-+-----------------------------------+             +----------------------------------+
-| Workload Pod                      |             | Service Portal Deployment        |
-|                                   |             |                                  |
-| Makes plain HTTP request to:      |  HTTP :80   | Listens on :8080                 |
-| http://gemini-portal/v1/...       |------------>| Injects UPSTREAM_AUTH_TOKEN      |
-|                                   |             | Proxies to TARGET_URL            |
-+-----------------------------------+             +-----------------+----------------+
-                                                                    | Real TLS
-                                                                    v
-                                                          +--------------------------+
-                                                          | External API             |
-                                                          | (Google, Anthropic, etc.)|
-                                                          +--------------------------+
-```
+### Explicit HTTP Proxy Mode (Status: Legacy)
+*Status: legacy.* In explicit HTTP proxy mode, workloads configure standard proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, and `SSL_CERT_FILE`) to route outbound requests through `cmd/service-portal` via `HTTP CONNECT` TLS interception. This mode only supports a single upstream target configured by `TARGET_URL` and `UPSTREAM_AUTH_TOKEN` (requests to other hosts are passed through without modification, and `PortalRule` declarative multi-host routing is not evaluated; see [#127](https://github.com/gke-labs/service-portals/issues/127)), while remaining vulnerable to environment variable tampering or direct bypass if the workload has outbound network access. Explicit `HTTP_PROXY` mode is legacy and scheduled for removal (or retention strictly as an internal implementation mechanism if required by NRI) once NRI meets its acceptance bar (see [Roadmap](roadmap.md)).
 
-### How it Works
-1. Deploy the portal using `k8s/manifests.yaml` (or the manifests in `gemini-portal/`, `anthropic-portal/`, or `github-portal/`). Note that `k8s/manifests.yaml` includes cert-manager `Issuer` and `Certificate` resources to provision the `service-portal-ca` secret, so [cert-manager](https://cert-manager.io/) must be installed in the cluster.
-2. The portal container runs with environment variables `TARGET_URL` (e.g. `https://generativelanguage.googleapis.com`) and `UPSTREAM_AUTH_TOKEN` (sourced from a Kubernetes Secret).
-3. Workload pods address the portal directly over internal cluster DNS:
-   ```bash
-   curl http://gemini-portal/v1beta/models
-   ```
-4. The portal receives the request, attaches the configured authentication header, and forwards the request over HTTPS to the external service.
+### Application-Level Interception Mode (Status: Not Pursued)
+*Status: historical (not pursued).* Spiked in [#164](https://github.com/gke-labs/service-portals/pull/164) (with findings recorded in [#214](https://github.com/gke-labs/service-portals/issues/214) / [#215](https://github.com/gke-labs/service-portals/pull/215)), application-level interception evaluated establishing a zero-privilege proxy model by injecting standard proxy environment variables into workload containers, restricting egress with a default-deny Kubernetes `NetworkPolicy`, and passing per-pod `Proxy-Authorization` tokens. The project decided not to pursue a separate application-level code path for platforms lacking NRI (such as GKE Autopilot today); on platforms where NRI is unavailable, `service-portals` is unsupported (see [Roadmap](roadmap.md) and the spike writeup in pending PR #215).
 
-### Best Used For
-- Trusted or internal microservices that need centralized API key management without requiring `NET_ADMIN` capabilities or sidecar containers.
-- Shared API key consumption across multiple replicas or jobs in a namespace.
-
----
-
-## 3. Explicit HTTP Proxy Mode (`HTTP_PROXY` / `HTTPS_PROXY`)
-
-In explicit HTTP proxy mode, workloads configure standard proxy environment variables to route their HTTP and HTTPS traffic through the portal (`cmd/service-portal`).
-
-> **Scope & Limitations**: This mode supports a single upstream configured by `TARGET_URL` and `UPSTREAM_AUTH_TOKEN`. Requests to other hosts are forwarded without modification; `PortalRule` declarative multi-host routing is not applied in this mode today (see follow-up issue [#127](https://github.com/gke-labs/service-portals/issues/127)).
-
-```
-+-------------------------------------------------------+
-| Workload Container                                    |
-|                                                       |
-| export HTTP_PROXY=http://portal:8080                  |
-| export HTTPS_PROXY=http://portal:8080                 |
-| export SSL_CERT_FILE=/etc/service-portal/ca/tls.crt   |
-|                                                       |
-| curl https://api.github.com/...                       |
-+---------------------------+---------------------------+
-                            | HTTP CONNECT api.github.com:443
-                            v
-+-------------------------------------------------------+
-| Portal Proxy (cmd/service-portal)                     |
-|                                                       |
-| 1. Accepts CONNECT tunnel                             |
-| 2. Mints TLS cert for api.github.com using local CA   |
-| 3. Terminates TLS tunnel and inspects request         |
-| 4. If host matches TARGET_URL, injects auth header;   |
-|    otherwise forwards untouched (no credential swap). |
-| 5. Forwards to upstream https://api.github.com        |
-+-------------------------------------------------------+
-```
-
-### How it Works
-1. Deploy `cmd/service-portal` either as a sidecar or as an in-cluster service with `TARGET_URL`, `UPSTREAM_AUTH_TOKEN`, `CA_CERT_PATH`, and `CA_KEY_PATH` configured.
-2. In the workload container, set:
-   ```bash
-   export HTTP_PROXY=http://127.0.0.1:8080
-   export HTTPS_PROXY=http://127.0.0.1:8080
-   export SSL_CERT_FILE=/etc/service-portal/ca/tls.crt # or trust the CA
-   ```
-3. For HTTPS connections, standard HTTP client libraries issue an `HTTP CONNECT <host>:443` request to the proxy.
-4. `pkg/proxy/proxy.go` intercepts the `CONNECT` request, hijacks the connection, completes the TLS handshake using a dynamically minted certificate signed by the CA, and inspects the decrypted request:
-   - If the tunnelled host matches `TARGET_URL.Host`, it injects `UPSTREAM_AUTH_TOKEN` into `UPSTREAM_AUTH_HEADER` (e.g. `Authorization: Bearer ...`) and proxies to `TARGET_URL`.
-   - If the host is any other external host, the request is forwarded to `https://<host>` without modification or credential injection (as tested in `TestConnectHonorsHost/OtherHost`).
-   - Similarly, for cleartext HTTP requests sent with absolute URLs (standard `HTTP_PROXY`), requests are forwarded directly to the requested host without credential injection unless the host matches `TARGET_URL.Host`.
-   - Note: Declarative `PortalRule` multi-host routing is not evaluated in this mode; multi-service routing requires transparent sidecar mode.
-
-### Best Used For
-- Workloads calling a specific external API using standard CLI utilities (`git`, `curl`, `pip`, `npm`) that natively respect `HTTP_PROXY` and `HTTPS_PROXY` in environments where `CAP_NET_ADMIN` (required for transparent iptables interception) cannot be granted.
+### Per-Node NRI Mode (Status: In Development, Future Default)
+*Status: in development, future default.* The target architecture ([#151](https://github.com/gke-labs/service-portals/issues/151), [#181](https://github.com/gke-labs/service-portals/issues/181), [#182](https://github.com/gke-labs/service-portals/issues/182), [#183](https://github.com/gke-labs/service-portals/issues/183), [#198](https://github.com/gke-labs/service-portals/pull/198)) deploys a node-level DaemonSet that registers with containerd via the Node Resource Interface (NRI). While the current prototype in #198 installs rules in the pod network namespace, the #181 target moves redirection and egress filtering to the host side of the `veth`/`tap` network interface to provide 100% invisible pod manifests with zero workload Linux capabilities (PSA `baseline` and `restricted` compliant), eliminate the UID-1337 bypass vulnerability, resolve pod caller identity directly at the node proxy, and guarantee uniform enforcement across standard `runc`, `gVisor`, and `Kata Containers`. Per-node NRI will become the single supported mode of operation once it passes the acceptance bar, after which all other modes will be removed (see [Roadmap](roadmap.md) and [`docs/design/daemonset-mode.md`](design/daemonset-mode.md)).
