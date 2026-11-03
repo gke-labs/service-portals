@@ -60,7 +60,7 @@ func TestRuleGeneration_Defaults_IPv4(t *testing.T) {
 		"*nat",
 		":PORTAL_OUTPUT - [0:0]",
 		"-A OUTPUT -p tcp -j PORTAL_OUTPUT",
-		"-A PORTAL_OUTPUT -o lo -j RETURN",
+		"-A PORTAL_OUTPUT -o lo ! -d 127.0.0.2 -j RETURN",
 		"-A PORTAL_OUTPUT -m owner --uid-owner 1337 -j RETURN",
 		"-A PORTAL_OUTPUT -p tcp --dport 80 -j REDIRECT --to-ports 8080",
 		"COMMIT",
@@ -75,8 +75,6 @@ func TestRuleGeneration_Defaults_IPv4(t *testing.T) {
 		"-A PORTAL_EGRESS -p icmp --icmp-type 3 -j ACCEPT",
 		"-A PORTAL_EGRESS -p icmp --icmp-type 11 -j ACCEPT",
 		"-A PORTAL_EGRESS -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable",
-		"-A PORTAL_EGRESS -d 10.96.0.10 -p udp --dport 53 -j ACCEPT",
-		"-A PORTAL_EGRESS -d 10.96.0.10 -p tcp --dport 53 -j ACCEPT",
 		"-A PORTAL_EGRESS -p icmp -j REJECT --reject-with icmp-port-unreachable",
 		"-A PORTAL_EGRESS -p tcp -j REJECT --reject-with icmp-port-unreachable",
 		"-A PORTAL_EGRESS -p udp -j REJECT --reject-with icmp-port-unreachable",
@@ -96,6 +94,11 @@ func TestRuleGeneration_Defaults_IPv4(t *testing.T) {
 	// Verify that destination-unrestricted proxy ports are NOT accepted
 	if strings.Contains(out, "-A PORTAL_EGRESS -p tcp --dport 8080 -j ACCEPT") {
 		t.Errorf("Output should not contain destination-unrestricted port 8080 ACCEPT")
+	}
+
+	// Workload DNS egress must be rejected entirely (only local 127.0.0.1:53 via loopback is allowed)
+	if strings.Contains(out, "-p udp --dport 53 -j ACCEPT") || strings.Contains(out, "-p tcp --dport 53 -j ACCEPT") {
+		t.Errorf("Expected workload egress filter to NOT accept port 53, got:\n%s", out)
 	}
 }
 
@@ -136,8 +139,6 @@ func TestRuleGeneration_Defaults_IPv6(t *testing.T) {
 		"-A PORTAL_EGRESS -d fd00:ec2::254/128 -j REJECT --reject-with icmp6-port-unreachable",
 		"-A PORTAL_EGRESS -d fd20:ce::254/128 -j REJECT --reject-with icmp6-port-unreachable",
 		"-A PORTAL_EGRESS -d fe80::/10 -j REJECT --reject-with icmp6-port-unreachable",
-		"-A PORTAL_EGRESS -d 2001:db8::53 -p udp --dport 53 -j ACCEPT",
-		"-A PORTAL_EGRESS -d 2001:db8::53 -p tcp --dport 53 -j ACCEPT",
 		"-A PORTAL_EGRESS -p ipv6-icmp -j REJECT --reject-with icmp6-port-unreachable",
 		"-A PORTAL_EGRESS -p tcp -j REJECT --reject-with icmp6-port-unreachable",
 		"-A PORTAL_EGRESS -p udp -j REJECT --reject-with icmp6-port-unreachable",
@@ -151,6 +152,10 @@ func TestRuleGeneration_Defaults_IPv6(t *testing.T) {
 
 	if strings.Contains(out, "-A PORTAL_EGRESS -p tcp --dport 8080 -j ACCEPT") {
 		t.Errorf("IPv6 output should not contain destination-unrestricted port 8080 ACCEPT")
+	}
+
+	if strings.Contains(out, "-p udp --dport 53 -j ACCEPT") || strings.Contains(out, "-p tcp --dport 53 -j ACCEPT") {
+		t.Errorf("Expected IPv6 workload egress filter to NOT accept port 53, got:\n%s", out)
 	}
 }
 
@@ -203,6 +208,19 @@ func TestRuleGeneration_ND_And_ICMP_Ordering(t *testing.T) {
 	}
 	if metadataIdx >= icmpRejectIdx {
 		t.Errorf("IPv4 metadata reject (idx %d) must precede generic ICMP reject (idx %d)", metadataIdx, icmpRejectIdx)
+	}
+}
+
+func TestRuleGeneration_OptionalInterceptPorts(t *testing.T) {
+	out := runGenerateRules(t, "4", map[string]string{
+		"INTERCEPT_PORTS": "",
+	})
+
+	if strings.Contains(out, "REDIRECT") {
+		t.Errorf("Expected no REDIRECT rules when INTERCEPT_PORTS is empty, got:\n%s", out)
+	}
+	if strings.Contains(out, "-A OUTPUT -p tcp -j PORTAL_OUTPUT") {
+		t.Errorf("Expected no jump to PORTAL_OUTPUT when INTERCEPT_PORTS is empty, got:\n%s", out)
 	}
 }
 
@@ -344,43 +362,57 @@ func TestRuleGeneration_EgressAction_DROP(t *testing.T) {
 	}
 }
 
-func TestRuleGeneration_ResolvConfParsing(t *testing.T) {
-	tmpResolv, err := os.CreateTemp("", "resolv.conf-*")
+func TestCopyUpstreamResolvConf(t *testing.T) {
+	tmpDir := t.TempDir()
+	upstreamDir := filepath.Join(tmpDir, "upstream")
+	if err := os.MkdirAll(upstreamDir, 0755); err != nil {
+		t.Fatalf("Failed to create upstream dir: %v", err)
+	}
+
+	resolvContent := "nameserver 10.96.0.10\nnameserver 2001:db8::53\n"
+	srcResolv := filepath.Join(tmpDir, "resolv.conf")
+	if err := os.WriteFile(srcResolv, []byte(resolvContent), 0644); err != nil {
+		t.Fatalf("Failed to write test resolv.conf: %v", err)
+	}
+
+	// 1. Upstream directory exists -> successfully copied to upstream-resolv.conf
+	out, err := runEntrypointCommand(t, []string{"copy-upstream-resolv-conf"}, map[string]string{
+		"UPSTREAM_DIR": upstreamDir,
+		"RESOLV_CONF":  srcResolv,
+	})
 	if err != nil {
-		t.Fatalf("Failed to create temp resolv.conf: %v", err)
-	}
-	defer os.Remove(tmpResolv.Name())
-
-	resolvContent := `
-search default.svc.cluster.local svc.cluster.local
-nameserver 10.96.0.10
-nameserver 2001:db8::53
-options ndots:5
-`
-	if _, err := tmpResolv.WriteString(resolvContent); err != nil {
-		t.Fatalf("Failed to write to temp resolv.conf: %v", err)
-	}
-	tmpResolv.Close()
-
-	env := map[string]string{
-		"RESOLV_CONF":    tmpResolv.Name(),
-		"DNS_SERVER_IPS": "",
+		t.Fatalf("Expected copy-upstream-resolv-conf to succeed, failed: %v\nOutput: %s", err, out)
 	}
 
-	out4 := runGenerateRules(t, "4", env)
-	if !strings.Contains(out4, "-A PORTAL_EGRESS -d 10.96.0.10 -p udp --dport 53 -j ACCEPT") {
-		t.Errorf("IPv4 output should contain nameserver from resolv.conf, got:\n%s", out4)
+	destFile := filepath.Join(upstreamDir, "upstream-resolv.conf")
+	content, err := os.ReadFile(destFile)
+	if err != nil {
+		t.Fatalf("Failed to read copied upstream-resolv.conf at %s: %v", destFile, err)
 	}
-	if strings.Contains(out4, "2001:db8::53") {
-		t.Errorf("IPv4 output should NOT contain IPv6 nameserver")
+	if string(content) != resolvContent {
+		t.Errorf("Copied resolv.conf content mismatch: got %q, want %q", string(content), resolvContent)
 	}
 
-	out6 := runGenerateRules(t, "6", env)
-	if !strings.Contains(out6, "-A PORTAL_EGRESS -d 2001:db8::53 -p udp --dport 53 -j ACCEPT") {
-		t.Errorf("IPv6 output should contain IPv6 nameserver from resolv.conf, got:\n%s", out6)
+	// 2. Upstream directory does NOT exist -> logs that DNS serving will have no upstream resolver and exits 0
+	nonExistentDir := filepath.Join(tmpDir, "nonexistent")
+	outMissing, err := runEntrypointCommand(t, []string{"copy-upstream-resolv-conf"}, map[string]string{
+		"UPSTREAM_DIR": nonExistentDir,
+		"RESOLV_CONF":  srcResolv,
+	})
+	if err != nil {
+		t.Fatalf("Expected copy-upstream-resolv-conf without upstream dir to succeed, failed: %v\nOutput: %s", err, outMissing)
 	}
-	if strings.Contains(out6, "10.96.0.10") {
-		t.Errorf("IPv6 output should NOT contain IPv4 nameserver")
+	if !strings.Contains(outMissing, "DNS serving will have no upstream resolver") {
+		t.Errorf("Expected log indicating no upstream resolver, got:\n%s", outMissing)
+	}
+
+	// 3. Upstream directory exists but source file does not exist -> must fail (fail-closed, fatal)
+	_, errMissingSrc := runEntrypointCommand(t, []string{"copy-upstream-resolv-conf"}, map[string]string{
+		"UPSTREAM_DIR": upstreamDir,
+		"RESOLV_CONF":  filepath.Join(tmpDir, "nonexistent-resolv.conf"),
+	})
+	if errMissingSrc == nil {
+		t.Fatalf("Expected copy-upstream-resolv-conf with missing source resolv.conf to fail, but it succeeded")
 	}
 }
 
@@ -402,7 +434,6 @@ func TestRuleGeneration_RuleOrdering(t *testing.T) {
 
 	icmpAllowIdx := strings.Index(out, "--icmp-type 0")
 	metadataIdx := strings.Index(out, "-d 169.254.0.0/16")
-	dnsIdx := strings.Index(out, "-d 10.96.0.10")
 	cidrIdx := strings.Index(out, "-d 10.0.0.0/8")
 	portIdx := strings.Index(out, "--dport 9000")
 	icmpRejectIdx := strings.Index(out, "-A PORTAL_EGRESS -p icmp -j")
@@ -412,14 +443,8 @@ func TestRuleGeneration_RuleOrdering(t *testing.T) {
 	if icmpAllowIdx >= metadataIdx {
 		t.Errorf("Essential ICMP allow (idx %d) must precede metadata block (idx %d)", icmpAllowIdx, metadataIdx)
 	}
-	if metadataIdx >= dnsIdx {
-		t.Errorf("Metadata block (idx %d) must precede DNS allow rules (idx %d)", metadataIdx, dnsIdx)
-	}
 	if metadataIdx >= cidrIdx {
 		t.Errorf("Metadata block (idx %d) must precede ALLOW_CIDRS (idx %d)", metadataIdx, cidrIdx)
-	}
-	if dnsIdx >= cidrIdx {
-		t.Errorf("DNS allow rules (idx %d) should precede ALLOW_CIDRS (idx %d)", dnsIdx, cidrIdx)
 	}
 	if cidrIdx >= portIdx {
 		t.Errorf("ALLOW_CIDRS (idx %d) should precede ALLOW_PORTS (idx %d)", cidrIdx, portIdx)

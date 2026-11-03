@@ -685,6 +685,12 @@ spec:
 	backendClusterIP := h.GetServiceClusterIP("backend")
 	t.Logf("Backend ClusterIP: %s", backendClusterIP)
 
+	kubeDNSIP := h.GetServiceClusterIPInNamespace("kube-dns", "kube-system")
+	if kubeDNSIP == "" {
+		kubeDNSIP = "10.96.0.10"
+	}
+	t.Logf("Kube-DNS ClusterIP: %s", kubeDNSIP)
+
 	// Deploy Client Pod with Sidecar
 	clientPodName := "test-client-sidecar-deny"
 	h.DeletePod(clientPodName)
@@ -884,7 +890,7 @@ spec:
 		t.Logf("raw TCP connection to port 9999 failed as expected: %v (output: %s)", err, out)
 	})
 
-	// Case 4: Arbitrary DNS (must fail, but cluster DNS resolution must work)
+	// Case 4: DNS egress (must be rejected to prevent DNS exfiltration)
 	t.Run("ArbitraryDNS_Blocked", func(t *testing.T) {
 		// Probe external DNS server (8.8.8.8) using toolbox probe
 		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
@@ -905,26 +911,24 @@ spec:
 		t.Logf("nslookup to 8.8.8.8 failed as expected: %v (output: %s)", errNslookup, outNslookup)
 	})
 
-	t.Run("ClusterDNS_Allowed", func(t *testing.T) {
-		// Probe cluster DNS resolution using toolbox probe
+	t.Run("ClusterDNS_DirectQuery_Blocked", func(t *testing.T) {
+		// Direct query to CoreDNS ClusterIP from the workload must be rejected by egress filter
 		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"/app/toolbox", "probe", "dns", "cluster", "backend", "5s")
+			"/app/toolbox", "probe", "dns", kubeDNSIP, "backend", "3s")
 		outProbe, errProbe := cmdProbe.CombinedOutput()
-		if errProbe != nil {
-			h.DumpDNSDiagnostics(clientPodName, "workload")
-			t.Fatalf("expected cluster DNS probe to succeed, but failed: %v (output: %s)", errProbe, outProbe)
+		if errProbe == nil {
+			t.Fatalf("expected direct DNS probe to cluster DNS %s:53 to fail, but succeeded: %s", kubeDNSIP, outProbe)
 		}
-		t.Logf("cluster DNS probe succeeded: %s", outProbe)
+		t.Logf("direct query to cluster DNS was correctly rejected: %v (output: %s)", errProbe, outProbe)
 
-		// Assert nslookup via cluster DNS succeeds
+		// Also assert direct nslookup to cluster DNS fails
 		cmdNslookup := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"nslookup", "backend")
+			"nslookup", "backend", kubeDNSIP)
 		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
-		if errNslookup != nil {
-			h.DumpDNSDiagnostics(clientPodName, "workload")
-			t.Fatalf("expected cluster nslookup to succeed, but failed: %v (output: %s)", errNslookup, outNslookup)
+		if errNslookup == nil {
+			t.Fatalf("expected direct nslookup to cluster DNS %s to fail, but succeeded: %s", kubeDNSIP, outNslookup)
 		}
-		t.Logf("cluster nslookup succeeded: %s", outNslookup)
+		t.Logf("direct nslookup to cluster DNS was correctly rejected: %v (output: %s)", errNslookup, outNslookup)
 	})
 
 	// Case 5: Positive control in the same test (asserts health and rule functionality)
