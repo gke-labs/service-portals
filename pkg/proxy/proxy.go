@@ -114,13 +114,53 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.proxyRequest(w, r, false)
+	p.proxyRequest(w, r, false, "")
 }
 
-func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM bool) {
+// MatchHosts returns true if innerHost matches connectTarget.
+// If both specify a port, the ports must match.
+// If innerHost does not specify a port, it matches connectTarget if either connectTarget has no port
+// or connectTarget specifies the standard HTTPS/HTTP port (443/80).
+func MatchHosts(innerHost, connectTarget string) bool {
+	innerH, innerP, err1 := net.SplitHostPort(innerHost)
+	if err1 != nil {
+		innerH = innerHost
+		innerP = ""
+	}
+
+	connH, connP, err2 := net.SplitHostPort(connectTarget)
+	if err2 != nil {
+		connH = connectTarget
+		connP = ""
+	}
+
+	if !strings.EqualFold(innerH, connH) {
+		return false
+	}
+
+	if innerP != "" && connP != "" {
+		return innerP == connP
+	}
+
+	if connP != "" && connP != "443" && connP != "80" && innerP == "" {
+		return false
+	}
+
+	return true
+}
+
+func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM bool, connectTarget string) {
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
+	}
+
+	if isMITM {
+		if connectTarget == "" || !MatchHosts(host, connectTarget) {
+			log.Printf("MITM Host escape blocked: inner host %q does not match CONNECT target %q", host, connectTarget)
+			http.Error(w, fmt.Sprintf("Access Denied: inner host %q does not match CONNECT target", host), http.StatusForbidden)
+			return
+		}
 	}
 
 	forceTarget := false
@@ -131,6 +171,7 @@ func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM 
 	}
 
 	outReq := r.Clone(r.Context())
+	outReq.RequestURI = ""
 	if forceTarget {
 		outReq.URL.Scheme = p.TargetURL.Scheme
 		outReq.URL.Host = p.TargetURL.Host
@@ -303,9 +344,10 @@ func (p *HTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	connectTarget := r.Host
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p.proxyRequest(w, r, true)
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			p.proxyRequest(w, req, true, connectTarget)
 		}),
 	}
 

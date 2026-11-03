@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -23,6 +24,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -148,6 +150,101 @@ func TestConnectHonorsHost(t *testing.T) {
 			t.Errorf("Expected no X-Auth for other host, got %s", resp.Header.Get("X-Auth"))
 		}
 	})
+}
+
+func TestConnectMITMHostEscapeDenied(t *testing.T) {
+	// 1. Setup a mock target backend
+	targetBackend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", "target")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("target"))
+	}))
+	defer targetBackend.Close()
+	targetURL, _ := url.Parse(targetBackend.URL)
+
+	// 2. Setup a mock other backend that should NEVER be reached
+	otherBackend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", "other")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("other"))
+	}))
+	defer otherBackend.Close()
+	otherURL, _ := url.Parse(otherBackend.URL)
+
+	// 3. Setup CA for MITM
+	tmpDir, err := os.MkdirTemp("", "mitm-escape-test")
+	if err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	caCertPath := filepath.Join(tmpDir, "ca.crt")
+	caKeyPath := filepath.Join(tmpDir, "ca.key")
+	generateCA(t, caCertPath, caKeyPath)
+
+	// 4. Create the proxy with targetURL
+	p, err := proxy.NewHTTPProxy(targetURL, "secret-token", "Authorization", caCertPath, caKeyPath)
+	if err != nil {
+		t.Fatalf("Failed to create proxy: %v", err)
+	}
+	p.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+	proxyURL, _ := url.Parse(proxyServer.URL)
+
+	// 5. Connect to proxy via raw TCP and establish CONNECT tunnel to targetURL.Host
+	conn, err := net.Dial("tcp", proxyURL.Host)
+	if err != nil {
+		t.Fatalf("Failed to dial proxy: %v", err)
+	}
+	defer conn.Close()
+
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetURL.Host, targetURL.Host)
+	if _, err := conn.Write([]byte(connectReq)); err != nil {
+		t.Fatalf("Failed to send CONNECT: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	connectResp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("Failed to read CONNECT response: %v", err)
+	}
+	if connectResp.StatusCode != http.StatusOK {
+		t.Fatalf("Expected 200 Connection Established, got %d", connectResp.StatusCode)
+	}
+
+	// 6. Establish TLS connection inside the tunnel
+	tlsClient := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         proxy.HostWithoutPort(targetURL.Host),
+	})
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatalf("TLS handshake failed: %v", err)
+	}
+	defer tlsClient.Close()
+
+	// 7. Attempt MITM host escape by sending inner request with Host: otherURL.Host
+	escapeReq := fmt.Sprintf("GET /escape HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", otherURL.Host)
+	if _, err := tlsClient.Write([]byte(escapeReq)); err != nil {
+		t.Fatalf("Failed to write escape request: %v", err)
+	}
+
+	tlsBr := bufio.NewReader(tlsClient)
+	resp, err := http.ReadResponse(tlsBr, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("Failed to read inner response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Proxy must deny inner host mismatch with 403 Forbidden
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("Expected 403 Forbidden for MITM host escape, got %d", resp.StatusCode)
+	}
 }
 
 func generateCA(t *testing.T, certPath, keyPath string) {
