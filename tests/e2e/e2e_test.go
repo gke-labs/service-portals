@@ -837,6 +837,13 @@ spec:
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar-deny", 2*time.Minute)
 
+	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "gemini.backend", "other.backend", "gemini-sidecar-token")
+	if h.IsDualStack() {
+		runSidecarDualStackAssertions(t, h, clientPodName, backendIPv6ClusterIP)
+	}
+}
+
+func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendIPv4ClusterIP, targetHost, unlistedHost, expectedToken string) {
 	// Case 1: Direct IP, intercepted port (must fail and never reach backend)
 	t.Run("DirectIP_InterceptedPort_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
@@ -868,42 +875,10 @@ spec:
 		}
 	})
 
-	if h.IsDualStack() {
-		t.Run("DirectIPv6_InterceptedPort_HTTP", func(t *testing.T) {
-			cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"wget", "-T", "5", "-qO-", "http://["+backendIPv6ClusterIP+"]:80/direct-ipv6-http")
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("expected direct IPv6 HTTP request to fail, but it succeeded: %s", out)
-			}
-			t.Logf("direct IPv6 HTTP request failed as expected: %v (output: %s)", err, out)
-
-			backendLogs := h.GetDeploymentLogs("backend")
-			if strings.Contains(backendLogs, "/direct-ipv6-http") {
-				t.Fatalf("backend access log contains /direct-ipv6-http, request unexpectedly reached backend")
-			}
-		})
-
-		t.Run("DirectIPv6_InterceptedPort_HTTPS", func(t *testing.T) {
-			cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://["+backendIPv6ClusterIP+"]:443/direct-ipv6-https")
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("expected direct IPv6 HTTPS request to fail, but it succeeded: %s", out)
-			}
-			t.Logf("direct IPv6 HTTPS request failed as expected: %v (output: %s)", err, out)
-
-			backendLogs := h.GetDeploymentLogs("backend")
-			if strings.Contains(backendLogs, "/direct-ipv6-https") {
-				t.Fatalf("backend access log contains /direct-ipv6-https, request unexpectedly reached backend")
-			}
-		})
-	}
-
 	// Case 2: Unlisted hostname, intercepted port (must fail and never reach backend)
 	t.Run("UnlistedHostname_InterceptedPort_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "-qO-", "http://other.backend/unlisted-http")
+			"wget", "-T", "5", "-qO-", "http://"+unlistedHost+"/unlisted-http")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("expected unlisted host HTTP request to fail, but it succeeded: %s", out)
@@ -918,7 +893,7 @@ spec:
 
 	t.Run("UnlistedHostname_InterceptedPort_HTTPS", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://other.backend/unlisted-https")
+			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://"+unlistedHost+"/unlisted-https")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("expected unlisted host HTTPS request to fail, but it succeeded: %s", out)
@@ -930,23 +905,6 @@ spec:
 			t.Fatalf("backend access log contains /unlisted-https, request unexpectedly reached backend")
 		}
 	})
-
-	if h.IsDualStack() {
-		t.Run("UnlistedHostname_IPv6_InterceptedPort_HTTPS", func(t *testing.T) {
-			cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://other-v6.backend/unlisted-ipv6-https")
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("expected unlisted host IPv6 HTTPS request to fail, but it succeeded: %s", out)
-			}
-			t.Logf("unlisted host IPv6 HTTPS request failed as expected: %v (output: %s)", err, out)
-
-			backendLogs := h.GetDeploymentLogs("backend")
-			if strings.Contains(backendLogs, "/unlisted-ipv6-https") {
-				t.Fatalf("backend access log contains /unlisted-ipv6-https, request unexpectedly reached backend")
-			}
-		})
-	}
 
 	// Case 3: Non-intercepted port (must be rejected by egress filter)
 	t.Run("NonInterceptedPort_HTTP_8080", func(t *testing.T) {
@@ -974,36 +932,8 @@ spec:
 		t.Logf("raw TCP connection to port 9999 failed as expected: %v (output: %s)", err, out)
 	})
 
-	if h.IsDualStack() {
-		t.Run("NonInterceptedPort_IPv6_HTTP_8080", func(t *testing.T) {
-			cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"wget", "-T", "5", "-qO-", "http://["+backendIPv6ClusterIP+"]:8080/non-intercepted-ipv6-8080")
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("expected non-intercepted port IPv6 HTTP request to fail, but it succeeded: %s", out)
-			}
-			t.Logf("non-intercepted port IPv6 HTTP request failed as expected: %v (output: %s)", err, out)
-
-			backendLogs := h.GetDeploymentLogs("backend")
-			if strings.Contains(backendLogs, "/non-intercepted-ipv6-8080") {
-				t.Fatalf("backend access log contains /non-intercepted-ipv6-8080, request unexpectedly reached backend")
-			}
-		})
-
-		t.Run("NonInterceptedPort_IPv6_RawTCP_9999", func(t *testing.T) {
-			cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"/app/toolbox", "probe", "tcp", "["+backendIPv6ClusterIP+"]:9999", "3s")
-			out, err := cmd.CombinedOutput()
-			if err == nil {
-				t.Fatalf("expected raw TCP connection to IPv6 port 9999 to fail, but it succeeded: %s", out)
-			}
-			t.Logf("raw TCP connection to IPv6 port 9999 failed as expected: %v (output: %s)", err, out)
-		})
-	}
-
 	// Case 4: Arbitrary DNS (must fail, but cluster DNS resolution must work)
 	t.Run("ArbitraryDNS_Blocked", func(t *testing.T) {
-		// Probe external DNS server (8.8.8.8) using toolbox probe
 		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
 			"/app/toolbox", "probe", "dns", "8.8.8.8", "example.com", "3s")
 		outProbe, errProbe := cmdProbe.CombinedOutput()
@@ -1012,7 +942,6 @@ spec:
 		}
 		t.Logf("toolbox probe dns to 8.8.8.8 failed as expected: %v (output: %s)", errProbe, outProbe)
 
-		// Also assert nslookup against 8.8.8.8 fails
 		cmdNslookup := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
 			"nslookup", "example.com", "8.8.8.8")
 		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
@@ -1023,7 +952,6 @@ spec:
 	})
 
 	t.Run("ClusterDNS_Allowed", func(t *testing.T) {
-		// Probe cluster DNS resolution using toolbox probe
 		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
 			"/app/toolbox", "probe", "dns", "cluster", "backend", "5s")
 		outProbe, errProbe := cmdProbe.CombinedOutput()
@@ -1033,7 +961,6 @@ spec:
 		}
 		t.Logf("cluster DNS probe succeeded: %s", outProbe)
 
-		// Assert nslookup via cluster DNS succeeds
 		cmdNslookup := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
 			"nslookup", "backend")
 		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
@@ -1044,10 +971,33 @@ spec:
 		t.Logf("cluster nslookup succeeded: %s", outNslookup)
 	})
 
-	// Case 5: Positive control in the same test (asserts health and rule functionality over IPv4)
-	t.Run("PositiveControl_GeminiHTTPS", func(t *testing.T) {
+	// Case 5: Positive controls (HTTP and HTTPS)
+	t.Run("PositiveControl_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://gemini.backend/positive-control")
+			"wget", "-T", "5", "-qO-", "http://"+targetHost+"/positive-control-http")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control HTTP request failed: %v (output: %s)", err, out)
+		}
+		logs := string(out)
+		t.Logf("positive control HTTP output: %s", logs)
+
+		if !strings.Contains(logs, "Authorization") {
+			t.Errorf("positive control HTTP output missing Authorization header: %s", logs)
+		}
+		if !strings.Contains(logs, "Bearer "+expectedToken) {
+			t.Errorf("positive control HTTP output missing expected token (%s): %s", expectedToken, logs)
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/positive-control-http") {
+			t.Fatalf("backend access log missing /positive-control-http")
+		}
+	})
+
+	t.Run("PositiveControl_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://"+targetHost+"/positive-control")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("positive control request failed: %v (output: %s)", err, out)
@@ -1058,8 +1008,8 @@ spec:
 		if !strings.Contains(logs, "Authorization") {
 			t.Errorf("positive control output missing Authorization header: %s", logs)
 		}
-		if !strings.Contains(logs, "Bearer gemini-sidecar-token") {
-			t.Errorf("positive control output missing expected token: %s", logs)
+		if !strings.Contains(logs, "Bearer "+expectedToken) {
+			t.Errorf("positive control output missing expected token (%s): %s", expectedToken, logs)
 		}
 
 		backendLogs := h.GetDeploymentLogs("backend")
@@ -1068,95 +1018,202 @@ spec:
 		}
 	})
 
-	if h.IsDualStack() {
-		// Verify IPv6 positive control path on dual-stack clusters:
-		// github.backend maps to IPv6 dummy address 2001:db8::1 in hostAliases,
-		// exercising the ip6tables REDIRECT path and the proxy's :8443 dual-stack listener on IPv6.
-		t.Run("PositiveControl_IPv6_GithubHTTPS", func(t *testing.T) {
-			cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://github.backend/positive-control-ipv6")
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("positive control IPv6 request failed: %v (output: %s)", err, out)
-			}
-			logs := string(out)
-			t.Logf("positive control IPv6 output: %s", logs)
+	// Case 6: Bypass attempt
+	t.Run("BypassAttempt_Disallowed", func(t *testing.T) {
+		cmdUID := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "id", "-u")
+		outUID, errUID := cmdUID.CombinedOutput()
+		if errUID != nil {
+			t.Fatalf("failed to get workload UID: %v (output: %s)", errUID, outUID)
+		}
+		uid := strings.TrimSpace(string(outUID))
+		if uid == "1337" {
+			t.Fatalf("workload container UID is unexpectedly 1337 (proxy UID)")
+		}
+		if uid != "1000" {
+			t.Errorf("expected workload UID to be 1000, got %s", uid)
+		}
 
-			if !strings.Contains(logs, "Authorization") {
-				t.Errorf("positive control IPv6 output missing Authorization header: %s", logs)
-			}
-			if !strings.Contains(logs, "Bearer github-sidecar-token") {
-				t.Errorf("positive control IPv6 output missing expected token: %s", logs)
-			}
+		cmdNoNewPrivs := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"grep", "NoNewPrivs", "/proc/self/status")
+		outNoNewPrivs, errNoNewPrivs := cmdNoNewPrivs.CombinedOutput()
+		if errNoNewPrivs != nil {
+			t.Fatalf("failed to read /proc/self/status for NoNewPrivs: %v (output: %s)", errNoNewPrivs, outNoNewPrivs)
+		}
+		status := strings.TrimSpace(string(outNoNewPrivs))
+		t.Logf("workload NoNewPrivs status: %s", status)
+		if !strings.Contains(status, "NoNewPrivs:\t1") && !strings.Contains(status, "NoNewPrivs: 1") {
+			t.Fatalf("expected NoNewPrivs to be 1 (allowPrivilegeEscalation: false), got: %q", status)
+		}
 
-			backendLogs := h.GetDeploymentLogs("backend")
-			if !strings.Contains(backendLogs, "/positive-control-ipv6") {
-				t.Fatalf("backend access log missing /positive-control-ipv6")
-			}
-		})
+		cmdSu := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"su", "-", "1337", "-c", "id")
+		outSu, errSu := cmdSu.CombinedOutput()
+		if errSu == nil {
+			t.Fatalf("expected su to UID 1337 to fail, but it succeeded: %s", outSu)
+		}
+		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
+	})
+}
 
-		// Verify Neighbour Discovery (ND) works from workload container
-		t.Run("NeighbourDiscovery_Functional", func(t *testing.T) {
-			// Find default IPv6 gateway from routing table
-			cmdRoute := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"ip", "-6", "route", "show", "default")
-			outRoute, errRoute := cmdRoute.CombinedOutput()
-			if errRoute != nil {
-				t.Fatalf("failed to get default IPv6 route: %v (output: %s)", errRoute, outRoute)
-			}
-			t.Logf("default IPv6 route: %s", strings.TrimSpace(string(outRoute)))
+func runSidecarDualStackAssertions(t *testing.T, h *Harness, clientPodName, backendIPv6ClusterIP string) {
+	if backendIPv6ClusterIP == "" {
+		t.Fatalf("runSidecarDualStackAssertions called on dual-stack cluster but backendIPv6ClusterIP is empty")
+	}
 
-			// Parse gateway IP from "default via <gw> dev ..."
-			fields := strings.Fields(string(outRoute))
-			var gwIP string
-			for i, f := range fields {
-				if f == "via" && i+1 < len(fields) {
-					gwIP = fields[i+1]
-					break
-				}
-			}
-			if gwIP == "" {
-				t.Fatalf("could not determine default IPv6 gateway from: %s", outRoute)
-			}
-			t.Logf("default IPv6 gateway: %s", gwIP)
+	t.Run("DirectIPv6_InterceptedPort_HTTP", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://["+backendIPv6ClusterIP+"]:80/direct-ipv6-http")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IPv6 HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IPv6 HTTP request failed as expected: %v (output: %s)", err, out)
 
-			// Get neighbour entry for the default gateway
-			cmdNeigh := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-				"ip", "-6", "neigh", "show", gwIP)
-			outNeigh, errNeigh := cmdNeigh.CombinedOutput()
-			if errNeigh != nil {
-				t.Fatalf("failed to execute 'ip -6 neigh show %s': %v (output: %s)", gwIP, errNeigh, outNeigh)
-			}
-			neighOutput := strings.TrimSpace(string(outNeigh))
-			t.Logf("gateway neighbour entry:\n%s", neighOutput)
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ipv6-http") {
+			t.Fatalf("backend access log contains /direct-ipv6-http, request unexpectedly reached backend")
+		}
+	})
 
-			if neighOutput == "" {
-				t.Fatalf("no neighbour entry found for gateway %s", gwIP)
-			}
-			if strings.Contains(neighOutput, "FAILED") || strings.Contains(neighOutput, "INCOMPLETE") {
-				t.Fatalf("neighbour discovery failed for gateway %s: %s", gwIP, neighOutput)
-			}
+	t.Run("DirectIPv6_InterceptedPort_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://["+backendIPv6ClusterIP+"]:443/direct-ipv6-https")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IPv6 HTTPS request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IPv6 HTTPS request failed as expected: %v (output: %s)", err, out)
 
-			// Valid functional ND states: REACHABLE, STALE, DELAY, PROBE
-			validStates := []string{"REACHABLE", "STALE", "DELAY", "PROBE"}
-			matched := false
-			for _, state := range validStates {
-				if strings.Contains(neighOutput, state) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				t.Fatalf("expected neighbour entry to be in REACHABLE, STALE, DELAY, or PROBE, but got: %s", neighOutput)
-			}
-		})
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ipv6-https") {
+			t.Fatalf("backend access log contains /direct-ipv6-https, request unexpectedly reached backend")
+		}
+	})
 
-		// Fail-closed check: a variant pod where ip6tables is made to fail must not become Ready
-		t.Run("FailClosed_InvalidIPv6Rules_PodNotReady", func(t *testing.T) {
-			failPodName := "test-client-sidecar-failclosed"
-			h.DeletePod(failPodName)
+	t.Run("UnlistedHostname_IPv6_InterceptedPort_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://other-v6.backend/unlisted-ipv6-https")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected unlisted host IPv6 HTTPS request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("unlisted host IPv6 HTTPS request failed as expected: %v (output: %s)", err, out)
 
-			failPodManifest := `
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/unlisted-ipv6-https") {
+			t.Fatalf("backend access log contains /unlisted-ipv6-https, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("NonInterceptedPort_IPv6_HTTP_8080", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://["+backendIPv6ClusterIP+"]:8080/non-intercepted-ipv6-8080")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-intercepted port IPv6 HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("non-intercepted port IPv6 HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/non-intercepted-ipv6-8080") {
+			t.Fatalf("backend access log contains /non-intercepted-ipv6-8080, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("NonInterceptedPort_IPv6_RawTCP_9999", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "tcp", "["+backendIPv6ClusterIP+"]:9999", "3s")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected raw TCP connection to IPv6 port 9999 to fail, but it succeeded: %s", out)
+		}
+		t.Logf("raw TCP connection to IPv6 port 9999 failed as expected: %v (output: %s)", err, out)
+	})
+
+	// Verify IPv6 positive control path on dual-stack clusters:
+	// github.backend maps to IPv6 dummy address 2001:db8::1 in hostAliases,
+	// exercising the ip6tables REDIRECT path and the proxy's :8443 dual-stack listener on IPv6.
+	t.Run("PositiveControl_IPv6_GithubHTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://github.backend/positive-control-ipv6")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control IPv6 request failed: %v (output: %s)", err, out)
+		}
+		logs := string(out)
+		t.Logf("positive control IPv6 output: %s", logs)
+
+		if !strings.Contains(logs, "Authorization") {
+			t.Errorf("positive control IPv6 output missing Authorization header: %s", logs)
+		}
+		if !strings.Contains(logs, "Bearer github-sidecar-token") {
+			t.Errorf("positive control IPv6 output missing expected token: %s", logs)
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/positive-control-ipv6") {
+			t.Fatalf("backend access log missing /positive-control-ipv6")
+		}
+	})
+
+	// Verify Neighbour Discovery (ND) works from workload container
+	t.Run("NeighbourDiscovery_Functional", func(t *testing.T) {
+		cmdRoute := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"ip", "-6", "route", "show", "default")
+		outRoute, errRoute := cmdRoute.CombinedOutput()
+		if errRoute != nil {
+			t.Fatalf("failed to get default IPv6 route: %v (output: %s)", errRoute, outRoute)
+		}
+		t.Logf("default IPv6 route: %s", strings.TrimSpace(string(outRoute)))
+
+		fields := strings.Fields(string(outRoute))
+		var gwIP string
+		for i, f := range fields {
+			if f == "via" && i+1 < len(fields) {
+				gwIP = fields[i+1]
+				break
+			}
+		}
+		if gwIP == "" {
+			t.Fatalf("could not determine default IPv6 gateway from: %s", outRoute)
+		}
+		t.Logf("default IPv6 gateway: %s", gwIP)
+
+		cmdNeigh := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"ip", "-6", "neigh", "show", gwIP)
+		outNeigh, errNeigh := cmdNeigh.CombinedOutput()
+		if errNeigh != nil {
+			t.Fatalf("failed to execute 'ip -6 neigh show %s': %v (output: %s)", gwIP, errNeigh, outNeigh)
+		}
+		neighOutput := strings.TrimSpace(string(outNeigh))
+		t.Logf("gateway neighbour entry:\n%s", neighOutput)
+
+		if neighOutput == "" {
+			t.Fatalf("no neighbour entry found for gateway %s", gwIP)
+		}
+		if strings.Contains(neighOutput, "FAILED") || strings.Contains(neighOutput, "INCOMPLETE") {
+			t.Fatalf("neighbour discovery failed for gateway %s: %s", gwIP, neighOutput)
+		}
+
+		validStates := []string{"REACHABLE", "STALE", "DELAY", "PROBE"}
+		matched := false
+		for _, state := range validStates {
+			if strings.Contains(neighOutput, state) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("expected neighbour entry to be in REACHABLE, STALE, DELAY, or PROBE, but got: %s", neighOutput)
+		}
+	})
+
+	// Fail-closed check: a variant pod where ip6tables is made to fail must not become Ready
+	t.Run("FailClosed_InvalidIPv6Rules_PodNotReady", func(t *testing.T) {
+		failPodName := "test-client-sidecar-failclosed"
+		h.DeletePod(failPodName)
+
+		failPodManifest := `
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1191,97 +1248,319 @@ spec:
   - name: ca-key
     emptyDir: {}
 `
-			h.KubectlApplyContent(failPodManifest)
-			defer h.DeletePod(failPodName)
+		h.KubectlApplyContent(failPodManifest)
+		defer h.DeletePod(failPodName)
 
-			// Poll until the init container has failed and exited with non-zero exit code
-			var exitCode string
-			var waitingReason string
-			var logsStr string
-			initFailed := false
+		var exitCode string
+		var waitingReason string
+		var logsStr string
+		initFailed := false
 
-			start := time.Now()
-			for time.Since(start) < 30*time.Second {
-				// Query terminated exit code (either state.terminated or lastState.terminated)
-				cmdExit := exec.Command("kubectl", "get", "pod", failPodName, "-o",
-					"jsonpath={.status.initContainerStatuses[0].state.terminated.exitCode}{.status.initContainerStatuses[0].lastState.terminated.exitCode}")
-				outExit, _ := cmdExit.CombinedOutput()
-				exitCode = strings.TrimSpace(string(outExit))
+		start := time.Now()
+		for time.Since(start) < 30*time.Second {
+			cmdExit := exec.Command("kubectl", "get", "pod", failPodName, "-o",
+				"jsonpath={.status.initContainerStatuses[0].state.terminated.exitCode}{.status.initContainerStatuses[0].lastState.terminated.exitCode}")
+			outExit, _ := cmdExit.CombinedOutput()
+			exitCode = strings.TrimSpace(string(outExit))
 
-				// Query waiting reason (e.g. CrashLoopBackOff or Error)
-				cmdReason := exec.Command("kubectl", "get", "pod", failPodName, "-o",
-					"jsonpath={.status.initContainerStatuses[0].state.waiting.reason}")
-				outReason, _ := cmdReason.CombinedOutput()
-				waitingReason = strings.TrimSpace(string(outReason))
+			cmdReason := exec.Command("kubectl", "get", "pod", failPodName, "-o",
+				"jsonpath={.status.initContainerStatuses[0].state.waiting.reason}")
+			outReason, _ := cmdReason.CombinedOutput()
+			waitingReason = strings.TrimSpace(string(outReason))
 
-				// Query logs from init container
-				cmdLogs := exec.Command("kubectl", "logs", failPodName, "-c", "init-service-portals")
-				outLogs, _ := cmdLogs.CombinedOutput()
-				logsStr = string(outLogs)
+			cmdLogs := exec.Command("kubectl", "logs", failPodName, "-c", "init-service-portals")
+			outLogs, _ := cmdLogs.CombinedOutput()
+			logsStr = string(outLogs)
 
-				if (exitCode != "" && exitCode != "0") || waitingReason == "CrashLoopBackOff" || waitingReason == "Error" {
-					if strings.Contains(logsStr, "Failing closed") {
-						initFailed = true
-						break
-					}
+			if (exitCode != "" && exitCode != "0") || waitingReason == "CrashLoopBackOff" || waitingReason == "Error" {
+				if strings.Contains(logsStr, "Failing closed") {
+					initFailed = true
+					break
 				}
-				time.Sleep(1 * time.Second)
 			}
+			time.Sleep(1 * time.Second)
+		}
 
-			t.Logf("variant pod init container exitCode=%q, waitingReason=%q", exitCode, waitingReason)
-			t.Logf("variant pod initContainer logs:\n%s", logsStr)
+		t.Logf("variant pod init container exitCode=%q, waitingReason=%q", exitCode, waitingReason)
+		t.Logf("variant pod initContainer logs:\n%s", logsStr)
 
-			if !initFailed {
-				t.Fatalf("expected init container to fail with non-zero exit code and 'Failing closed' log message, got exitCode=%q, waitingReason=%q, logs=%s",
-					exitCode, waitingReason, logsStr)
-			}
+		if !initFailed {
+			t.Fatalf("expected init container to fail with non-zero exit code and 'Failing closed' log message, got exitCode=%q, waitingReason=%q, logs=%s",
+				exitCode, waitingReason, logsStr)
+		}
 
-			// Secondary signal: workload container must not be ready
-			cmdReady := exec.Command("kubectl", "get", "pod", failPodName, "-o", "jsonpath={.status.containerStatuses[0].ready}")
-			outReady, _ := cmdReady.CombinedOutput()
-			if strings.TrimSpace(string(outReady)) == "true" {
-				t.Fatalf("expected variant pod with failing ip6tables to never become Ready, but container ready is true!")
-			}
-			t.Logf("variant pod readiness check confirmed not ready (ready=%s)", strings.TrimSpace(string(outReady)))
-		})
+		cmdReady := exec.Command("kubectl", "get", "pod", failPodName, "-o", "jsonpath={.status.containerStatuses[0].ready}")
+		outReady, _ := cmdReady.CombinedOutput()
+		if strings.TrimSpace(string(outReady)) == "true" {
+			t.Fatalf("expected variant pod with failing ip6tables to never become Ready, but container ready is true!")
+		}
+		t.Logf("variant pod readiness check confirmed not ready (ready=%s)", strings.TrimSpace(string(outReady)))
+	})
+}
+
+func TestNRIPluginEgressDenied(t *testing.T) {
+	if os.Getenv("RUN_E2E") == "" {
+		t.Skip("RUN_E2E env var not set, skipping")
 	}
 
-	// Case 6: Bypass attempt
-	t.Run("BypassAttempt_Disallowed", func(t *testing.T) {
-		// 1. Assert workload container UID is not 1337
-		cmdUID := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "id", "-u")
-		outUID, errUID := cmdUID.CombinedOutput()
-		if errUID != nil {
-			t.Fatalf("failed to get workload UID: %v (output: %s)", errUID, outUID)
-		}
-		uid := strings.TrimSpace(string(outUID))
-		if uid == "1337" {
-			t.Fatalf("workload container UID is unexpectedly 1337 (proxy UID)")
-		}
-		if uid != "1000" {
-			t.Errorf("expected workload UID to be 1000, got %s", uid)
-		}
+	h := NewHarness(t, "nri-egress-denied-e2e")
+	h.Setup()
 
-		// 2. Directly assert allowPrivilegeEscalation: false via NoNewPrivs kernel flag
-		cmdNoNewPrivs := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"grep", "NoNewPrivs", "/proc/self/status")
-		outNoNewPrivs, errNoNewPrivs := cmdNoNewPrivs.CombinedOutput()
-		if errNoNewPrivs != nil {
-			t.Fatalf("failed to read /proc/self/status for NoNewPrivs: %v (output: %s)", errNoNewPrivs, outNoNewPrivs)
-		}
-		status := strings.TrimSpace(string(outNoNewPrivs))
-		t.Logf("workload NoNewPrivs status: %s", status)
-		if !strings.Contains(status, "NoNewPrivs:\t1") && !strings.Contains(status, "NoNewPrivs: 1") {
-			t.Fatalf("expected NoNewPrivs to be 1 (allowPrivilegeEscalation: false), got: %q", status)
-		}
+	gitRoot := h.GetGitRoot()
 
-		// 3. Secondary signal: attempting to switch to proxy UID 1337 fails
-		cmdSu := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"su", "-", "1337", "-c", "id")
-		outSu, errSu := cmdSu.CombinedOutput()
-		if errSu == nil {
-			t.Fatalf("expected su to UID 1337 to fail, but it succeeded: %s", outSu)
-		}
-		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
-	})
+	// Build and load images
+	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("init-service-portals:e2e", filepath.Join(gitRoot, "images/init-service-portals/Dockerfile"), gitRoot)
+	h.DockerBuild("portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/portal-nri-plugin/Dockerfile"), gitRoot)
+	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+
+	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("init-service-portals:e2e")
+	h.KindLoad("portal-nri-plugin:e2e")
+	h.KindLoad("toolbox:e2e")
+
+	// Deploy Backend Service and Deployment
+	backendManifest := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: alt
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: unlisted-backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+`
+	h.KubectlApplyContent(backendManifest)
+	h.WaitForDeployment("backend", 2*time.Minute)
+	time.Sleep(5 * time.Second)
+
+	backendClusterIP := h.GetServiceClusterIP("backend")
+	t.Logf("Backend ClusterIP: %s", backendClusterIP)
+
+	// Deploy Node-Agent DaemonSet (Proxy + NRI Plugin)
+	nodeAgentManifest := `
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portal-node-agent
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nri-portal-deny-rules-secret
+stringData:
+  backend-rule.yaml: |
+    apiVersion: portals.gke.io/v1alpha1
+    kind: PortalRule
+    metadata:
+      name: backend
+    spec:
+      host: backend
+      rewriteUrl: http://backend
+      authToken: gemini-nri-token
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: portal-node-agent
+  labels:
+    app: portal-node-agent
+spec:
+  selector:
+    matchLabels:
+      app: portal-node-agent
+  template:
+    metadata:
+      labels:
+        app: portal-node-agent
+    spec:
+      serviceAccountName: portal-node-agent
+      tolerations:
+      - key: "service-portal.gke.io/uninitialized"
+        operator: "Exists"
+        effect: "NoSchedule"
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      initContainers:
+      - name: init-ca
+        image: init-service-portals:e2e
+        imagePullPolicy: Never
+        command: ["/usr/local/bin/init-service-portals"]
+        args: ["-cert-dir=/etc/service-portal/ca", "-key-dir=/etc/service-portal/ca", "-chown-uid=65532", "-chown-gid=65532"]
+        volumeMounts:
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+      containers:
+      - name: proxy
+        image: all-in-one-portal:e2e
+        imagePullPolicy: Never
+        env:
+        - name: PORT
+          value: "8080"
+        - name: HTTPS_PORT
+          value: "8443"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca/tls.key"
+        args: ["--rules-dir=/etc/portals"]
+        volumeMounts:
+        - name: rules-volume
+          mountPath: /etc/portals
+          readOnly: true
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+          readOnly: true
+      - name: nri-plugin
+        image: portal-nri-plugin:e2e
+        imagePullPolicy: Never
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN", "SYS_ADMIN"]
+        env:
+        - name: PROXY_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: PROXY_PORT
+          value: "8080"
+        - name: PROXY_HTTPS_PORT
+          value: "8443"
+        - name: DNS_SERVERS
+          value: "10.96.0.10"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: NRI_SOCKET_PATH
+          value: "/var/run/nri/nri.sock"
+        volumeMounts:
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+        - name: nri-socket
+          mountPath: /var/run/nri
+        - name: netns
+          mountPath: /run/netns
+          mountPropagation: HostToContainer
+      volumes:
+      - name: rules-volume
+        secret:
+          secretName: nri-portal-deny-rules-secret
+      - name: ca-volume
+        hostPath:
+          path: /etc/service-portal/ca
+          type: DirectoryOrCreate
+      - name: nri-socket
+        hostPath:
+          path: /var/run/nri
+      - name: netns
+        hostPath:
+          path: /run/netns
+`
+
+	// 1. Taint the node so uninitialized nodes cannot schedule opted-in pods
+	taintCmd := exec.Command("kubectl", "taint", "nodes", "--all", "service-portal.gke.io/uninitialized:NoSchedule", "--overwrite")
+	if out, err := taintCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to taint nodes: %v (output: %s)", err, out)
+	}
+
+	// 2. Deploy Client Pod with ONLY the intercept opt-in label:
+	// No init container, no sidecar container, no NET_ADMIN, no CA mounts, no hostAliases.
+	clientPodName := "test-client-nri-deny"
+	h.DeletePod(clientPodName)
+
+	clientManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-nri-deny
+  labels:
+    app: test-client-nri-deny
+    service-portal.gke.io/intercept: "true"
+spec:
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`
+	h.KubectlApplyContent(clientManifest)
+
+	// 3. Assert the opted-in pod stays Pending while the taint is present
+	time.Sleep(3 * time.Second)
+	phaseCmd := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.status.phase}")
+	phaseOut, err := phaseCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to check client pod phase: %v (output: %s)", err, phaseOut)
+	}
+	if string(phaseOut) != "Pending" {
+		t.Fatalf("expected client pod to stay Pending while node is tainted, got %s", phaseOut)
+	}
+	t.Logf("Client pod is correctly Pending due to node taint: %s", phaseOut)
+
+	// 4. Deploy Node-Agent DaemonSet (with toleration; connects to NRI and registers)
+	h.KubectlApplyContent(nodeAgentManifest)
+	h.WaitForPodReady("app=portal-node-agent", 2*time.Minute)
+
+	// 5. Remove node initialization taint once DaemonSet is ready
+	unTaintCmd := exec.Command("kubectl", "taint", "nodes", "--all", "service-portal.gke.io/uninitialized-")
+	if out, err := unTaintCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to remove node taint: %v (output: %s)", err, out)
+	}
+
+	// 6. Assert the client pod now schedules, transitions to Running, and becomes Ready
+	h.WaitForPodReady("app=test-client-nri-deny", 2*time.Minute)
+
+	backendIPv4ClusterIP := h.GetServiceIPv4ClusterIP("backend")
+	if backendIPv4ClusterIP == "" {
+		backendIPv4ClusterIP = h.GetServiceClusterIP("backend")
+	}
+
+	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "backend", "unlisted-backend", "gemini-nri-token")
+	if h.IsDualStack() {
+		t.Log("IPv6 is not intercepted by the prototype and is tracked in #183")
+	}
 }
