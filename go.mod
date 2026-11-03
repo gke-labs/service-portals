@@ -5,7 +5,7 @@ go 1.27.2
 toolchain go1.27.3
 
 require (
-	cloud.google.com/go/ai v1.2.0
+	cloud.google.com/go/ai v1.3.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
