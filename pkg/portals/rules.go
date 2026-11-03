@@ -160,6 +160,7 @@ func (rr *RuleRouter) loadRules() error {
 				errs = append(errs, fmt.Errorf("failed to create proxy for rule %q: %w", rule.Metadata.Name, err))
 				continue
 			}
+			p.ListenHost = rule.Spec.Host
 
 			// Rule-specific cacheTTL takes precedence. If specified, setup caching.
 			var cacheTTL time.Duration

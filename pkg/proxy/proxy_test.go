@@ -68,3 +68,70 @@ func TestHostWithoutPort(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchHosts(t *testing.T) {
+	tests := []struct {
+		name          string
+		innerHost     string
+		connectTarget string
+		want          bool
+	}{
+		{
+			name:          "exact match without port",
+			innerHost:     "example.com",
+			connectTarget: "example.com",
+			want:          true,
+		},
+		{
+			name:          "case insensitive match",
+			innerHost:     "Example.COM",
+			connectTarget: "example.com",
+			want:          true,
+		},
+		{
+			name:          "inner without port matches connect target with standard 443",
+			innerHost:     "example.com",
+			connectTarget: "example.com:443",
+			want:          true,
+		},
+		{
+			name:          "inner without port matches connect target with standard 80",
+			innerHost:     "example.com",
+			connectTarget: "example.com:80",
+			want:          true,
+		},
+		{
+			name:          "both match with port",
+			innerHost:     "example.com:8443",
+			connectTarget: "example.com:8443",
+			want:          true,
+		},
+		{
+			name:          "port mismatch",
+			innerHost:     "example.com:8443",
+			connectTarget: "example.com:443",
+			want:          false,
+		},
+		{
+			name:          "inner without port does not match non-standard connect port",
+			innerHost:     "example.com",
+			connectTarget: "example.com:8443",
+			want:          false,
+		},
+		{
+			name:          "hostname mismatch",
+			innerHost:     "attacker.com",
+			connectTarget: "example.com:443",
+			want:          false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MatchHosts(tc.innerHost, tc.connectTarget)
+			if got != tc.want {
+				t.Errorf("MatchHosts(%q, %q) = %v, want %v", tc.innerHost, tc.connectTarget, got, tc.want)
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@
 package portals
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
@@ -25,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -677,6 +679,155 @@ spec:
 		}
 		if cert == nil {
 			t.Error("expected non-nil cert for unmatched host with fallback")
+		}
+	})
+}
+
+func TestExplicitProxyMode(t *testing.T) {
+	caCertPath, caKeyPath := createTestCA(t)
+
+	// Mock backend that records requests and echoes headers
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Received-Host", r.Host)
+		w.Header().Set("X-Received-Auth", r.Header.Get("Authorization"))
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("backend-response-ok"))
+	}))
+	defer backend.Close()
+
+	rulesDir := t.TempDir()
+	ruleContent := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: gemini-rule
+spec:
+  host: "gemini.backend"
+  rewriteUrl: "%s"
+  authToken: "gemini-secret-token"
+`, backend.URL)
+
+	if err := os.WriteFile(filepath.Join(rulesDir, "gemini.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+
+	rr := NewRuleRouter(rulesDir, nil, caCertPath, caKeyPath, 0, nil)
+	if err := rr.loadRules(); err != nil {
+		t.Fatalf("failed to load rules: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(rr)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	caCertBytes, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("failed to read ca cert: %v", err)
+	}
+	rootCAs := x509.NewCertPool()
+	rootCAs.AppendCertsFromPEM(caCertBytes)
+
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			TLSClientConfig: &tls.Config{
+				RootCAs: rootCAs,
+			},
+		},
+	}
+
+	// 1. CONNECT tunnel for HTTPS matched host (Issue #127 fix)
+	t.Run("CONNECT_HTTPS_MatchedHost", func(t *testing.T) {
+		resp, err := httpClient.Get("https://gemini.backend/test-connect")
+		if err != nil {
+			t.Fatalf("CONNECT request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200, got %d", resp.StatusCode)
+		}
+		if auth := resp.Header.Get("X-Received-Auth"); auth != "Bearer gemini-secret-token" {
+			t.Errorf("expected Bearer gemini-secret-token, got %q", auth)
+		}
+	})
+
+	// 2. Absolute-form HTTP matched host
+	t.Run("Absolute_HTTP_MatchedHost", func(t *testing.T) {
+		resp, err := httpClient.Get("http://gemini.backend/test-http")
+		if err != nil {
+			t.Fatalf("HTTP proxy request failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200, got %d", resp.StatusCode)
+		}
+		if auth := resp.Header.Get("X-Received-Auth"); auth != "Bearer gemini-secret-token" {
+			t.Errorf("expected Bearer gemini-secret-token, got %q", auth)
+		}
+	})
+
+	// 3. Unmatched host denied (403 Forbidden)
+	t.Run("UnmatchedHost_Denied", func(t *testing.T) {
+		resp, err := httpClient.Get("http://unmatched.backend/test")
+		if err != nil {
+			// Connect tunnel may fail directly with 403
+			t.Logf("request correctly failed: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected status 403 Forbidden for unmatched host, got %d", resp.StatusCode)
+		}
+	})
+
+	// 4. MITM Host Escape Denial: allowed CONNECT gemini.backend:443 with inner Host: attacker.backend
+	t.Run("MITMHostEscape_Denied", func(t *testing.T) {
+		conn, err := net.Dial("tcp", proxyURL.Host)
+		if err != nil {
+			t.Fatalf("Failed to dial proxy: %v", err)
+		}
+		defer conn.Close()
+
+		connectReq := "CONNECT gemini.backend:443 HTTP/1.1\r\nHost: gemini.backend:443\r\n\r\n"
+		if _, err := conn.Write([]byte(connectReq)); err != nil {
+			t.Fatalf("Failed to write CONNECT: %v", err)
+		}
+
+		br := bufio.NewReader(conn)
+		connectResp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+		if err != nil {
+			t.Fatalf("Failed to read CONNECT response: %v", err)
+		}
+		if connectResp.StatusCode != http.StatusOK {
+			t.Fatalf("Expected 200 Connection Established, got %d", connectResp.StatusCode)
+		}
+
+		tlsClient := tls.Client(conn, &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         "gemini.backend",
+		})
+		if err := tlsClient.Handshake(); err != nil {
+			t.Fatalf("TLS handshake failed: %v", err)
+		}
+		defer tlsClient.Close()
+
+		// Send inner request targeting an unlisted/escaped host
+		escapeReq := "GET /mitm-escape HTTP/1.1\r\nHost: attacker.backend\r\nConnection: close\r\n\r\n"
+		if _, err := tlsClient.Write([]byte(escapeReq)); err != nil {
+			t.Fatalf("Failed to write escape request: %v", err)
+		}
+
+		tlsBr := bufio.NewReader(tlsClient)
+		resp, err := http.ReadResponse(tlsBr, &http.Request{Method: http.MethodGet})
+		if err != nil {
+			t.Fatalf("Failed to read inner response: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for inner host escape, got %d", resp.StatusCode)
 		}
 	})
 }
