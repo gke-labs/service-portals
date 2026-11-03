@@ -200,6 +200,16 @@ func (h *Harness) GetServiceClusterIP(name string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func (h *Harness) GetNodeIP() string {
+	h.t.Helper()
+	cmd := exec.Command("kubectl", "get", "nodes", "-o", "jsonpath={.items[0].status.addresses[?(@.type==\"InternalIP\")].address}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.t.Fatalf("Failed to get node IP: %v\nOutput: %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func (h *Harness) GetDeploymentLogs(name string) string {
 	h.t.Helper()
 	cmd := exec.Command("kubectl", "logs", "deployment/"+name)

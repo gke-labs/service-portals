@@ -15,7 +15,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -222,6 +224,82 @@ func runProbe(args []string) {
 		}
 		fmt.Printf("RESOLVED %s via %s: %v\n", name, serverAddr, ips)
 		os.Exit(0)
+
+	case "mitm-escape":
+		if len(args) < 4 {
+			log.Fatal("Usage: toolbox probe mitm-escape <proxyAddr> <connectHost> <innerHost> [path]")
+		}
+		proxyAddr := args[1]
+		connectHost := args[2]
+		innerHost := args[3]
+		path := "/mitm-escape-test"
+		if len(args) >= 5 {
+			path = args[4]
+		}
+
+		conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
+		if err != nil {
+			log.Fatalf("dial proxy %s failed: %v", proxyAddr, err)
+		}
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.Printf("Failed to close conn: %v", err)
+			}
+		}()
+
+		connectReq := fmt.Sprintf("CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n", connectHost, connectHost)
+		if auth := os.Getenv("PROXY_AUTHORIZATION"); auth != "" {
+			connectReq += fmt.Sprintf("Proxy-Authorization: %s\r\n", auth)
+		}
+		connectReq += "\r\n"
+		if _, err := conn.Write([]byte(connectReq)); err != nil {
+			log.Fatalf("write CONNECT failed: %v", err)
+		}
+
+		br := bufio.NewReader(conn)
+		connectResp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+		if err != nil {
+			log.Fatalf("read CONNECT response failed: %v", err)
+		}
+		if connectResp.StatusCode != http.StatusOK {
+			log.Fatalf("CONNECT returned %s", connectResp.Status)
+		}
+
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName:         connectHost,
+			InsecureSkipVerify: true,
+		})
+		if err := tlsConn.Handshake(); err != nil {
+			log.Fatalf("TLS handshake failed: %v", err)
+		}
+		defer func() {
+			if err := tlsConn.Close(); err != nil {
+				log.Printf("Failed to close tlsConn: %v", err)
+			}
+		}()
+
+		innerReq := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, innerHost)
+		if _, err := tlsConn.Write([]byte(innerReq)); err != nil {
+			log.Fatalf("write inner request failed: %v", err)
+		}
+
+		tlsBr := bufio.NewReader(tlsConn)
+		resp, err := http.ReadResponse(tlsBr, &http.Request{Method: http.MethodGet})
+		if err != nil {
+			log.Fatalf("read inner response failed: %v", err)
+		}
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				log.Printf("Failed to close response body: %v", err)
+			}
+		}()
+
+		fmt.Printf("STATUS: %d %s\n", resp.StatusCode, resp.Status)
+		if resp.StatusCode == http.StatusForbidden {
+			fmt.Println("BLOCKED")
+			os.Exit(0)
+		}
+		os.Exit(1)
 
 	default:
 		log.Fatalf("Unknown probe type: %s", probeType)
