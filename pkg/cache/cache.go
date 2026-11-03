@@ -17,6 +17,7 @@ package cache
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -209,14 +210,15 @@ func (c *DiskCache) Put(key string, r io.Reader) error {
 	}
 	tmpName := tmpFile.Name()
 
-	if _, err := io.Copy(tmpFile, r); err != nil {
-		if err := tmpFile.Close(); err != nil {
-			log.Printf("cache: failed to close temp file %s: %v", tmpName, err)
+	if _, copyErr := io.Copy(tmpFile, r); copyErr != nil {
+		closeErr := tmpFile.Close()
+		if closeErr != nil {
+			log.Printf("cache: failed to close temp file %s: %v", tmpName, closeErr)
 		}
 		if err := os.Remove(tmpName); err != nil {
 			log.Printf("cache: failed to remove temp file %s: %v", tmpName, err)
 		}
-		return err
+		return errors.Join(copyErr, closeErr)
 	}
 
 	if err := tmpFile.Close(); err != nil {
