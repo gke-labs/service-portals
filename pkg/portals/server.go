@@ -75,6 +75,17 @@ func Run(ctx context.Context, config Config) error {
 
 	caCertPath := os.Getenv("CA_CERT_PATH")
 	caKeyPath := os.Getenv("CA_KEY_PATH")
+	proxyAuthToken := os.Getenv("PROXY_AUTH_TOKEN")
+	proxyAuthSecret := os.Getenv("PROXY_AUTH_SECRET")
+
+	var proxyTokenMaxAge time.Duration
+	if maxAgeEnv := os.Getenv("PROXY_TOKEN_MAX_AGE"); maxAgeEnv != "" {
+		d, err := time.ParseDuration(maxAgeEnv)
+		if err != nil {
+			return fmt.Errorf("invalid PROXY_TOKEN_MAX_AGE %q: %w", maxAgeEnv, err)
+		}
+		proxyTokenMaxAge = d
+	}
 
 	var fallback *proxy.HTTPProxy
 	if target != "" {
@@ -86,6 +97,15 @@ func Run(ctx context.Context, config Config) error {
 		p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
 		if err != nil {
 			return fmt.Errorf("failed to create proxy: %w", err)
+		}
+		if proxyAuthToken != "" {
+			p.RequiredProxyToken = proxyAuthToken
+		}
+		if proxyAuthSecret != "" {
+			p.ProxyAuthSecret = proxyAuthSecret
+		}
+		if proxyTokenMaxAge > 0 {
+			p.ProxyAuthTokenMaxAge = proxyTokenMaxAge
 		}
 		fallback = p
 	}
@@ -128,6 +148,15 @@ func Run(ctx context.Context, config Config) error {
 			fallbackHandler = fallback
 		}
 		rr := NewRuleRouter(rulesDir, fallbackHandler, caCertPath, caKeyPath, cacheTTL, c)
+		if proxyAuthToken != "" {
+			rr.SetProxyAuthToken(proxyAuthToken)
+		}
+		if proxyAuthSecret != "" {
+			rr.SetProxyAuthSecret(proxyAuthSecret)
+		}
+		if proxyTokenMaxAge > 0 {
+			rr.SetProxyAuthTokenMaxAge(proxyTokenMaxAge)
+		}
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}

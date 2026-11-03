@@ -830,4 +830,206 @@ spec:
 			t.Errorf("Expected 403 Forbidden for inner host escape, got %d", resp.StatusCode)
 		}
 	})
+
+	// 5. Proxy-Authorization static token enforcement
+	t.Run("ProxyAuthorization_Enforcement", func(t *testing.T) {
+		rrWithAuth := NewRuleRouter(rulesDir, nil, caCertPath, caKeyPath, 0, nil)
+		rrWithAuth.SetProxyAuthToken("workload-token-xyz")
+		if err := rrWithAuth.loadRules(); err != nil {
+			t.Fatalf("failed to load rules: %v", err)
+		}
+
+		proxyWithAuthServer := httptest.NewServer(rrWithAuth)
+		defer proxyWithAuthServer.Close()
+		authProxyURL, _ := url.Parse(proxyWithAuthServer.URL)
+
+		// Client without proxy auth -> 407
+		unauthedClient := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(authProxyURL),
+			},
+		}
+		resp, err := unauthedClient.Get("http://gemini.backend/test")
+		if err != nil {
+			t.Fatalf("unexpected transport error: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("expected status 407 Proxy Authentication Required, got %d", resp.StatusCode)
+		}
+
+		// Client with Proxy URL embedded auth (http://workload-token-xyz:ignored@proxy)
+		authedProxyURL, _ := url.Parse(authProxyURL.String())
+		authedProxyURL.User = url.UserPassword("workload-token-xyz", "ignored")
+		authedClient := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(authedProxyURL),
+			},
+		}
+		authedResp, err := authedClient.Get("http://gemini.backend/test")
+		if err != nil {
+			t.Fatalf("authenticated proxy request failed: %v", err)
+		}
+		authedResp.Body.Close()
+		if authedResp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200 for authenticated proxy request, got %d", authedResp.StatusCode)
+		}
+
+		// Client with Bearer token header
+		req, _ := http.NewRequest(http.MethodGet, "http://gemini.backend/test", nil)
+		req.Header.Set("Proxy-Authorization", "Bearer workload-token-xyz")
+		bearerResp, err := unauthedClient.Do(req)
+		if err != nil {
+			t.Fatalf("bearer proxy request failed: %v", err)
+		}
+		bearerResp.Body.Close()
+		if bearerResp.StatusCode != http.StatusOK {
+			t.Errorf("expected status 200 for bearer token proxy request, got %d", bearerResp.StatusCode)
+		}
+	})
+
+	// 6. Per-pod identity token HMAC verification & expiration enforcement
+	t.Run("PerPodIdentityToken_HMAC_Verification", func(t *testing.T) {
+		sharedSecret := "test-hmac-auth-secret-12345"
+		rrSecret := NewRuleRouter(rulesDir, nil, caCertPath, caKeyPath, 0, nil)
+		rrSecret.SetProxyAuthSecret(sharedSecret)
+		if err := rrSecret.loadRules(); err != nil {
+			t.Fatalf("failed to load rules: %v", err)
+		}
+
+		secretProxyServer := httptest.NewServer(rrSecret)
+		defer secretProxyServer.Close()
+		secretProxyURL, _ := url.Parse(secretProxyServer.URL)
+
+		podID := proxy.PodIdentity{
+			Namespace: "test-ns",
+			Name:      "workload-pod-42",
+			UID:       "uid-abcd-ef01",
+		}
+
+		// A: Valid token via proxy URL userinfo (http://pod:<token>@proxy)
+		validToken := proxy.MintPodToken(sharedSecret, podID)
+		authedURL, _ := url.Parse(secretProxyURL.String())
+		authedURL.User = url.UserPassword("pod", validToken)
+		clientValid := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(authedURL),
+			},
+		}
+		respValid, err := clientValid.Get("http://gemini.backend/test-pod-identity")
+		if err != nil {
+			t.Fatalf("request with valid pod token failed: %v", err)
+		}
+		respValid.Body.Close()
+		if respValid.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK with valid pod token, got %d", respValid.StatusCode)
+		}
+
+		// Direct verification succeeds
+		if verifiedPod, ok := proxy.VerifyPodToken(validToken, sharedSecret, 24*time.Hour); !ok {
+			t.Error("expected VerifyPodToken to succeed for valid token")
+		} else if verifiedPod.Namespace != podID.Namespace || verifiedPod.Name != podID.Name || verifiedPod.UID != podID.UID {
+			t.Errorf("expected verified pod %+v, got %+v", podID, verifiedPod)
+		}
+
+		// B: Expired token rejected (mint with a fixed past timestamp)
+		pastTime := time.Now().Add(-25 * time.Hour)
+		expiredToken := proxy.MintPodToken(sharedSecret, podID, pastTime)
+		if _, ok := proxy.VerifyPodToken(expiredToken, sharedSecret, 24*time.Hour); ok {
+			t.Error("expected VerifyPodToken to reject expired token, but it succeeded")
+		}
+
+		expiredURL, _ := url.Parse(secretProxyURL.String())
+		expiredURL.User = url.UserPassword("pod", expiredToken)
+		clientExpired := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(expiredURL),
+			},
+		}
+		respExpired, err := clientExpired.Get("http://gemini.backend/test-expired")
+		if err != nil {
+			t.Fatalf("unexpected error for expired token: %v", err)
+		}
+		respExpired.Body.Close()
+		if respExpired.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("expected 407 Proxy Authentication Required for expired token, got %d", respExpired.StatusCode)
+		}
+
+		// C: Future-dated token beyond 5-minute skew rejected
+		futureTime := time.Now().Add(10 * time.Minute)
+		futureToken := proxy.MintPodToken(sharedSecret, podID, futureTime)
+		if _, ok := proxy.VerifyPodToken(futureToken, sharedSecret, 24*time.Hour); ok {
+			t.Error("expected VerifyPodToken to reject future-dated token beyond 5m skew, but it succeeded")
+		}
+
+		futureURL, _ := url.Parse(secretProxyURL.String())
+		futureURL.User = url.UserPassword("pod", futureToken)
+		clientFuture := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(futureURL),
+			},
+		}
+		respFuture, err := clientFuture.Get("http://gemini.backend/test-future")
+		if err != nil {
+			t.Fatalf("unexpected error for future token: %v", err)
+		}
+		respFuture.Body.Close()
+		if respFuture.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("expected 407 Proxy Authentication Required for future token, got %d", respFuture.StatusCode)
+		}
+
+		// D: Token minted under a different secret rejected
+		diffSecretToken := proxy.MintPodToken("completely-different-secret-xyz", podID)
+		if _, ok := proxy.VerifyPodToken(diffSecretToken, sharedSecret, 24*time.Hour); ok {
+			t.Error("expected VerifyPodToken to reject token with wrong secret, but it succeeded")
+		}
+
+		diffURL, _ := url.Parse(secretProxyURL.String())
+		diffURL.User = url.UserPassword("pod", diffSecretToken)
+		clientDiff := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(diffURL),
+			},
+		}
+		respDiff, err := clientDiff.Get("http://gemini.backend/test-diff-secret")
+		if err != nil {
+			t.Fatalf("unexpected error for wrong secret token: %v", err)
+		}
+		respDiff.Body.Close()
+		if respDiff.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("expected 407 Proxy Authentication Required for wrong secret token, got %d", respDiff.StatusCode)
+		}
+
+		// E: Tampered token rejected
+		tamperedURL, _ := url.Parse(secretProxyURL.String())
+		tamperedURL.User = url.UserPassword("pod", "corrupted.token.signature")
+		clientTampered := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(tamperedURL),
+			},
+		}
+		respTampered, err := clientTampered.Get("http://gemini.backend/test-tampered")
+		if err != nil {
+			t.Fatalf("unexpected error for tampered token: %v", err)
+		}
+		respTampered.Body.Close()
+		if respTampered.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("expected 407 Proxy Authentication Required for tampered token, got %d", respTampered.StatusCode)
+		}
+
+		// F: Missing token rejected
+		clientMissing := &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyURL(secretProxyURL),
+			},
+		}
+		respMissing, err := clientMissing.Get("http://gemini.backend/test-missing")
+		if err != nil {
+			t.Fatalf("unexpected error for missing token: %v", err)
+		}
+		respMissing.Body.Close()
+		if respMissing.StatusCode != http.StatusProxyAuthRequired {
+			t.Errorf("expected 407 Proxy Authentication Required for missing token, got %d", respMissing.StatusCode)
+		}
+	})
 }

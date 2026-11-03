@@ -60,14 +60,17 @@ type Rule struct {
 
 // RuleRouter routes incoming HTTP/HTTPS requests to the appropriate proxy based on host rules.
 type RuleRouter struct {
-	mu         sync.RWMutex
-	routes     map[string]*Rule
-	fallback   http.Handler
-	rulesDir   string
-	caCertPath string
-	caKeyPath  string
-	cacheTTL   time.Duration
-	cache      *cache.InMemoryCache
+	mu                   sync.RWMutex
+	routes               map[string]*Rule
+	fallback             http.Handler
+	rulesDir             string
+	caCertPath           string
+	caKeyPath            string
+	cacheTTL             time.Duration
+	cache                *cache.InMemoryCache
+	proxyAuthToken       string
+	proxyAuthSecret      string
+	proxyAuthTokenMaxAge time.Duration
 }
 
 // NewRuleRouter creates a new RuleRouter instance.
@@ -81,6 +84,64 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 		cacheTTL:   cacheTTL,
 		cache:      c,
 	}
+}
+
+// SetProxyAuthToken sets the static required token for Proxy-Authorization.
+func (rr *RuleRouter) SetProxyAuthToken(token string) {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	rr.proxyAuthToken = token
+}
+
+// SetProxyAuthSecret sets the secret used to verify HMAC signed per-pod tokens.
+func (rr *RuleRouter) SetProxyAuthSecret(secret string) {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	rr.proxyAuthSecret = secret
+}
+
+// SetProxyAuthTokenMaxAge sets the max validity duration for signed per-pod tokens.
+func (rr *RuleRouter) SetProxyAuthTokenMaxAge(maxAge time.Duration) {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	rr.proxyAuthTokenMaxAge = maxAge
+}
+
+// Authenticate verifies the Proxy-Authorization header against configured static token or secret.
+func (rr *RuleRouter) Authenticate(header string) (*proxy.PodIdentity, bool) {
+	rr.mu.RLock()
+	requiredToken := rr.proxyAuthToken
+	secret := rr.proxyAuthSecret
+	maxAge := rr.proxyAuthTokenMaxAge
+	rr.mu.RUnlock()
+
+	if requiredToken == "" && secret == "" {
+		return nil, true
+	}
+
+	tokens := proxy.ExtractProxyTokens(header)
+	if len(tokens) == 0 {
+		return nil, false
+	}
+
+	for _, token := range tokens {
+		if secret != "" {
+			if pod, ok := proxy.VerifyPodToken(token, secret, maxAge); ok {
+				return pod, true
+			}
+		}
+
+		if requiredToken != "" && token == requiredToken {
+			pod := &proxy.PodIdentity{
+				Namespace: "",
+				Name:      "unattributed (static token)",
+				UID:       "",
+			}
+			return pod, true
+		}
+	}
+
+	return nil, false
 }
 
 // loadRules reads YAML rules from the configured rulesDir and rebuilds the routing table.
@@ -161,6 +222,9 @@ func (rr *RuleRouter) loadRules() error {
 				continue
 			}
 			p.ListenHost = rule.Spec.Host
+			p.RequiredProxyToken = rr.proxyAuthToken
+			p.ProxyAuthSecret = rr.proxyAuthSecret
+			p.ProxyAuthTokenMaxAge = rr.proxyAuthTokenMaxAge
 
 			// Rule-specific cacheTTL takes precedence. If specified, setup caching.
 			var cacheTTL time.Duration
@@ -209,6 +273,23 @@ func (rr *RuleRouter) loadRules() error {
 
 // ServeHTTP implements http.Handler to route the request based on Host.
 func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if rr.proxyAuthToken != "" || rr.proxyAuthSecret != "" {
+		pod, ok := rr.Authenticate(r.Header.Get("Proxy-Authorization"))
+		if !ok {
+			log.Printf("Proxy auth failed: missing or invalid Proxy-Authorization")
+			w.Header().Set("Proxy-Authenticate", `Basic realm="Service Portal Proxy"`)
+			http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+			return
+		}
+		if pod != nil {
+			if pod.Namespace == "" {
+				log.Printf("Proxy auth: authenticated request: %s", pod.Name)
+			} else {
+				log.Printf("Proxy auth: authenticated request from pod %s/%s (uid: %s)", pod.Namespace, pod.Name, pod.UID)
+			}
+		}
+	}
+
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
