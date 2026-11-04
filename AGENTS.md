@@ -39,8 +39,17 @@
 
 ### Commit messages and PR descriptions
 
-The git history is the permanent record; the GitHub PR description is not. It is not part of the merged artifact and is effectively lost after merge.
+The git history is the permanent record; the GitHub PR description is not. It is not part of the merged artifact and is effectively lost after merge. The PR description is just `Fixes #<issue>`; the commit message carries the why.
 
 - **Put anything worth keeping in the code or the commits**: design decisions and non-obvious behaviour belong in code comments; the reasoning behind a change belongs in the commit message.
 - **Keep the PR description to bookkeeping**: normally just `Fixes #<issue>`. Don't summarize or "sell" the change; the code and commits should stand on their own.
 - When you revise a PR in response to review, don't maintain a changelog in the PR description.
+
+---
+
+## Scope
+
+- **One idea, one issue, one PR.** If a PR can be split into two ideas, split it; problems found during review that are outside the PR's idea become new issues.
+- **A good PR changes at most 200 lines, including tests.** The time to review and understand a PR grows roughly with the square of the lines in the diff, so two 100-line PRs cost a quarter of one 200-line PR. If the one idea needs more than 200 lines, say so on the issue before pushing and propose where to cut or how to order the parts.
+- **Issues carry a line budget** for the same reason; an issue without one should be given one before it is assigned.
+- **Do not stack unmerged PRs.** Open the next part after the previous one merges; a PR that carries another PR's commits cannot be reviewed on its own.
