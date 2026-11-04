@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 type Harness struct {
 	ClusterName string
 	IPFamily    string // "ipv4" or "dual"
+	Runtime     string // "runc" or "gvisor"
 	t           *testing.T
 }
 
@@ -34,15 +36,24 @@ func NewHarness(t *testing.T, clusterName string) *Harness {
 	if ipFamily == "" {
 		ipFamily = "ipv4"
 	}
+	runtime := strings.ToLower(strings.TrimSpace(os.Getenv("E2E_RUNTIME")))
+	if runtime == "" {
+		runtime = "runc"
+	}
 	return &Harness{
 		ClusterName: clusterName,
 		IPFamily:    ipFamily,
+		Runtime:     runtime,
 		t:           t,
 	}
 }
 
 func (h *Harness) IsDualStack() bool {
 	return h.IPFamily == "dual"
+}
+
+func (h *Harness) IsGVisor() bool {
+	return h.Runtime == "gvisor"
 }
 
 func (h *Harness) Setup() {
@@ -55,19 +66,52 @@ func (h *Harness) Setup() {
 		cmdCheck := exec.Command("kubectl", "get", "nodes", "-o", "jsonpath={.items[0].spec.podCIDRs}")
 		outCheck, errCheck := cmdCheck.Output()
 		isClusterDual := errCheck == nil && strings.Contains(string(outCheck), ":")
-		if (h.IPFamily == "dual" && isClusterDual) || (h.IPFamily != "dual" && !isClusterDual) {
-			h.t.Logf("Cluster %s already exists with matching IP family (%s)", h.ClusterName, h.IPFamily)
+		ipFamilyMatch := (h.IPFamily == "dual" && isClusterDual) || (h.IPFamily != "dual" && !isClusterDual)
+
+		// Check whether existing cluster has matching runtime (gvisor RuntimeClass exists)
+		cmdRuntime := exec.Command("kubectl", "get", "runtimeclass", "gvisor")
+		hasGVisorRuntime := cmdRuntime.Run() == nil
+		runtimeMatch := (h.IsGVisor() && hasGVisorRuntime) || (!h.IsGVisor() && !hasGVisorRuntime)
+
+		if ipFamilyMatch && runtimeMatch {
+			h.t.Logf("Cluster %s already exists with matching IP family (%s) and runtime (%s)", h.ClusterName, h.IPFamily, h.Runtime)
 			h.WaitForCoreDNS()
 			return
 		}
-		h.t.Logf("Cluster %s exists but IP family does not match %s; recreating", h.ClusterName, h.IPFamily)
+		h.t.Logf("Cluster %s exists but does not match IP family (%s) or runtime (%s); recreating", h.ClusterName, h.IPFamily, h.Runtime)
 		h.Teardown()
 	}
 
-	h.t.Logf("Creating cluster %s (IPFamily: %s)", h.ClusterName, h.IPFamily)
-	var configArgs []string
+	h.t.Logf("Creating cluster %s (IPFamily: %s, Runtime: %s)", h.ClusterName, h.IPFamily, h.Runtime)
+	var configLines []string
+	configLines = append(configLines, "kind: Cluster", "apiVersion: kind.x-k8s.io/v1alpha4")
+
+	if h.IsGVisor() {
+		gitRoot := h.GetGitRoot()
+		h.DockerBuild("kind-node-gvisor:e2e", filepath.Join(gitRoot, "images/kind-node-gvisor/Dockerfile"), filepath.Join(gitRoot, "images/kind-node-gvisor"))
+		configLines = append(configLines,
+			"nodes:",
+			"- role: control-plane",
+			"  image: kind-node-gvisor:e2e",
+			"containerdConfigPatches:",
+			"- |-",
+			"  [plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.runsc]",
+			"    runtime_type = \"io.containerd.runsc.v1\"",
+			"  [plugins.\"io.containerd.grpc.v1.cri\".containerd.runtimes.gvisor]",
+			"    runtime_type = \"io.containerd.runsc.v1\"",
+		)
+	}
+
 	if h.IPFamily == "dual" {
-		tmpConfig, err := os.CreateTemp("", "kind-dual-*.yaml")
+		configLines = append(configLines,
+			"networking:",
+			"  ipFamily: dual",
+		)
+	}
+
+	var configArgs []string
+	if len(configLines) > 2 {
+		tmpConfig, err := os.CreateTemp("", "kind-config-*.yaml")
 		if err != nil {
 			h.t.Fatalf("Failed to create temporary kind config: %v", err)
 		}
@@ -77,12 +121,7 @@ func (h *Harness) Setup() {
 			}
 		}()
 
-		kindConfig := `kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-networking:
-  ipFamily: dual
-`
-		if _, err := tmpConfig.WriteString(kindConfig); err != nil {
+		if _, err := tmpConfig.WriteString(strings.Join(configLines, "\n") + "\n"); err != nil {
 			h.t.Fatalf("Failed to write temporary kind config: %v", err)
 		}
 		if err := tmpConfig.Close(); err != nil {
@@ -102,6 +141,17 @@ networking:
 	})
 
 	h.WaitForCoreDNS()
+
+	if h.IsGVisor() {
+		h.t.Logf("Creating gvisor RuntimeClass in cluster")
+		runtimeClassManifest := `apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+`
+		h.KubectlApplyContent(runtimeClassManifest)
+	}
 }
 
 func (h *Harness) WaitForCoreDNS() {
