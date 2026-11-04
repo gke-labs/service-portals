@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/gke-labs/service-portals/pkg/cache"
+	"github.com/gke-labs/service-portals/pkg/dns"
+	"github.com/gke-labs/service-portals/pkg/networking"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -50,6 +52,11 @@ type Config struct {
 	CacheTTL          time.Duration
 	RulesDir          string
 	PodMap            *PodMap
+	ServeDNS          bool
+	DNSBindAddr       string
+	ProxyDNSPort      string
+	ProxyBindAddrV6   string
+	DefaultAction     string
 }
 
 // validateAdminAddr enforces that the administrative and Bind API server binds exclusively
@@ -283,6 +290,101 @@ func Run(ctx context.Context, config Config) error {
 		bindHost = os.Getenv("BIND_HOST")
 	}
 
+	serveDNS := config.ServeDNS
+	if env := os.Getenv("SERVE_DNS"); env != "" {
+		serveDNS = (env == "true" || env == "1")
+	}
+
+	var dnsServers []*dns.Server
+	if serveDNS {
+		dnsPort := config.ProxyDNSPort
+		if dnsPort == "" {
+			dnsPort = os.Getenv("DNS_PORT")
+		}
+		if dnsPort == "" {
+			dnsPort = "53"
+		}
+
+		defaultAction := config.DefaultAction
+		if defaultAction == "" {
+			defaultAction = os.Getenv("DEFAULT_ACTION")
+		}
+		if defaultAction == "" {
+			defaultAction = "Deny"
+		}
+
+		var matcher dns.RuleMatcher
+		if rr, ok := handler.(dns.RuleMatcher); ok {
+			matcher = rr
+		} else if fallback != nil && fallback.TargetURL != nil {
+			matcher = dns.RuleMatcherFunc(func(h string) bool {
+				targetHost := strings.ToLower(proxy.HostWithoutPort(fallback.TargetURL.Host))
+				return targetHost != "" && (targetHost == h || strings.HasPrefix(h, targetHost+"."))
+			})
+		}
+
+		var proxyIPv4 net.IP
+		proxyIPStr := bindHost
+		if proxyIPStr == "" || proxyIPStr == "0.0.0.0" {
+			proxyIPStr = os.Getenv("PROXY_HOST")
+		}
+		if proxyIPStr != "" {
+			proxyIPv4 = net.ParseIP(proxyIPStr)
+		}
+
+		var proxyIPv6 net.IP
+		v6Str := config.ProxyBindAddrV6
+		if v6Str == "" {
+			v6Str = os.Getenv("PROXY_HOST_V6")
+		}
+		if v6Str == "" {
+			v6Str = networking.DiscoverNodeIPv6()
+		}
+		if v6Str != "" {
+			proxyIPv6 = net.ParseIP(v6Str)
+		}
+
+		var bindAddrs []string
+		if config.DNSBindAddr != "" {
+			bindAddrs = strings.Split(config.DNSBindAddr, ",")
+		} else if env := os.Getenv("DNS_BIND_ADDR"); env != "" {
+			bindAddrs = strings.Split(env, ",")
+		} else {
+			if proxyIPv4 != nil {
+				bindAddrs = append(bindAddrs, net.JoinHostPort(proxyIPv4.String(), dnsPort))
+			}
+			if proxyIPv6 != nil {
+				bindAddrs = append(bindAddrs, net.JoinHostPort(proxyIPv6.String(), dnsPort))
+			}
+			if len(bindAddrs) == 0 {
+				bindAddrs = append(bindAddrs, ":"+dnsPort)
+			}
+		}
+
+		for _, addr := range bindAddrs {
+			addr = strings.TrimSpace(addr)
+			if addr == "" {
+				continue
+			}
+			dnsCfg := dns.Config{
+				BindAddr:      addr,
+				ProxyIPv4:     proxyIPv4,
+				ProxyIPv6:     proxyIPv6,
+				Matcher:       matcher,
+				DefaultAction: defaultAction,
+			}
+			s, err := dns.NewServer(dnsCfg)
+			if err != nil {
+				return fmt.Errorf("failed to create DNS server for %s: %w", addr, err)
+			}
+			if err := s.Start(ctx); err != nil {
+				return fmt.Errorf("failed to start DNS server on %s: %w", addr, err)
+			}
+			dnsServers = append(dnsServers, s)
+			log.Printf("Starting node DNS server on %s (proxyIPv4: %s, proxyIPv6: %s, defaultAction: %s)", addr, proxyIPv4, proxyIPv6, defaultAction)
+		}
+	}
+
 	servedHandler := handler
 	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
 		servedHandler = otelhttp.NewHandler(handler, "service-portal")
@@ -351,6 +453,11 @@ func Run(ctx context.Context, config Config) error {
 		if adminSockPath != "" {
 			if err := os.Remove(adminSockPath); err != nil && !os.IsNotExist(err) {
 				log.Printf("Admin socket remove error: %v", err)
+			}
+		}
+		for _, s := range dnsServers {
+			if err := s.Shutdown(shutdownCtx); err != nil {
+				log.Printf("DNS server shutdown failed: %v", err)
 			}
 		}
 		if err := srv.Shutdown(shutdownCtx); err != nil {

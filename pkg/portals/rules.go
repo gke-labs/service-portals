@@ -93,6 +93,33 @@ func (rr *RuleRouter) SetPodMap(pm *PodMap) {
 	rr.podMap = pm
 }
 
+// MatchHost reports whether host matches a configured rule or fallback target.
+func (rr *RuleRouter) MatchHost(host string) bool {
+	host = proxy.HostWithoutPort(host)
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+
+	rr.mu.RLock()
+	defer rr.mu.RUnlock()
+
+	if _, ok := rr.routes[host]; ok {
+		return true
+	}
+	for rHost := range rr.routes {
+		if strings.HasPrefix(host, rHost+".") {
+			return true
+		}
+	}
+
+	if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok && fallbackProxy.TargetURL != nil {
+		targetHost := strings.ToLower(proxy.HostWithoutPort(fallbackProxy.TargetURL.Host))
+		if targetHost != "" && (targetHost == host || strings.HasPrefix(host, targetHost+".")) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // loadRules reads YAML rules from the configured rulesDir and rebuilds the routing table.
 func (rr *RuleRouter) loadRules() error {
 	if rr.rulesDir == "" {
@@ -227,6 +254,15 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rr.mu.RLock()
 	rule, ok := rr.routes[host]
+	if !ok {
+		for rHost, r := range rr.routes {
+			if strings.HasPrefix(host, rHost+".") {
+				rule = r
+				ok = true
+				break
+			}
+		}
+	}
 	pm := rr.podMap
 	rr.mu.RUnlock()
 
@@ -307,6 +343,15 @@ func (rr *RuleRouter) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificat
 
 	rr.mu.RLock()
 	rule, ok := rr.routes[host]
+	if !ok {
+		for rHost, r := range rr.routes {
+			if strings.HasPrefix(host, rHost+".") {
+				rule = r
+				ok = true
+				break
+			}
+		}
+	}
 	pm := rr.podMap
 	rr.mu.RUnlock()
 

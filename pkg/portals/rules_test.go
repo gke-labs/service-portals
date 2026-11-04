@@ -840,3 +840,47 @@ spec:
 		}
 	})
 }
+
+func TestRuleRouterMatchHost(t *testing.T) {
+	tmpDir := t.TempDir()
+	ruleContent := `
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: test-rule
+spec:
+  host: "backend"
+  rewriteUrl: "http://127.0.0.1:8080"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "rule.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+
+	rr := NewRuleRouter(tmpDir, nil, "", "", 0, nil)
+	if err := rr.loadRules(); err != nil {
+		t.Fatalf("loadRules failed: %v", err)
+	}
+
+	tests := []struct {
+		host     string
+		expected bool
+	}{
+		{"backend", true},
+		{"backend:80", true},
+		{"backend.", true},
+		{"backend.default.svc.cluster.local", true},
+		{"backend.default.svc.cluster.local.", true},
+		{"unlisted-backend", false},
+		{"google.com", false},
+		{"example.com", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.host, func(t *testing.T) {
+			got := rr.MatchHost(tc.host)
+			if got != tc.expected {
+				t.Errorf("MatchHost(%q) = %v; expected %v", tc.host, got, tc.expected)
+			}
+		})
+	}
+}
