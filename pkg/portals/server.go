@@ -19,10 +19,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +35,9 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 )
+
+// DefaultAdminSocketPath is the default Unix domain socket path for the local node agent admin and bind API.
+const DefaultAdminSocketPath = "/run/service-portal/portal.sock"
 
 type CertificateProvider interface {
 	GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error)
@@ -43,6 +49,33 @@ type Config struct {
 	SetupProxy        func(*proxy.HTTPProxy)
 	CacheTTL          time.Duration
 	RulesDir          string
+	PodMap            *PodMap
+}
+
+// validateAdminAddr enforces that the administrative and Bind API server binds exclusively
+// to a loopback IP (127.0.0.1 or ::1) or a private Unix domain socket.
+func validateAdminAddr(addr string) error {
+	if strings.HasPrefix(addr, "unix:") || strings.HasPrefix(addr, "/") {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("admin address %q must be in host:port format or a unix socket path: %w", addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("admin address %q cannot bind to all interfaces; must specify loopback (127.0.0.1 or ::1)", addr)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("admin address %q has invalid host %q; must be loopback (127.0.0.1 or ::1)", addr, host)
+	}
+	if !ip.IsLoopback() {
+		return fmt.Errorf("admin address %q must bind to loopback (127.0.0.1 or ::1), refusing non-loopback address %s", addr, ip)
+	}
+	return nil
 }
 
 func Run(ctx context.Context, config Config) error {
@@ -121,6 +154,79 @@ func Run(ctx context.Context, config Config) error {
 		config.SetupProxy(fallback)
 	}
 
+	var pm *PodMap
+	if config.PodMap != nil {
+		pm = config.PodMap
+	} else if os.Getenv("ENABLE_POD_MAP") == "true" {
+		pm = NewPodMap()
+	}
+
+	var adminSrv *http.Server
+	var adminListener net.Listener
+	var adminSockPath string
+	if pm != nil {
+		// Security: The admin and Bind API must bind exclusively to a private Unix domain socket
+		// or loopback (127.0.0.1 or ::1). Because the node proxy runs with hostNetwork: true,
+		// binding to 0.0.0.0 or an external interface would expose pod registration and policy
+		// binding to any pod on the node network or external network entities, creating an
+		// unauthenticated privilege escalation bypass (daemonset-mode.md Question 2).
+		// Controller-facing remote transport with gRPC and mTLS is tracked separately in #227.
+		adminAddr := os.Getenv("ADMIN_ADDR")
+		if adminAddr == "" {
+			adminAddr = DefaultAdminSocketPath
+		}
+		if err := validateAdminAddr(adminAddr); err != nil {
+			return fmt.Errorf("security violation: %w", err)
+		}
+
+		adminSrv = &http.Server{
+			Handler: pm.AdminHandler(),
+		}
+
+		if strings.HasPrefix(adminAddr, "unix://") || strings.HasPrefix(adminAddr, "/") {
+			adminSockPath = strings.TrimPrefix(adminAddr, "unix://")
+			if err := os.Remove(adminSockPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("warning: removing existing admin socket %s: %v", adminSockPath, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(adminSockPath), 0750); err != nil {
+				return fmt.Errorf("failed to create admin socket directory: %w", err)
+			}
+			l, err := net.Listen("unix", adminSockPath)
+			if err != nil {
+				return fmt.Errorf("failed to listen on admin unix socket %s: %w", adminSockPath, err)
+			}
+			// Security: The admin unix socket must be mode 0600 (accessible only by the listening
+			// proxy UID and root). Making the socket world-writable would allow any process that can
+			// see the hostPath to register arbitrary pods or bind policies, bypassing security
+			// controls. The plugin runs as root and connects regardless. A failure to enforce
+			// permissions must fail closed and stop startup.
+			if err := os.Chmod(adminSockPath, 0600); err != nil {
+				if cErr := l.Close(); cErr != nil {
+					log.Printf("warning: closing admin listener: %v", cErr)
+				}
+				if rErr := os.Remove(adminSockPath); rErr != nil && !os.IsNotExist(rErr) {
+					log.Printf("warning: removing admin socket %s: %v", adminSockPath, rErr)
+				}
+				return fmt.Errorf("failed to chmod admin socket %s to 0600: %w", adminSockPath, err)
+			}
+			adminListener = l
+			go func() {
+				log.Printf("Starting admin server on unix socket %s", adminSockPath)
+				if err := adminSrv.Serve(adminListener); err != nil && err != http.ErrServerClosed {
+					log.Printf("Admin server error: %v", err)
+				}
+			}()
+		} else {
+			adminSrv.Addr = adminAddr
+			go func() {
+				log.Printf("Starting admin and bind API server on %s", adminAddr)
+				if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("Admin server error: %v", err)
+				}
+			}()
+		}
+	}
+
 	var handler http.Handler
 	if rulesDir != "" {
 		var fallbackHandler http.Handler
@@ -128,6 +234,9 @@ func Run(ctx context.Context, config Config) error {
 			fallbackHandler = fallback
 		}
 		rr := NewRuleRouter(rulesDir, fallbackHandler, caCertPath, caKeyPath, cacheTTL, c)
+		if pm != nil {
+			rr.SetPodMap(pm)
+		}
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}
@@ -169,6 +278,11 @@ func Run(ctx context.Context, config Config) error {
 		httpsPort = "8443"
 	}
 
+	bindHost := os.Getenv("PROXY_HOST")
+	if bindHost == "" {
+		bindHost = os.Getenv("BIND_HOST")
+	}
+
 	servedHandler := handler
 	if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
 		servedHandler = otelhttp.NewHandler(handler, "service-portal")
@@ -176,14 +290,14 @@ func Run(ctx context.Context, config Config) error {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    net.JoinHostPort(bindHost, port),
 		Handler: servedHandler,
 	}
 
 	var httpsSrv *http.Server
 	if certProv, ok := handler.(CertificateProvider); ok {
 		httpsSrv = &http.Server{
-			Addr:    ":" + httpsPort,
+			Addr:    net.JoinHostPort(bindHost, httpsPort),
 			Handler: servedHandler,
 			TLSConfig: &tls.Config{
 				GetCertificate: certProv.GetCertificate,
@@ -202,7 +316,7 @@ func Run(ctx context.Context, config Config) error {
 
 	errChan := make(chan error, 2)
 	go func() {
-		log.Printf("Starting HTTP proxy on :%s forwarding to %s", port, targetDesc)
+		log.Printf("Starting HTTP proxy on %s forwarding to %s", srv.Addr, targetDesc)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- fmt.Errorf("HTTP server failed: %w", err)
 		}
@@ -210,7 +324,7 @@ func Run(ctx context.Context, config Config) error {
 
 	if httpsSrv != nil {
 		go func() {
-			log.Printf("Starting HTTPS proxy on :%s forwarding to %s", httpsPort, targetDesc)
+			log.Printf("Starting HTTPS proxy on %s forwarding to %s", httpsSrv.Addr, targetDesc)
 			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				errChan <- fmt.Errorf("HTTPS server failed: %w", err)
 			}
@@ -224,6 +338,21 @@ func Run(ctx context.Context, config Config) error {
 		log.Println("Shutting down servers...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if adminSrv != nil {
+			if err := adminSrv.Shutdown(shutdownCtx); err != nil {
+				log.Printf("Admin server shutdown failed: %v", err)
+			}
+		}
+		if adminListener != nil {
+			if err := adminListener.Close(); err != nil {
+				log.Printf("Admin listener close error: %v", err)
+			}
+		}
+		if adminSockPath != "" {
+			if err := os.Remove(adminSockPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("Admin socket remove error: %v", err)
+			}
+		}
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("HTTP server shutdown failed: %v", err)
 		}
