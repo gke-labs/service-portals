@@ -133,12 +133,74 @@ spec:
 
 ---
 
-## 4. Runtime Classes: gVisor and Kata Containers (#181)
+## 4. Runtime Classes: Host-Side Enforcement under runc, gVisor, and Kata (#181)
 
-* **Current Implementation Scope**: Rules in this spike are installed inside the pod network namespace (`nsenter --net=<netnsPath> iptables`).
-* **gVisor (`runsc`)**: gVisor implements its own userspace networking stack (netstack). Network traffic originating inside a gVisor sandbox is processed by netstack and sent directly across the sandbox boundary; iptables rules inside the pod network namespace are not traversed by gVisor's netstack.
-* **Kata Containers**: Kata runs the pod sandbox inside a dedicated microVM guest kernel. Network processing occurs inside the guest kernel, bypassing host network namespace rules.
-* **Status**: `runtimeClassName` is not yet detected by `portal-nri-plugin`. Interception and default-deny egress for gVisor and Kata require moving enforcement to the host side of the veth or tap device. This is tracked in [#181](https://github.com/gke-labs/service-portals/issues/181) and is not implemented in this spike.
+### The Host-Side Enforcement Architecture
+In the initial prototype, iptables rules were installed inside the pod's network namespace (`nsenter --net=<netnsPath> iptables`). While effective for standard `runc` containers lacking `CAP_NET_ADMIN`, this failed for sandboxed runtimes:
+* **gVisor (`runsc`)**: Implements its own userspace networking stack (`netstack`). Outgoing frames are written directly to the veth interface via `AF_PACKET` raw sockets, bypassing netfilter chains inside the pod network namespace entirely.
+* **Kata Containers (`kata`)**: Executes pods inside a dedicated microVM guest kernel. Network processing occurs inside the guest kernel, and frames emerge on a host-side tap or veth device; rules inside a pod network namespace on the host are not traversed.
+
+To enforce transparent redirection and default-deny egress consistently across all container and microVM runtimes, `#181` moves all iptables enforcement to the **node/host side** of the interface:
+1. **Interface Discovery**:
+   - In `RunPodSandbox`, the plugin determines the pod's network namespace path (`netnsPath`) from `pod.Linux.Namespaces`.
+   - The plugin queries link status in the netns via `nsenter --net=<netnsPath> ip -o link show` and identifies the peer interface index (`@if<peerIndex>`).
+   - Using `net.InterfaceByIndex(peerIndex)` in the host network namespace (or matching `link-netns <basename>` on the host), the plugin discovers the host-side device name (e.g. `vethXXXX` or `tapXXXX`).
+   - The pod IPv4 address is also resolved from `pod.Ips` or `ip -o -4 addr show`.
+2. **Dedicated Per-Interface Host Chains**:
+   - NAT Table: Creates a per-interface chain `PORTAL_PR_<hostIface>` and inserts a jump at the head of `PREROUTING`:
+     ```text
+     -I PREROUTING 1 -i <hostIface> -j PORTAL_PR_<hostIface>
+     -A PORTAL_PR_<hostIface> -p tcp --dport 80 -j DNAT --to-destination <proxyHost>:<proxyPort>
+     -A PORTAL_PR_<hostIface> -p tcp --dport 443 -j DNAT --to-destination <proxyHost>:<proxyHTTPSPort>
+     ```
+     Inserting at position 1 ensures redirection happens before `kube-proxy` service DNAT rewrites destination IPs.
+   - Filter Table: Creates a per-interface chain `PORTAL_EG_<hostIface>` and inserts jumps at the head of both `INPUT` (for local proxy traffic) and `FORWARD` (for external/cluster traffic):
+     ```text
+     -I INPUT 1 -i <hostIface> -j PORTAL_EG_<hostIface>
+     -I FORWARD 1 -i <hostIface> -j PORTAL_EG_<hostIface>
+     -A PORTAL_EG_<hostIface> -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+     -A PORTAL_EG_<hostIface> -d <proxyHost> -p tcp --dport <proxyPort> -j ACCEPT
+     -A PORTAL_EG_<hostIface> -d <proxyHost> -p tcp --dport <proxyHTTPSPort> -j ACCEPT
+     -A PORTAL_EG_<hostIface> -d <dnsServer> -p udp --dport 53 -j ACCEPT
+     -A PORTAL_EG_<hostIface> -d <dnsServer> -p tcp --dport 53 -j ACCEPT
+     -A PORTAL_EG_<hostIface> -m conntrack --ctorigdst <dnsServer> -p udp --dport 53 -j ACCEPT
+     -A PORTAL_EG_<hostIface> -m conntrack --ctorigdst <dnsServer> -p tcp --dport 53 -j ACCEPT
+     -A PORTAL_EG_<hostIface> -p tcp -j REJECT --reject-with icmp-port-unreachable
+     -A PORTAL_EG_<hostIface> -p udp -j REJECT --reject-with icmp-port-unreachable
+     -A PORTAL_EG_<hostIface> -j REJECT --reject-with icmp-port-unreachable
+     ```
+     *Cluster DNS Conntrack Note*: Because `kube-proxy` translates cluster DNS Service IPs (e.g. `10.96.0.10`) to endpoint pod IPs (e.g. `10.244.0.2`) in `PREROUTING`, matching `-m conntrack --ctorigdst <dnsServer>` ensures DNS queries continue to be accepted in `FORWARD` even after DNAT translation.
+3. **Lifecycle Management & Idempotency**:
+   - `portalPlugin` tracks active pod network state (`hostInterface`, `podIP`, `runtimeClass`) keyed by sandbox ID in an in-memory map protected by a mutex.
+   - On pod termination (`StopPodSandbox` and `RemovePodSandbox`), host rules are unlinked and chains deleted (`-D PREROUTING`, `-D INPUT`, `-D FORWARD`, `-F`, `-X`). Cleanups are fully idempotent.
+   - On plugin startup or reconnect (`Synchronize`), all existing opted-in pods are re-discovered and their host-side rules re-applied.
+
+### RuntimeClass Detection & Fail-Closed Validation
+The plugin inspects `pod.RuntimeHandler` (and CRI annotation `io.kubernetes.cri.runtime-handler`):
+* **Supported Runtimes**: `""` (containerd default runc), `"runc"`, `"gvisor"`, `"runsc"`, `"kata"`, `"kata-qemu"`, `"kata-clh"`, `"kata-fc"`, and `"kata-containers"`.
+* **Fail-Closed on Unknown RuntimeClass**: If an opted-in pod specifies an unknown or unvalidated runtime class (e.g. `runtimeClassName: unsupported-microvm`), `RunPodSandbox` and `CreateContainer` immediately return an error:
+  ```text
+  unsupported runtime class "unsupported-microvm" for opted-in pod <namespace>/<name>: refusing to start unprotected pod
+  ```
+  The pod sandbox fails to initialize, preventing workloads from starting without verified interception.
+* **Non-Opted-In Pods**: Unrelated pods without `service-portal.gke.io/intercept: "true"` are ignored and run unrestricted on whatever runtime class they specify.
+
+### Observations and Architectural Reasoning per Runtime
+* **Standard Containers (`runc`)**:
+  - Outgoing packets emerge from the pod veth peer into the host network namespace.
+  - Verified on kind: passes the entire egress deny suite (`TestNRIPluginEgressDenied`) against host-side rules.
+* **gVisor (`runsc`) `[unverified]`**:
+  - Userspace netstack injects packets via raw packet socket onto the container interface.
+  - Architectural reasoning: because netfilter hooks are situated on the host-side veth peer, netstack frames arrive in the host namespace before routing, where host-side PREROUTING/INPUT/FORWARD rules intercept them.
+  - Verification status: `[unverified]`. Not yet verified in CI or against a live cluster.
+* **Kata Containers (`kata`) `[unverified]`**:
+  - Pod runs inside a microVM guest kernel; traffic egresses over virtio-net to the host-side tap device.
+  - Architectural reasoning: host-side iptables inspects incoming packets on the host tap interface. Guest kernel or container processes have no access to the host's iptables rules.
+  - Verification status: `[unverified]`. Not yet verified in CI or against a live cluster.
+
+### Verification Status & Open Follow-Up
+* **runc (kind)**: Fully verified in this PR. `TestNRIPluginEgressDenied` passes unchanged with host-side rules on kind (containerd v2.0.2).
+* **gVisor and Kata microVMs**: Open. Host-side enforcement for microVM runtimes is designed and implemented based on netfilter hook positioning on host veth/tap interfaces, but live verification on a gVisor or Kata cluster is open and tracked in a dedicated follow-up issue (running the NRI deny suite under a gVisor RuntimeClass on kind in CI).
 
 ---
 
