@@ -23,7 +23,10 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/containerd/nri/pkg/api"
@@ -47,8 +50,17 @@ type pluginConfig struct {
 	caCertPath     string
 }
 
+type podNetworkState struct {
+	hostInterface string
+	podIP         string
+	runtimeClass  string
+}
+
 type portalPlugin struct {
-	cfg pluginConfig
+	cfg         pluginConfig
+	mu          sync.Mutex
+	pods        map[string]podNetworkState
+	runIptables func([][]string) error
 }
 
 func envOrDefault(key, fallback string) string {
@@ -121,6 +133,144 @@ func (p *portalPlugin) matchesPod(pod *api.PodSandbox) bool {
 	return pod.Labels[interceptLabelKey] == interceptLabelVal
 }
 
+func getRuntimeClass(pod *api.PodSandbox) string {
+	if pod == nil {
+		return ""
+	}
+	if pod.RuntimeHandler != "" {
+		return pod.RuntimeHandler
+	}
+	if pod.Annotations != nil {
+		if rc, ok := pod.Annotations["io.kubernetes.cri.runtime-handler"]; ok && rc != "" {
+			return rc
+		}
+	}
+	return ""
+}
+
+func isSupportedRuntime(runtimeClass string) bool {
+	switch strings.ToLower(strings.TrimSpace(runtimeClass)) {
+	case "", "runc", "gvisor", "runsc", "kata", "kata-qemu", "kata-clh", "kata-fc", "kata-containers":
+		return true
+	default:
+		return false
+	}
+}
+
+func parsePeerIndex(output string) (int, error) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		nameField := strings.TrimSuffix(fields[1], ":")
+		if nameField == "lo" || strings.HasPrefix(nameField, "lo@") {
+			continue
+		}
+		if idx := strings.Index(nameField, "@if"); idx != -1 {
+			pIdxStr := nameField[idx+3:]
+			if pIdx, err := strconv.Atoi(pIdxStr); err == nil && pIdx > 0 {
+				return pIdx, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("no peer interface found in ip link output")
+}
+
+func parsePodIPv4(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			nameField := strings.TrimSuffix(fields[1], ":")
+			if nameField == "lo" || strings.HasPrefix(nameField, "lo@") {
+				continue
+			}
+		}
+		for i, f := range fields {
+			if f == "inet" && i+1 < len(fields) {
+				cidr := fields[i+1]
+				if ip, _, err := net.ParseCIDR(cidr); err == nil && !ip.IsLoopback() {
+					return ip.String()
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func parseHostInterfaceFromHostLinks(output, netnsBasename string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, "link-netns "+netnsBasename) {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				rawName := strings.TrimSuffix(fields[1], ":")
+				if atIdx := strings.Index(rawName, "@"); atIdx != -1 {
+					rawName = rawName[:atIdx]
+				}
+				if rawName != "" && rawName != "lo" {
+					return rawName
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func (p *portalPlugin) findHostInterface(ctx context.Context, pod *api.PodSandbox, netnsPath string) (string, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	log := klog.FromContext(ctx)
+
+	cmd := exec.Command("nsenter", "--net="+netnsPath, "ip", "-o", "link", "show")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("nsenter ip link show: %w (output: %s)", err, out)
+	}
+
+	var hostIface string
+	if peerIndex, err := parsePeerIndex(string(out)); err == nil && peerIndex > 0 {
+		if iface, err := net.InterfaceByIndex(peerIndex); err == nil && iface.Name != "" {
+			hostIface = iface.Name
+		}
+	}
+
+	if hostIface == "" {
+		base := filepath.Base(netnsPath)
+		hCmd := exec.Command("ip", "-o", "link", "show")
+		hOut, err := hCmd.CombinedOutput()
+		if err != nil {
+			log.V(1).Info("Host ip link show fallback query failed", "err", err)
+		} else {
+			hostIface = parseHostInterfaceFromHostLinks(string(hOut), base)
+		}
+	}
+
+	if hostIface == "" {
+		return "", "", fmt.Errorf("could not identify host-side interface for pod %s (netns %s)", podID(pod), netnsPath)
+	}
+
+	var podIP string
+	if pod != nil && len(pod.Ips) > 0 && pod.Ips[0] != "" {
+		podIP = pod.Ips[0]
+	}
+	if podIP == "" {
+		ipCmd := exec.Command("nsenter", "--net="+netnsPath, "ip", "-o", "-4", "addr", "show")
+		ipOut, err := ipCmd.CombinedOutput()
+		if err != nil {
+			log.V(1).Info("Could not determine pod IPv4 via nsenter", "pod", podID(pod), "err", err)
+		} else {
+			podIP = parsePodIPv4(string(ipOut))
+		}
+	}
+
+	return hostIface, podIP, nil
+}
+
 func (p *portalPlugin) findNetnsPath(pod *api.PodSandbox) (string, error) {
 	if pod == nil || pod.Linux == nil {
 		return "", fmt.Errorf("pod %s has no Linux configuration (no network namespace entry)", podID(pod))
@@ -154,12 +304,71 @@ func (p *portalPlugin) findNetnsPath(pod *api.PodSandbox) (string, error) {
 	return netnsPath, nil
 }
 
-// applyIptablesRules executes a sequence of iptables command argument slices
-// inside the target network namespace via nsenter.
-func applyIptablesRules(netnsPath string, ruleCmds [][]string) error {
+func buildHostIptablesRules(hostIface, proxyHost, proxyPort, proxyHTTPSPort string, dnsServers []string) [][]string {
+	prChain := "PORTAL_PR_" + hostIface
+	egChain := "PORTAL_EG_" + hostIface
+
+	var rules [][]string
+
+	// 1. NAT table: DNAT ports 80 and 443 on host-side interface to node proxy
+	rules = append(rules,
+		[]string{"-t", "nat", "-N", prChain},
+		[]string{"-t", "nat", "-F", prChain},
+		[]string{"-t", "nat", "-D", "PREROUTING", "-i", hostIface, "-j", prChain},
+		[]string{"-t", "nat", "-I", "PREROUTING", "1", "-i", hostIface, "-j", prChain},
+		[]string{"-t", "nat", "-A", prChain, "-p", "tcp", "--dport", "80", "-j", "DNAT", "--to-destination", net.JoinHostPort(proxyHost, proxyPort)},
+		[]string{"-t", "nat", "-A", prChain, "-p", "tcp", "--dport", "443", "-j", "DNAT", "--to-destination", net.JoinHostPort(proxyHost, proxyHTTPSPort)},
+	)
+
+	// 2. Filter table: Egress isolation and default-deny
+	rules = append(rules,
+		[]string{"-t", "filter", "-N", egChain},
+		[]string{"-t", "filter", "-F", egChain},
+		[]string{"-t", "filter", "-D", "INPUT", "-i", hostIface, "-j", egChain},
+		[]string{"-t", "filter", "-I", "INPUT", "1", "-i", hostIface, "-j", egChain},
+		[]string{"-t", "filter", "-D", "FORWARD", "-i", hostIface, "-j", egChain},
+		[]string{"-t", "filter", "-I", "FORWARD", "1", "-i", hostIface, "-j", egChain},
+		[]string{"-t", "filter", "-A", egChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
+		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "tcp", "--dport", proxyPort, "-j", "ACCEPT"},
+		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "tcp", "--dport", proxyHTTPSPort, "-j", "ACCEPT"},
+	)
+
+	for _, dns := range dnsServers {
+		rules = append(rules,
+			[]string{"-t", "filter", "-A", egChain, "-d", dns, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
+			[]string{"-t", "filter", "-A", egChain, "-d", dns, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
+			[]string{"-t", "filter", "-A", egChain, "-m", "conntrack", "--ctorigdst", dns, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
+			[]string{"-t", "filter", "-A", egChain, "-m", "conntrack", "--ctorigdst", dns, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
+		)
+	}
+
+	rules = append(rules,
+		[]string{"-t", "filter", "-A", egChain, "-p", "tcp", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+		[]string{"-t", "filter", "-A", egChain, "-p", "udp", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+		[]string{"-t", "filter", "-A", egChain, "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+	)
+
+	return rules
+}
+
+func buildHostCleanupRules(hostIface string) [][]string {
+	prChain := "PORTAL_PR_" + hostIface
+	egChain := "PORTAL_EG_" + hostIface
+
+	return [][]string{
+		{"-t", "nat", "-D", "PREROUTING", "-i", hostIface, "-j", prChain},
+		{"-t", "nat", "-F", prChain},
+		{"-t", "nat", "-X", prChain},
+		{"-t", "filter", "-D", "INPUT", "-i", hostIface, "-j", egChain},
+		{"-t", "filter", "-D", "FORWARD", "-i", hostIface, "-j", egChain},
+		{"-t", "filter", "-F", egChain},
+		{"-t", "filter", "-X", egChain},
+	}
+}
+
+func runIptables(ruleCmds [][]string) error {
 	for _, args := range ruleCmds {
-		cmdArgs := append([]string{"--net=" + netnsPath, "iptables"}, args...)
-		cmd := exec.Command("nsenter", cmdArgs...)
+		cmd := exec.Command("iptables", args...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			msg := string(out)
@@ -168,11 +377,11 @@ func applyIptablesRules(netnsPath string, ruleCmds [][]string) error {
 				if args[2] == "-N" && strings.Contains(strings.ToLower(msg), "already exists") {
 					continue
 				}
-				// -D fails if rule or chain does not exist:
-				// "does not exist", "No chain/target/match by that name", "Bad rule"
-				if args[2] == "-D" && (strings.Contains(strings.ToLower(msg), "does not exist") ||
+				// -D or -X fails if rule or chain does not exist:
+				if (args[2] == "-D" || args[2] == "-X") && (strings.Contains(strings.ToLower(msg), "does not exist") ||
 					strings.Contains(msg, "No chain/target/match by that name") ||
-					strings.Contains(strings.ToLower(msg), "bad rule")) {
+					strings.Contains(strings.ToLower(msg), "bad rule") ||
+					strings.Contains(strings.ToLower(msg), "too many links")) {
 					continue
 				}
 			}
@@ -182,77 +391,115 @@ func applyIptablesRules(netnsPath string, ruleCmds [][]string) error {
 	return nil
 }
 
-// installIptablesRules configures transparent redirection (NAT DNAT) and
-// default-deny egress filtering (Filter) inside the pod's network namespace.
-//
-// Security boundary & netns isolation:
-// Even though these iptables rules reside in the pod's network namespace, standard
-// unprivileged Kubernetes containers run without CAP_NET_ADMIN in their namespace
-// (which holds under Pod Security Standards 'baseline' and 'restricted' profiles).
-// Without CAP_NET_ADMIN, any attempt by a workload process (even running as root UID 0)
-// to inspect, modify, flush, or delete iptables rules or alter routing tables is
-// rejected by the Linux kernel with EPERM ("Operation not permitted").
-// Precondition & Assumption: This guarantee strictly depends on opted-in pods not
-// being granted CAP_NET_ADMIN or privileged execution in their pod spec; a container
-// with CAP_NET_ADMIN in the pod netns can rewrite or delete these rules. Host-side
-// enforcement (tracked in #181) is required to remove this trust assumption.
-func (p *portalPlugin) installIptablesRules(netnsPath string) error {
-	var rules [][]string
-
-	// 1. NAT table: DNAT ports 80 and 443 to node proxy
-	rules = append(rules,
-		[]string{"-t", "nat", "-N", "PORTAL_OUTPUT"},
-		[]string{"-t", "nat", "-F", "PORTAL_OUTPUT"},
-		[]string{"-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-j", "PORTAL_OUTPUT"},
-		[]string{"-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-j", "PORTAL_OUTPUT"},
-		[]string{"-t", "nat", "-A", "PORTAL_OUTPUT", "-o", "lo", "-j", "RETURN"},
-		[]string{"-t", "nat", "-A", "PORTAL_OUTPUT", "-p", "tcp", "--dport", "80", "-j", "DNAT", "--to-destination", net.JoinHostPort(p.cfg.proxyHost, p.cfg.proxyPort)},
-		[]string{"-t", "nat", "-A", "PORTAL_OUTPUT", "-p", "tcp", "--dport", "443", "-j", "DNAT", "--to-destination", net.JoinHostPort(p.cfg.proxyHost, p.cfg.proxyHTTPSPort)},
-	)
-
-	// 2. Filter table: Egress isolation and default-deny
-	rules = append(rules,
-		[]string{"-t", "filter", "-N", "PORTAL_EGRESS"},
-		[]string{"-t", "filter", "-F", "PORTAL_EGRESS"},
-		[]string{"-t", "filter", "-D", "OUTPUT", "-j", "PORTAL_EGRESS"},
-		[]string{"-t", "filter", "-A", "OUTPUT", "-j", "PORTAL_EGRESS"},
-		[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-o", "lo", "-j", "ACCEPT"},
-		[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
-		[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-d", p.cfg.proxyHost, "-p", "tcp", "--dport", p.cfg.proxyPort, "-j", "ACCEPT"},
-		[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-d", p.cfg.proxyHost, "-p", "tcp", "--dport", p.cfg.proxyHTTPSPort, "-j", "ACCEPT"},
-	)
-
-	for _, dns := range p.cfg.dnsServers {
-		rules = append(rules,
-			[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-d", dns, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
-			[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-d", dns, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
-		)
+func (p *portalPlugin) executeIptables(ruleCmds [][]string) error {
+	if p.runIptables != nil {
+		return p.runIptables(ruleCmds)
 	}
+	return runIptables(ruleCmds)
+}
 
-	rules = append(rules,
-		[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-p", "tcp", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
-		[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-p", "udp", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
-		[]string{"-t", "filter", "-A", "PORTAL_EGRESS", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
-	)
+func (p *portalPlugin) installHostIptablesRules(hostIface string) error {
+	rules := buildHostIptablesRules(hostIface, p.cfg.proxyHost, p.cfg.proxyPort, p.cfg.proxyHTTPSPort, p.cfg.dnsServers)
+	return p.executeIptables(rules)
+}
 
-	return applyIptablesRules(netnsPath, rules)
+func (p *portalPlugin) removeHostIptablesRules(hostIface string) error {
+	rules := buildHostCleanupRules(hostIface)
+	return p.executeIptables(rules)
 }
 
 func (p *portalPlugin) configurePod(ctx context.Context, pod *api.PodSandbox) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	log := klog.FromContext(ctx)
 	log.Info("Configuring pod sandbox", "pod", podID(pod), "id", pod.Id)
+
+	runtimeClass := getRuntimeClass(pod)
+	if !isSupportedRuntime(runtimeClass) {
+		return fmt.Errorf("unsupported runtime class %q for opted-in pod %s: refusing to start unprotected pod", runtimeClass, podID(pod))
+	}
 
 	netnsPath, err := p.findNetnsPath(pod)
 	if err != nil {
 		return fmt.Errorf("unable to determine netns path for pod %s: %w", podID(pod), err)
 	}
 
-	if err := p.installIptablesRules(netnsPath); err != nil {
-		return fmt.Errorf("install iptables rules for pod %s: %w", podID(pod), err)
+	hostIface, podIP, err := p.findHostInterface(ctx, pod, netnsPath)
+	if err != nil {
+		return fmt.Errorf("unable to find host interface for pod %s: %w", podID(pod), err)
 	}
 
-	log.Info("Successfully installed iptables rules in pod", "pod", podID(pod), "netns", netnsPath)
+	if err := p.installHostIptablesRules(hostIface); err != nil {
+		return fmt.Errorf("install host iptables rules on %s for pod %s: %w", hostIface, podID(pod), err)
+	}
+
+	p.mu.Lock()
+	p.pods[pod.Id] = podNetworkState{
+		hostInterface: hostIface,
+		podIP:         podIP,
+		runtimeClass:  runtimeClass,
+	}
+	p.mu.Unlock()
+
+	log.Info("Successfully installed host-side iptables rules for pod", "pod", podID(pod), "hostIface", hostIface, "podIP", podIP, "runtimeClass", runtimeClass)
 	return nil
+}
+
+func (p *portalPlugin) cleanupPod(ctx context.Context, pod *api.PodSandbox) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	log := klog.FromContext(ctx)
+	if pod == nil {
+		return nil
+	}
+
+	p.mu.Lock()
+	state, found := p.pods[pod.Id]
+	if found {
+		delete(p.pods, pod.Id)
+	}
+	p.mu.Unlock()
+
+	var hostIface string
+	if found {
+		hostIface = state.hostInterface
+	} else {
+		netnsPath, err := p.findNetnsPath(pod)
+		if err != nil {
+			log.V(1).Info("Could not resolve netns path during cleanup", "pod", podID(pod), "err", err)
+		} else {
+			iface, _, err := p.findHostInterface(ctx, pod, netnsPath)
+			if err != nil {
+				log.V(1).Info("Could not find host interface during cleanup", "pod", podID(pod), "err", err)
+			} else {
+				hostIface = iface
+			}
+		}
+	}
+
+	if hostIface != "" {
+		log.Info("Cleaning up host-side iptables rules for pod", "pod", podID(pod), "hostIface", hostIface)
+		if err := p.removeHostIptablesRules(hostIface); err != nil {
+			return fmt.Errorf("clean up host iptables rules on %s for pod %s: %w", hostIface, podID(pod), err)
+		}
+	}
+	return nil
+}
+
+func (p *portalPlugin) StopPodSandbox(ctx context.Context, pod *api.PodSandbox) error {
+	if !p.matchesPod(pod) {
+		return nil
+	}
+	return p.cleanupPod(ctx, pod)
+}
+
+func (p *portalPlugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) error {
+	if !p.matchesPod(pod) {
+		return nil
+	}
+	return p.cleanupPod(ctx, pod)
 }
 
 func (p *portalPlugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
@@ -295,6 +542,14 @@ func (p *portalPlugin) CreateContainer(ctx context.Context, pod *api.PodSandbox,
 		return nil, nil, nil
 	}
 
+	runtimeClass := getRuntimeClass(pod)
+	if !isSupportedRuntime(runtimeClass) {
+		return nil, nil, fmt.Errorf("unsupported runtime class %q for opted-in pod %s: refusing to start unprotected pod", runtimeClass, podID(pod))
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	log := klog.FromContext(ctx)
 	log.Info("Intercepting container creation", "pod", podID(pod), "container", ctr.Name)
 
@@ -326,7 +581,10 @@ func main() {
 		klog.Fatalf("Invalid configuration: %v", err)
 	}
 
-	p := &portalPlugin{cfg: cfg}
+	p := &portalPlugin{
+		cfg:  cfg,
+		pods: make(map[string]podNetworkState),
+	}
 
 	s, err := stub.New(p,
 		stub.WithPluginName(cfg.pluginName),
