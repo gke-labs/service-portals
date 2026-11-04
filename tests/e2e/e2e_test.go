@@ -1322,12 +1322,10 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 
 	// Build and load images
 	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
-	h.DockerBuild("init-service-portals:e2e", filepath.Join(gitRoot, "images/init-service-portals/Dockerfile"), gitRoot)
 	h.DockerBuild("portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/portal-nri-plugin/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 
 	h.KindLoad("all-in-one-portal:e2e")
-	h.KindLoad("init-service-portals:e2e")
 	h.KindLoad("portal-nri-plugin:e2e")
 	h.KindLoad("toolbox:e2e")
 
@@ -1465,11 +1463,10 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       hostNetwork: true
       initContainers:
-      - name: init-ca
-        image: init-service-portals:e2e
+      - name: node-init
+        image: portal-nri-plugin:e2e
         imagePullPolicy: Never
-        command: ["/usr/local/bin/init-service-portals"]
-        args: ["-cert-dir=/etc/service-portal/ca", "-key-dir=/etc/service-portal/ca", "-socket-dir=/run/service-portal", "-chown-uid=65532", "-chown-gid=65532"]
+        args: ["init", "-ca-dir=/etc/service-portal/ca", "-socket-dir=/run/service-portal", "-proxy-uid=65532", "-proxy-gid=65532"]
         volumeMounts:
         - name: ca-volume
           mountPath: /etc/service-portal/ca
