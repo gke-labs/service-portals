@@ -147,20 +147,7 @@ spec:
   - name: toolbox
     image: toolbox:e2e
     imagePullPolicy: Never
-    command: ["/app/toolbox", "client", "https://backend"]
-    env:
-    - name: HTTPS_PROXY
-      value: "http://service-portal:80"
-    - name: SSL_CERT_FILE
-      value: "/etc/ssl/certs/service-portal-ca.crt"
-    volumeMounts:
-    - name: ca-cert
-      mountPath: /etc/ssl/certs/service-portal-ca.crt
-      subPath: tls.crt
-  volumes:
-  - name: ca-cert
-    secret:
-      secretName: service-portal-ca
+    command: ["/app/toolbox", "client", "http://service-portal/"]
   restartPolicy: Never
 `
 	h.KubectlApplyContent(clientManifest)
@@ -1052,6 +1039,26 @@ func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendI
 			t.Fatalf("expected su to UID 1337 to fail, but it succeeded: %s", outSu)
 		}
 		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
+	})
+
+	// Case 7: CONNECT method rejected with 405 Method Not Allowed
+	t.Run("Connect_MethodNotAllowed_405", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "connect", targetHost+":80", targetHost+":443", "5s")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("expected CONNECT probe to succeed, got: %v (output: %s)", err, out)
+		}
+		outStr := strings.TrimSpace(string(out))
+		t.Logf("CONNECT probe output: %s", outStr)
+		if !strings.Contains(outStr, "STATUS 405") {
+			t.Fatalf("expected STATUS 405, got: %s", outStr)
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, targetHost+":443") || strings.Contains(backendLogs, "CONNECT") {
+			t.Fatalf("backend access log contains CONNECT request, request unexpectedly reached backend")
+		}
 	})
 }
 

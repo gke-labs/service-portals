@@ -10,7 +10,7 @@ Service Portals is a credential-swapping, layer-7 intercepting proxy for sandbox
 
 1. **Transparent Sidecar Mode (Recommended)**: The current recommended deployment mode. Uses `init-service-portals` to configure iptables redirection and an ephemeral Root CA, while `all-in-one-portal` intercepts HTTP (:8080) and HTTPS (:8443) traffic, minting dynamic TLS certificates and injecting credentials defined in `PortalRule` YAML files (`k8s/sidecar.yaml`).
 2. **Per-Node NRI Mode (In Development, Future Default)**: containerd NRI plugin DaemonSet with host-side veth/tap enforcement. Target single mode of operation.
-3. **Other Modes (Legacy / Historical)**: Explicit Service mode (legacy), explicit HTTP proxy mode (legacy), and application-level interception (historical spike; not pursued). Scheduled for removal once NRI meets the acceptance bar.
+3. **Other Modes (Legacy / Historical)**: Explicit Service mode (legacy) and application-level interception (historical spike; not pursued). Scheduled for removal once NRI meets the acceptance bar.
 
 ## Documentation Index
 

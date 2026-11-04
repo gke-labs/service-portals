@@ -14,7 +14,7 @@
 Historically, `service-portals` accumulated at least five different ways to place the proxy in the traffic path:
 1. **Transparent sidecar with an init container** (the current recommended mode)
 2. **Explicit Service mode** (`k8s/manifests.yaml`, single-target portal binaries)
-3. **Explicit `HTTP_PROXY`/`CONNECT` mode** (`cmd/service-portal`)
+3. **Explicit `HTTP_PROXY`/`CONNECT` mode** (`cmd/service-portal`; removed in #218)
 4. **Application-level interception** (spiked in [#164](https://github.com/gke-labs/service-portals/pull/164); not pursued, [#214](https://github.com/gke-labs/service-portals/issues/214)/[#215](https://github.com/gke-labs/service-portals/pull/215))
 5. **Per-node containerd NRI plugin** ([#198](https://github.com/gke-labs/service-portals/pull/198) and follow-ups)
 
@@ -35,7 +35,7 @@ During the transition, the transparent sidecar remains the **only recommended de
 
 Once the NRI implementation meets the acceptance bar below on `main`, the remaining modes and legacy components will be removed in separate, focused pull requests:
 - Delete explicit Service mode and the per-service portal binaries (`gemini-portal/`, `anthropic-portal/`, `github-portal/`, `cmd/service-portal/`, and associated manifests).
-- Delete explicit `HTTP_PROXY`/`CONNECT` mode (or retain solely as a tested internal mechanism if required by NRI).
+- Delete explicit `HTTP_PROXY`/`CONNECT` mode (completed in #218; rejected with 405).
 - Delete the init-container sidecar mode and `init-service-portals` once NRI covers its use cases.
 - Remove corresponding docs, manifests, and e2e tests.
 - Update [AGENTS.md](../AGENTS.md).
