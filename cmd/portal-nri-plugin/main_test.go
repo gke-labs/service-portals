@@ -15,11 +15,18 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/containerd/nri/pkg/api"
+	"github.com/gke-labs/service-portals/pkg/portals"
 )
 
 func TestMatchesPod(t *testing.T) {
@@ -332,123 +339,6 @@ func TestRuntimeClassValidation(t *testing.T) {
 	})
 }
 
-func TestParsePeerIndex(t *testing.T) {
-	tests := []struct {
-		name        string
-		output      string
-		expectedIdx int
-		expectError bool
-	}{
-		{
-			name: "standard veth link output",
-			output: `1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
-2: eth0@if12: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether ae:c6:af:5b:db:bd brd ff:ff:ff:ff:ff:ff link-netnsid 0`,
-			expectedIdx: 12,
-			expectError: false,
-		},
-		{
-			name: "output with peer index 3",
-			output: `1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
-3: veth-pod@if4: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN\    link/ether e2:12:6a:6f:85:ff brd ff:ff:ff:ff:ff:ff`,
-			expectedIdx: 4,
-			expectError: false,
-		},
-		{
-			name:        "empty output",
-			output:      "",
-			expectedIdx: 0,
-			expectError: true,
-		},
-		{
-			name:        "only loopback interface",
-			output:      `1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00`,
-			expectedIdx: 0,
-			expectError: true,
-		},
-		{
-			name: "interface without @if",
-			output: `1: lo: <LOOPBACK> mtu 65536\    link/loopback 00:00:00:00:00:00
-2: dummy0: <BROADCAST> mtu 1500\    link/ether 00:11:22:33:44:55`,
-			expectedIdx: 0,
-			expectError: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			idx, err := parsePeerIndex(tc.output)
-			if tc.expectError {
-				if err == nil {
-					t.Fatalf("expected error, got idx %d", idx)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if idx != tc.expectedIdx {
-					t.Errorf("parsePeerIndex() = %d, expected %d", idx, tc.expectedIdx)
-				}
-			}
-		})
-	}
-}
-
-func TestParsePodIPv4(t *testing.T) {
-	tests := []struct {
-		name       string
-		output     string
-		expectedIP string
-	}{
-		{
-			name: "standard ip addr output",
-			output: `1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever
-2: eth0    inet 10.244.0.2/24 scope global eth0\       valid_lft forever preferred_lft forever`,
-			expectedIP: "10.244.0.2",
-		},
-		{
-			name:       "empty output",
-			output:     "",
-			expectedIP: "",
-		},
-		{
-			name: "no inet address on eth0",
-			output: `1: lo    inet 127.0.0.1/8 scope host lo
-2: eth0    inet6 fe80::1/64 scope link`,
-			expectedIP: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := parsePodIPv4(tc.output); got != tc.expectedIP {
-				t.Errorf("parsePodIPv4() = %q, expected %q", got, tc.expectedIP)
-			}
-		})
-	}
-}
-
-func TestParseHostInterfaceFromHostLinks(t *testing.T) {
-	hostOutput := `1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
-2: eth0@if17: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether 2a:80:cb:69:ca:7e brd ff:ff:ff:ff:ff:ff link-netnsid 0
-3: veth39223ba4@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000\    link/ether e6:92:b4:60:a3:a2 brd ff:ff:ff:ff:ff:ff link-netns cni-ba64cf27-a133-a927-aa9c-d718866ab4d1
-4: veth2637cd83@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000\    link/ether ee:c5:9f:ab:26:17 brd ff:ff:ff:ff:ff:ff link-netns cni-829a0cf9-91b6-d178-a98a-3870398aa3c6`
-
-	t.Run("matching netns basename", func(t *testing.T) {
-		got := parseHostInterfaceFromHostLinks(hostOutput, "cni-ba64cf27-a133-a927-aa9c-d718866ab4d1")
-		expected := "veth39223ba4"
-		if got != expected {
-			t.Errorf("expected %q, got %q", expected, got)
-		}
-	})
-
-	t.Run("unmatched netns basename", func(t *testing.T) {
-		got := parseHostInterfaceFromHostLinks(hostOutput, "cni-nonexistent")
-		if got != "" {
-			t.Errorf("expected empty string, got %q", got)
-		}
-	})
-}
-
 func TestBuildHostIptablesRules(t *testing.T) {
 	hostIface := "veth12345"
 	proxyHost := "192.168.1.10"
@@ -596,5 +486,76 @@ func TestPodCleanupIdempotent(t *testing.T) {
 	// Second cleanup (RemovePodSandbox) is a safe no-op
 	if err := p.RemovePodSandbox(ctx, pod); err != nil {
 		t.Fatalf("second RemovePodSandbox failed: %v", err)
+	}
+}
+
+func TestNotifyPodUpdate(t *testing.T) {
+	var receivedMethod, receivedPath string
+	var receivedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedPath = r.URL.Path
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	p := &portalPlugin{
+		cfg: pluginConfig{
+			adminURL: server.URL,
+		},
+		pods:       make(map[string]podNetworkState),
+		activePods: make(map[string]portals.PodInfo),
+	}
+
+	ctx := t.Context()
+	info := portals.PodInfo{
+		UID:       "test-uid",
+		Namespace: "default",
+		Name:      "test-pod",
+		IPs:       []string{"10.244.0.5"},
+	}
+
+	if err := p.notifyPodUpdate(ctx, http.MethodPost, "/api/v1/pods", info); err != nil {
+		t.Fatalf("notifyPodUpdate failed: %v", err)
+	}
+
+	if receivedMethod != http.MethodPost || receivedPath != "/api/v1/pods" {
+		t.Errorf("unexpected method %s or path %s", receivedMethod, receivedPath)
+	}
+	var decoded portals.PodInfo
+	if err := json.Unmarshal(receivedBody, &decoded); err != nil || decoded.UID != "test-uid" {
+		t.Errorf("unexpected payload: %s", string(receivedBody))
+	}
+
+	// Test non-2xx status code returns error
+	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal failure", http.StatusInternalServerError)
+	}))
+	defer errorServer.Close()
+	p.cfg.adminURL = errorServer.URL
+	if err := p.notifyPodUpdate(ctx, http.MethodPost, "/api/v1/pods", info); err == nil {
+		t.Errorf("expected notifyPodUpdate to fail when admin server returns 500, got nil")
+	}
+
+	// Test Unix domain socket
+	sockDir := t.TempDir()
+	sockPath := filepath.Join(sockDir, "test.sock")
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen on unix socket: %v", err)
+	}
+	defer l.Close()
+	udsServer := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	go func() { _ = udsServer.Serve(l) }()
+	defer udsServer.Close()
+
+	p.cfg.adminURL = "unix://" + sockPath
+	if err := p.notifyPodUpdate(ctx, http.MethodPost, "/api/v1/pods", info); err != nil {
+		t.Errorf("expected notifyPodUpdate over UDS to succeed, got %v", err)
 	}
 }

@@ -680,3 +680,163 @@ spec:
 		}
 	})
 }
+
+func TestRuleRouterWithPodMap(t *testing.T) {
+	rulesDir := t.TempDir()
+	caCertPath, caKeyPath := createTestCA(t)
+
+	// Mock backends
+	backendServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Received-Auth", r.Header.Get("Authorization"))
+		w.Header().Set("X-Received-Identity", r.Header.Get("X-Consumer-Identity"))
+		w.Header().Set("X-Received-Pod", r.Header.Get("X-Forwarded-Client-Pod"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("backend-ok"))
+	}))
+	defer backendServer.Close()
+
+	ruleBackend := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: backend
+spec:
+  host: backend.portal
+  rewriteUrl: %s
+  authToken: backend-secret-token
+`, backendServer.URL)
+
+	ruleAttributed := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: attributed
+spec:
+  host: attributed.portal
+  rewriteUrl: %s
+  authToken: attributed-secret-token
+  attributionHeaders: true
+`, backendServer.URL)
+
+	ruleRestricted := fmt.Sprintf(`
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: restricted
+spec:
+  host: restricted.portal
+  rewriteUrl: %s
+  authToken: restricted-secret-token
+`, backendServer.URL)
+
+	if err := os.WriteFile(filepath.Join(rulesDir, "backend.yaml"), []byte(ruleBackend), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "attributed.yaml"), []byte(ruleAttributed), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rulesDir, "restricted.yaml"), []byte(ruleRestricted), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+
+	pm := NewPodMap()
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       "uid-bound",
+		Namespace: "default",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.0.10"},
+	})
+	_ = pm.Bind("uid-bound", "alice", "backend,attributed")
+
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       "uid-unbound",
+		Namespace: "default",
+		Name:      "unbound-pod",
+		IPs:       []string{"10.244.0.20"},
+	})
+
+	rr := NewRuleRouter(rulesDir, nil, caCertPath, caKeyPath, 0, nil)
+	rr.SetPodMap(pm)
+	if err := rr.loadRules(); err != nil {
+		t.Fatalf("failed to load rules: %v", err)
+	}
+
+	t.Run("unknown caller is rejected with 403", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "backend.portal"
+		req.RemoteAddr = "10.244.0.99:12345"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for unknown caller, got: %d", rec.Code)
+		}
+	})
+
+	t.Run("unbound caller is rejected with 403 (fail closed)", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "backend.portal"
+		req.RemoteAddr = "10.244.0.20:12345"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for unbound caller, got: %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "pod is unbound") {
+			t.Errorf("expected body to mention pod is unbound, got: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("bound caller with default rule does not leak attribution headers upstream", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "backend.portal"
+		req.RemoteAddr = "10.244.0.10:12345"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for bound caller, got: %d", rec.Code)
+		}
+		if rec.Header().Get("X-Received-Auth") != "Bearer backend-secret-token" {
+			t.Errorf("missing or incorrect swapped token: %s", rec.Header().Get("X-Received-Auth"))
+		}
+		if rec.Header().Get("X-Received-Identity") != "" {
+			t.Errorf("attribution header leaked without opt-in: %s", rec.Header().Get("X-Received-Identity"))
+		}
+		if rec.Header().Get("X-Received-Pod") != "" {
+			t.Errorf("pod identity header leaked without opt-in: %s", rec.Header().Get("X-Received-Pod"))
+		}
+	})
+
+	t.Run("bound caller with opt-in rule sends attribution headers upstream", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "attributed.portal"
+		req.RemoteAddr = "10.244.0.10:12345"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for bound caller on attributed rule, got: %d", rec.Code)
+		}
+		if rec.Header().Get("X-Received-Auth") != "Bearer attributed-secret-token" {
+			t.Errorf("missing or incorrect swapped token: %s", rec.Header().Get("X-Received-Auth"))
+		}
+		if rec.Header().Get("X-Received-Identity") != "alice" {
+			t.Errorf("expected X-Consumer-Identity to be alice, got: %s", rec.Header().Get("X-Received-Identity"))
+		}
+		if rec.Header().Get("X-Received-Pod") != "default/bound-pod" {
+			t.Errorf("expected X-Forwarded-Client-Pod to be default/bound-pod, got: %s", rec.Header().Get("X-Received-Pod"))
+		}
+	})
+
+	t.Run("bound caller accessing rule not in its policy is denied with 403", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Host = "restricted.portal"
+		req.RemoteAddr = "10.244.0.10:12345"
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden when policy does not permit host, got: %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "host not allowed by pod policy") {
+			t.Errorf("expected body to mention host not allowed by pod policy, got: %s", rec.Body.String())
+		}
+	})
+}
