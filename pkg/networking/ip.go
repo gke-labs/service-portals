@@ -73,6 +73,82 @@ func ParsePodIPv4(output string) string {
 	return ""
 }
 
+// ParsePodIPv6 extracts the first non-loopback, non-link-local IPv6 address from "ip -o -6 addr show" output.
+func ParsePodIPv6(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "inet6" && i+1 < len(fields) {
+				if ip, _, err := net.ParseCIDR(fields[i+1]); err == nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+					return ip.String()
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// DiscoverPodIPs extracts pod IPv4 and IPv6 addresses from podIPs or from the netns via nsenter.
+func DiscoverPodIPs(ctx context.Context, podIPs []string, netnsPath string) (string, string, error) {
+	log := klog.FromContext(ctx)
+	var podIPv4, podIPv6 string
+	for _, s := range podIPs {
+		if ip := net.ParseIP(s); ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+			if ip.To4() != nil && podIPv4 == "" {
+				podIPv4 = s
+			} else if ip.To4() == nil && podIPv6 == "" {
+				podIPv6 = s
+			}
+		}
+	}
+
+	if (podIPv4 == "" || podIPv6 == "") && netnsPath != "" {
+		if podIPv4 == "" {
+			ipCmd := exec.Command("nsenter", "--net="+netnsPath, "ip", "-o", "-4", "addr", "show")
+			if ipOut, err := ipCmd.CombinedOutput(); err != nil {
+				log.Error(err, "Could not determine pod IPv4 via nsenter", "output", string(ipOut))
+				return "", "", fmt.Errorf("nsenter ip -o -4 addr show: %w (output: %s)", err, ipOut)
+			} else {
+				podIPv4 = ParsePodIPv4(string(ipOut))
+			}
+		}
+		if podIPv6 == "" {
+			ipCmd := exec.Command("nsenter", "--net="+netnsPath, "ip", "-o", "-6", "addr", "show")
+			if ipOut, err := ipCmd.CombinedOutput(); err != nil {
+				log.Error(err, "Could not determine pod IPv6 via nsenter", "output", string(ipOut))
+				return "", "", fmt.Errorf("nsenter ip -o -6 addr show: %w (output: %s)", err, ipOut)
+			} else {
+				podIPv6 = ParsePodIPv6(string(ipOut))
+			}
+		}
+	}
+	return podIPv4, podIPv6, nil
+}
+
+// DiscoverNodeIPv6 finds the first global, non-loopback, non-link-local IPv6 address on the node.
+func DiscoverNodeIPv6() string {
+	hCmd := exec.Command("ip", "-o", "-6", "addr", "show", "scope", "global")
+	if out, err := hCmd.CombinedOutput(); err != nil {
+		klog.V(2).Infof("Could not determine node IPv6 via ip command: %v", err)
+	} else if ip := ParsePodIPv6(string(out)); ip != "" {
+		return ip
+	}
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok {
+			ip := ipNet.IP
+			if ip.To4() == nil && ip.To16() != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+				return ip.String()
+			}
+		}
+	}
+	return ""
+}
+
 // ParseHostInterfaceFromHostLinks matches a host-side interface to a pod's network namespace link.
 func ParseHostInterfaceFromHostLinks(output, netnsBasename string) string {
 	for _, line := range strings.Split(output, "\n") {
@@ -124,19 +200,9 @@ func FindHostInterface(ctx context.Context, podIPs []string, netnsPath string) (
 		return "", "", fmt.Errorf("could not identify host-side interface for netns %s", netnsPath)
 	}
 
-	var podIP string
-	if len(podIPs) > 0 && podIPs[0] != "" {
-		podIP = podIPs[0]
+	podIPv4, _, err := DiscoverPodIPs(ctx, podIPs, netnsPath)
+	if err != nil {
+		return "", "", err
 	}
-	if podIP == "" {
-		ipCmd := exec.Command("nsenter", "--net="+netnsPath, "ip", "-o", "-4", "addr", "show")
-		ipOut, err := ipCmd.CombinedOutput()
-		if err != nil {
-			log.V(1).Info("Could not determine pod IPv4 via nsenter", "err", err)
-		} else {
-			podIP = ParsePodIPv4(string(ipOut))
-		}
-	}
-
-	return hostIface, podIP, nil
+	return hostIface, podIPv4, nil
 }

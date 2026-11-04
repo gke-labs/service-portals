@@ -110,6 +110,72 @@ func TestParsePodIPv4(t *testing.T) {
 	}
 }
 
+func TestParsePodIPv6(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		expectedIP string
+	}{
+		{
+			name: "standard ip -6 addr output with global and link-local",
+			output: `1: lo    inet6 ::1/128 scope host \       valid_lft forever preferred_lft forever
+2: eth0    inet6 fd00:10:244::6/64 scope global dynamic mngtmpaddr \       valid_lft 86395sec preferred_lft 14395sec
+2: eth0    inet6 fe80::42:aff:fef4:6/64 scope link \       valid_lft forever preferred_lft forever`,
+			expectedIP: "fd00:10:244::6",
+		},
+		{
+			name:       "empty output",
+			output:     "",
+			expectedIP: "",
+		},
+		{
+			name: "only link-local on eth0",
+			output: `1: lo    inet6 ::1/128 scope host
+2: eth0    inet6 fe80::42:aff:fef4:6/64 scope link`,
+			expectedIP: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ip := ParsePodIPv6(tc.output)
+			if ip != tc.expectedIP {
+				t.Errorf("expected pod IPv6 %q, got %q", tc.expectedIP, ip)
+			}
+		})
+	}
+}
+
+func TestDiscoverPodIPs(t *testing.T) {
+	t.Run("dual-stack IPs from slice", func(t *testing.T) {
+		ips := []string{"10.244.0.5", "fd00:10:244::5"}
+		v4, v6, err := DiscoverPodIPs(t.Context(), ips, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if v4 != "10.244.0.5" {
+			t.Errorf("expected v4 10.244.0.5, got %q", v4)
+		}
+		if v6 != "fd00:10:244::5" {
+			t.Errorf("expected v6 fd00:10:244::5, got %q", v6)
+		}
+	})
+
+	t.Run("ipv4 only from slice", func(t *testing.T) {
+		ips := []string{"10.244.0.5"}
+		v4, v6, err := DiscoverPodIPs(t.Context(), ips, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if v4 != "10.244.0.5" {
+			t.Errorf("expected v4 10.244.0.5, got %q", v4)
+		}
+		if v6 != "" {
+			t.Errorf("expected empty v6, got %q", v6)
+		}
+	})
+}
+
 func TestParseHostInterfaceFromHostLinks(t *testing.T) {
 	hostLinkOutput := `1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
 11: veth04ae4f5@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master cbr0 state UP mode DEFAULT group default \    link/ether 8e:7b:42:01:23:45 brd ff:ff:ff:ff:ff:ff link-netns cni-12345

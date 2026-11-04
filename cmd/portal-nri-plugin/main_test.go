@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/containerd/nri/pkg/api"
+	"github.com/gke-labs/service-portals/pkg/networking"
 	"github.com/gke-labs/service-portals/pkg/portals"
 )
 
@@ -268,7 +269,6 @@ func TestRuntimeClassValidation(t *testing.T) {
 			proxyHost:      "127.0.0.1",
 			proxyPort:      "8080",
 			proxyHTTPSPort: "8443",
-			dnsServers:     []string{"10.96.0.10"},
 			caCertPath:     "/etc/service-portal/ca/tls.crt",
 		},
 		pods: make(map[string]podNetworkState),
@@ -344,9 +344,9 @@ func TestBuildHostIptablesRules(t *testing.T) {
 	proxyHost := "192.168.1.10"
 	proxyPort := "8080"
 	proxyHTTPSPort := "8443"
-	dnsServers := []string{"10.96.0.10", "10.96.0.11"}
+	proxyDNSPort := "53"
 
-	rules := buildHostIptablesRules(hostIface, proxyHost, proxyPort, proxyHTTPSPort, dnsServers)
+	rules := buildHostIptablesRules(hostIface, proxyHost, proxyPort, proxyHTTPSPort, proxyDNSPort)
 
 	// Verify required chains and jumps
 	prChain := "PORTAL_PR_" + hostIface
@@ -357,8 +357,10 @@ func TestBuildHostIptablesRules(t *testing.T) {
 	hasForwardJump := false
 	hasDNAT80 := false
 	hasDNAT443 := false
-	hasDNS1 := false
-	hasDNS2 := false
+	hasDNAT53UDP := false
+	hasDNAT53TCP := false
+	hasAcceptProxyDNSUDP := false
+	hasAcceptProxyDNSTCP := false
 	hasReject := false
 
 	for _, r := range rules {
@@ -378,11 +380,17 @@ func TestBuildHostIptablesRules(t *testing.T) {
 		if strings.Contains(ruleStr, "--dport 443 -j DNAT --to-destination 192.168.1.10:8443") {
 			hasDNAT443 = true
 		}
-		if strings.Contains(ruleStr, "-d 10.96.0.10 -p udp --dport 53 -j ACCEPT") {
-			hasDNS1 = true
+		if strings.Contains(ruleStr, "-p udp --dport 53 -j DNAT --to-destination 192.168.1.10:53") {
+			hasDNAT53UDP = true
 		}
-		if strings.Contains(ruleStr, "-d 10.96.0.11 -p tcp --dport 53 -j ACCEPT") {
-			hasDNS2 = true
+		if strings.Contains(ruleStr, "-p tcp --dport 53 -j DNAT --to-destination 192.168.1.10:53") {
+			hasDNAT53TCP = true
+		}
+		if strings.Contains(ruleStr, "-d 192.168.1.10 -p udp --dport 53 -j ACCEPT") {
+			hasAcceptProxyDNSUDP = true
+		}
+		if strings.Contains(ruleStr, "-d 192.168.1.10 -p tcp --dport 53 -j ACCEPT") {
+			hasAcceptProxyDNSTCP = true
 		}
 		if strings.Contains(ruleStr, "-j REJECT --reject-with icmp-port-unreachable") {
 			hasReject = true
@@ -404,14 +412,109 @@ func TestBuildHostIptablesRules(t *testing.T) {
 	if !hasDNAT443 {
 		t.Errorf("missing DNAT rule for port 443")
 	}
-	if !hasDNS1 {
-		t.Errorf("missing DNS rule for 10.96.0.10")
+	if !hasDNAT53UDP {
+		t.Errorf("missing DNAT rule for port 53 UDP")
 	}
-	if !hasDNS2 {
-		t.Errorf("missing DNS rule for 10.96.0.11")
+	if !hasDNAT53TCP {
+		t.Errorf("missing DNAT rule for port 53 TCP")
+	}
+	if !hasAcceptProxyDNSUDP {
+		t.Errorf("missing accept rule for proxy DNS UDP")
+	}
+	if !hasAcceptProxyDNSTCP {
+		t.Errorf("missing accept rule for proxy DNS TCP")
 	}
 	if !hasReject {
 		t.Errorf("missing default-deny REJECT rule")
+	}
+}
+
+func TestBuildHostIp6tablesRules(t *testing.T) {
+	hostIface := "veth12345"
+	proxyHostV6 := "fd00:10:244::1"
+	proxyPort := "8080"
+	proxyHTTPSPort := "8443"
+	proxyDNSPort := "53"
+
+	rules := buildHostIp6tablesRules(hostIface, proxyHostV6, proxyPort, proxyHTTPSPort, proxyDNSPort)
+
+	prChain := "PORTAL_PR_" + hostIface
+	egChain := "PORTAL_EG_" + hostIface
+
+	hasPrJump := false
+	hasInputJump := false
+	hasForwardJump := false
+	hasDNAT80 := false
+	hasDNAT443 := false
+	hasDNAT53UDP := false
+	hasDNAT53TCP := false
+	hasNDP := false
+	hasAcceptProxyDNS := false
+	hasRejectV6 := false
+
+	for _, r := range rules {
+		ruleStr := strings.Join(r, " ")
+		if strings.Contains(ruleStr, "PREROUTING 1 -i "+hostIface+" -j "+prChain) {
+			hasPrJump = true
+		}
+		if strings.Contains(ruleStr, "INPUT 1 -i "+hostIface+" -j "+egChain) {
+			hasInputJump = true
+		}
+		if strings.Contains(ruleStr, "FORWARD 1 -i "+hostIface+" -j "+egChain) {
+			hasForwardJump = true
+		}
+		if strings.Contains(ruleStr, "--dport 80 -j DNAT --to-destination [fd00:10:244::1]:8080") {
+			hasDNAT80 = true
+		}
+		if strings.Contains(ruleStr, "--dport 443 -j DNAT --to-destination [fd00:10:244::1]:8443") {
+			hasDNAT443 = true
+		}
+		if strings.Contains(ruleStr, "-p udp --dport 53 -j DNAT --to-destination [fd00:10:244::1]:53") {
+			hasDNAT53UDP = true
+		}
+		if strings.Contains(ruleStr, "-p tcp --dport 53 -j DNAT --to-destination [fd00:10:244::1]:53") {
+			hasDNAT53TCP = true
+		}
+		if strings.Contains(ruleStr, "-p ipv6-icmp --icmpv6-type 135 -j ACCEPT") {
+			hasNDP = true
+		}
+		if strings.Contains(ruleStr, "-d fd00:10:244::1 -p udp --dport 53 -j ACCEPT") {
+			hasAcceptProxyDNS = true
+		}
+		if strings.Contains(ruleStr, "-j REJECT --reject-with icmp6-port-unreachable") {
+			hasRejectV6 = true
+		}
+	}
+
+	if !hasPrJump {
+		t.Errorf("missing PREROUTING jump to %s", prChain)
+	}
+	if !hasInputJump {
+		t.Errorf("missing INPUT jump to %s", egChain)
+	}
+	if !hasForwardJump {
+		t.Errorf("missing FORWARD jump to %s", egChain)
+	}
+	if !hasDNAT80 {
+		t.Errorf("missing IPv6 DNAT rule for port 80")
+	}
+	if !hasDNAT443 {
+		t.Errorf("missing IPv6 DNAT rule for port 443")
+	}
+	if !hasDNAT53UDP {
+		t.Errorf("missing IPv6 DNAT rule for port 53 UDP")
+	}
+	if !hasDNAT53TCP {
+		t.Errorf("missing IPv6 DNAT rule for port 53 TCP")
+	}
+	if !hasNDP {
+		t.Errorf("missing IPv6 NDP accept rule (icmpv6 135)")
+	}
+	if !hasAcceptProxyDNS {
+		t.Errorf("missing accept rule for proxy DNS")
+	}
+	if !hasRejectV6 {
+		t.Errorf("missing IPv6 default-deny REJECT rule with icmp6-port-unreachable")
 	}
 }
 
@@ -557,5 +660,105 @@ func TestNotifyPodUpdate(t *testing.T) {
 	p.cfg.adminURL = "unix://" + sockPath
 	if err := p.notifyPodUpdate(ctx, http.MethodPost, "/api/v1/pods", info); err != nil {
 		t.Errorf("expected notifyPodUpdate over UDS to succeed, got %v", err)
+	}
+}
+
+func TestConfigurePodDualStack(t *testing.T) {
+	var v4Rules [][]string
+	var v6Rules [][]string
+
+	p := &portalPlugin{
+		cfg: pluginConfig{
+			proxyHost:      "192.168.1.10",
+			proxyHostV6:    "fd00:10:244::1",
+			proxyPort:      "8080",
+			proxyHTTPSPort: "8443",
+			proxyDNSPort:   "53",
+		},
+		pods:       make(map[string]podNetworkState),
+		activePods: make(map[string]portals.PodInfo),
+		runIptables: func(rules [][]string) error {
+			v4Rules = append(v4Rules, rules...)
+			return nil
+		},
+		runIp6tables: func(rules [][]string) error {
+			v6Rules = append(v6Rules, rules...)
+			return nil
+		},
+	}
+
+	pod := &api.PodSandbox{
+		Id:        "dual-pod-1",
+		Uid:       "uid-dual-1",
+		Namespace: "default",
+		Name:      "dual-pod",
+		Labels: map[string]string{
+			interceptLabelKey: interceptLabelVal,
+		},
+		Ips: []string{"10.244.0.5", "fd00:10:244::5"},
+		Linux: &api.LinuxPodSandbox{
+			Namespaces: []*api.LinuxNamespace{
+				{
+					Type: "network",
+					Path: "/proc/1/ns/net",
+				},
+			},
+		},
+	}
+
+	// Mock findHostInterface
+	hostIface := "veth-dual"
+	podIPv4, podIPv6, err := networking.DiscoverPodIPs(t.Context(), pod.Ips, "")
+	if err != nil {
+		t.Fatalf("unexpected DiscoverPodIPs error: %v", err)
+	}
+	if podIPv4 != "10.244.0.5" || podIPv6 != "fd00:10:244::5" {
+		t.Fatalf("unexpected DiscoverPodIPs result: v4=%q v6=%q", podIPv4, podIPv6)
+	}
+
+	if err := p.installHostIptablesRules(hostIface); err != nil {
+		t.Fatalf("installHostIptablesRules failed: %v", err)
+	}
+	if err := p.installHostIp6tablesRules(hostIface); err != nil {
+		t.Fatalf("installHostIp6tablesRules failed: %v", err)
+	}
+
+	// Verify missing proxyHostV6 returns explicit error
+	pNoV6 := &portalPlugin{
+		cfg: pluginConfig{
+			proxyHost: "192.168.1.10",
+		},
+	}
+	if err := pNoV6.installHostIp6tablesRules(hostIface); err == nil || !strings.Contains(err.Error(), "set PROXY_HOST_V6") {
+		t.Errorf("expected error containing 'set PROXY_HOST_V6', got: %v", err)
+	}
+
+	if len(v4Rules) == 0 {
+		t.Errorf("expected IPv4 rules to be installed, got none")
+	}
+	if len(v6Rules) == 0 {
+		t.Errorf("expected IPv6 rules to be installed, got none")
+	}
+
+	// Verify cleanup rules
+	var cleanupV4 [][]string
+	var cleanupV6 [][]string
+	p.runIptables = func(rules [][]string) error {
+		cleanupV4 = append(cleanupV4, rules...)
+		return nil
+	}
+	p.runIp6tables = func(rules [][]string) error {
+		cleanupV6 = append(cleanupV6, rules...)
+		return nil
+	}
+
+	if err := p.removeHostIptablesRules(hostIface); err != nil {
+		t.Fatalf("removeHostIptablesRules failed: %v", err)
+	}
+	if len(cleanupV4) == 0 {
+		t.Errorf("expected IPv4 cleanup rules, got none")
+	}
+	if len(cleanupV6) == 0 {
+		t.Errorf("expected IPv6 cleanup rules, got none")
 	}
 }
