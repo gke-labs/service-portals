@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -897,7 +898,7 @@ func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendI
 	// Case 3: Non-intercepted port (must be rejected by egress filter)
 	t.Run("NonInterceptedPort_HTTP_8080", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "-qO-", "http://backend:8080/non-intercepted-8080")
+			"wget", "-T", "5", "-qO-", "http://"+backendIPv4ClusterIP+":8080/non-intercepted-8080")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("expected non-intercepted port HTTP request to fail, but it succeeded: %s", out)
@@ -1330,6 +1331,15 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 	h.KindLoad("portal-nri-plugin:e2e")
 	h.KindLoad("toolbox:e2e")
 
+	serviceIPFamilies := ""
+	if h.IsDualStack() {
+		serviceIPFamilies = `
+  ipFamilies:
+  - IPv4
+  - IPv6
+  ipFamilyPolicy: RequireDualStack`
+	}
+
 	// Deploy Backend Service and Deployment
 	backendManifest := `
 apiVersion: apps/v1
@@ -1360,7 +1370,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: backend
-spec:
+spec:` + serviceIPFamilies + `
   selector:
     app: backend
   ports:
@@ -1375,7 +1385,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: unlisted-backend
-spec:
+spec:` + serviceIPFamilies + `
   selector:
     app: backend
   ports:
@@ -1387,8 +1397,28 @@ spec:
 	h.WaitForDeployment("backend", 2*time.Minute)
 	time.Sleep(5 * time.Second)
 
-	backendClusterIP := h.GetServiceClusterIP("backend")
-	t.Logf("Backend ClusterIP: %s", backendClusterIP)
+	backendIPv4ClusterIP := h.GetServiceIPv4ClusterIP("backend")
+	if backendIPv4ClusterIP == "" {
+		backendIPv4ClusterIP = h.GetServiceClusterIP("backend")
+	}
+	t.Logf("Backend IPv4 ClusterIP: %s", backendIPv4ClusterIP)
+	backendIPv6ClusterIP := h.GetServiceIPv6ClusterIP("backend")
+	var proxyHostV6Env string
+	if h.IsDualStack() {
+		t.Logf("Backend IPv6 ClusterIP: %s", backendIPv6ClusterIP)
+		if backendIPv6ClusterIP == "" {
+			t.Fatalf("Expected IPv6 ClusterIP for backend service on dual-stack cluster, but none found")
+		}
+		cmdNodeIPv6 := exec.Command("kubectl", "get", "nodes", "-o", "jsonpath={.items[0].status.addresses[?(@.type==\"InternalIP\")].address}")
+		if out, err := cmdNodeIPv6.CombinedOutput(); err == nil {
+			for _, addr := range strings.Fields(string(out)) {
+				if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+					proxyHostV6Env = fmt.Sprintf("\n        - name: PROXY_HOST_V6\n          value: %q", addr)
+					break
+				}
+			}
+		}
+	}
 
 	// Deploy Node-Agent DaemonSet (Proxy + NRI Plugin)
 	nodeAgentManifest := `
@@ -1449,6 +1479,9 @@ spec:
       - name: proxy
         image: all-in-one-portal:e2e
         imagePullPolicy: Never
+        securityContext:
+          capabilities:
+            add: ["NET_BIND_SERVICE"]
         env:
         - name: PORT
           value: "8080"
@@ -1466,6 +1499,8 @@ spec:
           value: "/etc/service-portal/ca/tls.crt"
         - name: CA_KEY_PATH
           value: "/etc/service-portal/ca/tls.key"
+        - name: SERVE_DNS
+          value: "true"` + proxyHostV6Env + `
         args: ["--rules-dir=/etc/portals"]
         volumeMounts:
         - name: rules-volume
@@ -1493,12 +1528,10 @@ spec:
           value: "8443"
         - name: ADMIN_URL
           value: "unix:///run/service-portal/portal.sock"
-        - name: DNS_SERVERS
-          value: "10.96.0.10"
         - name: CA_CERT_PATH
           value: "/etc/service-portal/ca/tls.crt"
         - name: NRI_SOCKET_PATH
-          value: "/var/run/nri/nri.sock"
+          value: "/var/run/nri/nri.sock"` + proxyHostV6Env + `
         volumeMounts:
         - name: ca-volume
           mountPath: /etc/service-portal/ca
@@ -1599,7 +1632,6 @@ spec:
 	}
 	nodeIP := strings.TrimSpace(string(outNodeIP))
 
-	backendIPv4ClusterIP := h.GetServiceIPv4ClusterIP("backend")
 	if backendIPv4ClusterIP == "" {
 		backendIPv4ClusterIP = h.GetServiceClusterIP("backend")
 	}
@@ -1626,8 +1658,28 @@ spec:
 
 	// 9. Assert positive controls and standard egress deny suite succeed when bound
 	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "backend", "unlisted-backend", "gemini-nri-token")
+
+	// Bounded DNS assertion: query for unlisted name via cluster DNS must fail (NXDOMAIN)
+	t.Run("ClusterDNS_UnlistedHost_Denied", func(t *testing.T) {
+		cmdProbe := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "dns", "cluster", "unlisted-backend", "3s")
+		outProbe, errProbe := cmdProbe.CombinedOutput()
+		if errProbe == nil {
+			t.Fatalf("expected unlisted DNS probe for unlisted-backend to fail, but it succeeded: %s", outProbe)
+		}
+		t.Logf("unlisted DNS probe for unlisted-backend failed as expected: %v (output: %s)", errProbe, outProbe)
+
+		cmdNslookup := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"nslookup", "unlisted-backend")
+		outNslookup, errNslookup := cmdNslookup.CombinedOutput()
+		if errNslookup == nil {
+			t.Fatalf("expected unlisted nslookup for unlisted-backend to fail, but it succeeded: %s", outNslookup)
+		}
+		t.Logf("unlisted nslookup for unlisted-backend failed as expected: %v (output: %s)", errNslookup, outNslookup)
+	})
+
 	if h.IsDualStack() {
-		t.Log("IPv6 is not intercepted by the prototype and is tracked in #183")
+		runNRIDualStackAssertions(t, h, clientPodName, backendIPv6ClusterIP)
 	}
 
 	// 10. Assert proxy logs carry the pod namespace/name
@@ -1703,5 +1755,77 @@ spec:
 			t.Fatalf("expected request after unbind to be denied, but succeeded: %s", out)
 		}
 		t.Logf("request after unbind denied as expected: %v (output: %s)", err, out)
+	})
+}
+
+func runNRIDualStackAssertions(t *testing.T, h *Harness, clientPodName, backendIPv6ClusterIP string) {
+	if backendIPv6ClusterIP == "" {
+		t.Fatalf("runNRIDualStackAssertions called on dual-stack cluster but backendIPv6ClusterIP is empty")
+	}
+
+	t.Run("DirectIPv6_InterceptedPort_HTTP", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://["+backendIPv6ClusterIP+"]:80/direct-ipv6-http")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IPv6 HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IPv6 HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ipv6-http") {
+			t.Fatalf("backend access log contains /direct-ipv6-http, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("DirectIPv6_InterceptedPort_HTTPS", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-qO-", "https://["+backendIPv6ClusterIP+"]:443/direct-ipv6-https")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct IPv6 HTTPS request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("direct IPv6 HTTPS request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/direct-ipv6-https") {
+			t.Fatalf("backend access log contains /direct-ipv6-https, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("NonInterceptedPort_IPv6_HTTP_8080", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://["+backendIPv6ClusterIP+"]:8080/non-intercepted-ipv6-8080")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-intercepted port IPv6 HTTP request to fail, but it succeeded: %s", out)
+		}
+		t.Logf("non-intercepted port IPv6 HTTP request failed as expected: %v (output: %s)", err, out)
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, "/non-intercepted-ipv6-8080") {
+			t.Fatalf("backend access log contains /non-intercepted-ipv6-8080, request unexpectedly reached backend")
+		}
+	})
+
+	t.Run("NonInterceptedPort_IPv6_RawTCP_9999", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "tcp", "["+backendIPv6ClusterIP+"]:9999", "3s")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected raw TCP connection to IPv6 port 9999 to fail, but it succeeded: %s", out)
+		}
+		t.Logf("raw TCP connection to IPv6 port 9999 failed as expected: %v (output: %s)", err, out)
+	})
+
+	t.Run("NeighbourDiscovery_Functional", func(t *testing.T) {
+		cmdRoute := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"ip", "-6", "route", "show", "default")
+		outRoute, errRoute := cmdRoute.CombinedOutput()
+		if errRoute != nil {
+			t.Logf("could not query default IPv6 route: %v (output: %s)", errRoute, outRoute)
+		} else {
+			t.Logf("default IPv6 route: %s", strings.TrimSpace(string(outRoute)))
+		}
 	})
 }

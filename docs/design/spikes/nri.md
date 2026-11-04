@@ -233,7 +233,13 @@ The plugin inspects `pod.RuntimeHandler` (and CRI annotation `io.kubernetes.cri.
     3. *Host Cgroup Tracking*: Because the proxy runs on the host, future eBPF `sock_ops` integration can correlate accepted sockets directly to the kernel cgroup ID on the host.
 
 * **Per-Pod Certificates (#182 follow-up)**: As noted during review, generating per-pod leaf certificates (encoding pod identity or UID in leaf SANs) would surface if the proxy ever confused one pod for another ("crossed the streams"). A workload would fail TLS validation if served another pod's certificate, exposing cross-pod routing bugs immediately. This will be evaluated as part of the caller identity and TLS termination work in [#182](https://github.com/gke-labs/service-portals/issues/182).
-* **IPv6 and Bounded DNS (#183)**: The current rules install only IPv4 iptables rules. IPv6 traffic is unfiltered in the network namespace, and CoreDNS forwarding for unlisted external domains is unrestricted. Enforcing IPv6 parity and bounding DNS queries to policy-listed hostnames are tracked in [#183](https://github.com/gke-labs/service-portals/issues/183).
+* **IPv6 Rules and Bounded DNS (#183)**:
+  - *Dual-Stack IPv6 Egress Parity*: Dual-stack is detected from sandbox pod IP addresses. `portal-nri-plugin` installs the same host-side per-interface chains (`PORTAL_PR_<iface>` in nat PREROUTING, `PORTAL_EG_<iface>` in filter INPUT/FORWARD) via `ip6tables`. TCP ports 80 and 443 are DNAT'd to `[PROXY_HOST_V6]:PORT`, port 53 (UDP & TCP) is DNAT'd to `[PROXY_HOST_V6]:53`, ICMPv6 Neighbor Discovery (NDP types 133-137) and error messages (types 1-4) are accepted for link-local reachability and PMTU, and all other IPv6 egress is rejected with `icmp6-port-unreachable`.
+  - *Bounded DNS Architecture (Option b)*: Port 53 (UDP & TCP) on the host peer interface is redirected via DNAT to the node proxy's DNS server (`pkg/dns`). The server responds with synthetic A records pointing to `PROXY_HOST` and AAAA records pointing to `PROXY_HOST_V6` for configured `PortalRule` hosts. All unlisted names return `NXDOMAIN` by default. Hard-coded resolver fallbacks (`10.96.0.10`) are removed. CoreDNS is completely inaccessible to opted-in pods, closing the DNS exfiltration side channel.
+  - *Design Limits*:
+    1. *No Arbitrary External or In-Cluster Resolution*: Workloads cannot resolve unlisted domains or unlisted in-cluster Service names. Any endpoint the workload must reach must be declared in a `PortalRule`.
+    2. *CNAME Chaining*: The bounded DNS server synthesizes A/AAAA records directly for matched names without resolving upstream CNAME chains. Upstream resolution is performed exclusively by the L7 proxy.
+    3. *Workload DNS Search Domains*: Pod `/etc/resolv.conf` search path expansions (e.g. `backend.default.svc.cluster.local`) are matched against declared rule hosts by prefix to avoid resolution failures under `ndots:5`.
 
 ---
 
