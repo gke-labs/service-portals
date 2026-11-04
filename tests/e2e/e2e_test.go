@@ -31,6 +31,9 @@ func TestServicePortal(t *testing.T) {
 	}
 
 	h := NewHarness(t, "service-portal-e2e")
+	if h.IsGVisor() {
+		t.Skip("skipping non-NRI test when running under gVisor runtime")
+	}
 	h.Setup()
 
 	gitRoot := h.GetGitRoot()
@@ -174,6 +177,9 @@ func TestAllInOnePortal(t *testing.T) {
 	}
 
 	h := NewHarness(t, "all-in-one-portal-e2e")
+	if h.IsGVisor() {
+		t.Skip("skipping non-NRI test when running under gVisor runtime")
+	}
 	h.Setup()
 
 	gitRoot := h.GetGitRoot()
@@ -377,6 +383,9 @@ func TestSidecarPortal(t *testing.T) {
 	}
 
 	h := NewHarness(t, "sidecar-portal-e2e")
+	if h.IsGVisor() {
+		t.Skip("skipping non-NRI test when running under gVisor runtime")
+	}
 	h.Setup()
 
 	gitRoot := h.GetGitRoot()
@@ -613,6 +622,9 @@ func TestSidecarEgressDenied(t *testing.T) {
 	}
 
 	h := NewHarness(t, "sidecar-egress-denied-e2e")
+	if h.IsGVisor() {
+		t.Skip("skipping non-NRI test when running under gVisor runtime")
+	}
 	h.Setup()
 
 	gitRoot := h.GetGitRoot()
@@ -1570,7 +1582,12 @@ spec:
 	clientPodName := "test-client-nri-deny"
 	h.DeletePod(clientPodName)
 
-	clientManifest := `
+	runtimeClassField := ""
+	if h.IsGVisor() {
+		runtimeClassField = "  runtimeClassName: gvisor\n"
+	}
+
+	clientManifest := fmt.Sprintf(`
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1579,7 +1596,7 @@ metadata:
     app: test-client-nri-deny
     service-portal.gke.io/intercept: "true"
 spec:
-  containers:
+%s  containers:
   - name: workload
     image: toolbox:e2e
     imagePullPolicy: Never
@@ -1587,7 +1604,7 @@ spec:
       runAsUser: 1000
       allowPrivilegeEscalation: false
     command: ["/bin/sh", "-c", "sleep 3600"]
-`
+`, runtimeClassField)
 	h.KubectlApplyContent(clientManifest)
 
 	// 3. Assert the opted-in pod stays Pending while the taint is present
@@ -1615,6 +1632,15 @@ spec:
 	// 6. Assert the client pod now schedules, transitions to Running, and becomes Ready
 	h.WaitForPodReady("app=test-client-nri-deny", 2*time.Minute)
 
+	if h.IsGVisor() {
+		dmesgCmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "dmesg")
+		dmesgOut, err := dmesgCmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(dmesgOut), "Starting gVisor...") {
+			t.Fatalf("expected client pod to run under gVisor runtime, dmesg output: %s (err: %v)", dmesgOut, err)
+		}
+		t.Logf("Verified client pod is running under gVisor runtime: %s", strings.Split(strings.TrimSpace(string(dmesgOut)), "\n")[0])
+	}
+
 	cmdUID := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.metadata.uid}")
 	outUID, err := cmdUID.CombinedOutput()
 	if err != nil {
@@ -1628,10 +1654,6 @@ spec:
 		t.Fatalf("failed to get node IP: %v (output: %s)", err, outNodeIP)
 	}
 	nodeIP := strings.TrimSpace(string(outNodeIP))
-
-	if backendIPv4ClusterIP == "" {
-		backendIPv4ClusterIP = h.GetServiceClusterIP("backend")
-	}
 
 	// 7. Verify unbound opted-in pod fails closed by default
 	t.Run("UnboundPod_Denied", func(t *testing.T) {

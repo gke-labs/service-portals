@@ -189,18 +189,22 @@ The plugin inspects `pod.RuntimeHandler` (and CRI annotation `io.kubernetes.cri.
 * **Standard Containers (`runc`)**:
   - Outgoing packets emerge from the pod veth peer into the host network namespace.
   - Verified on kind: passes the entire egress deny suite (`TestNRIPluginEgressDenied`) against host-side rules.
-* **gVisor (`runsc`) `[unverified]`**:
+* **gVisor (`runsc`)**:
   - Userspace netstack injects packets via raw packet socket onto the container interface.
   - Architectural reasoning: because netfilter hooks are situated on the host-side veth peer, netstack frames arrive in the host namespace before routing, where host-side PREROUTING/INPUT/FORWARD rules intercept them.
-  - Verification status: `[unverified]`. Not yet verified in CI or against a live cluster.
+  - Verification status: Verified in PR [#229](https://github.com/gke-labs/service-portals/pull/229) via the `ap-e2e-gvisor` presubmit job on kind with `runsc` and `containerd-shim-runsc-v1` ([green CI run 41853971474](https://github.com/gke-labs/service-portals/actions/runs/41853971474)).
+  - Observations:
+    - Host-side iptables rules successfully intercept and enforce default-deny across all 11 assertions in `TestNRIPluginEgressDenied` (direct-IP HTTP/HTTPS blocked, unlisted hostname HTTP/HTTPS blocked, non-intercepted port 8080 and raw TCP 9999 blocked, arbitrary DNS 8.8.8.8 blocked, cluster DNS allowed, and positive control HTTP and HTTPS proxy interception with token injection verified).
+    - Vacuity verification: disabling host-side rule installation in the plugin causes the deny suite under gVisor to fail ([red CI run 41858581883](https://github.com/gke-labs/service-portals/actions/runs/41858581883), executed on the pre-#228 tree with rule installation disabled), where egress to non-intercepted ports, direct IPs, unlisted hostnames, and arbitrary DNS all leaked through and positive controls failed due to missing token injection, confirming that enforcement is non-vacuous and strictly provided by the host-side rules.
 * **Kata Containers (`kata`) `[unverified]`**:
   - Pod runs inside a microVM guest kernel; traffic egresses over virtio-net to the host-side tap device.
   - Architectural reasoning: host-side iptables inspects incoming packets on the host tap interface. Guest kernel or container processes have no access to the host's iptables rules.
   - Verification status: `[unverified]`. Not yet verified in CI or against a live cluster.
 
 ### Verification Status & Open Follow-Up
-* **runc (kind)**: Fully verified in this PR. `TestNRIPluginEgressDenied` passes unchanged with host-side rules on kind (containerd v2.0.2).
-* **gVisor and Kata microVMs**: Open. Host-side enforcement for microVM runtimes is designed and implemented based on netfilter hook positioning on host veth/tap interfaces, but live verification on a gVisor or Kata cluster is open and tracked in a dedicated follow-up issue (running the NRI deny suite under a gVisor RuntimeClass on kind in CI).
+* **runc (kind)**: Fully verified in PR [#223](https://github.com/gke-labs/service-portals/pull/223). `TestNRIPluginEgressDenied` passes with host-side rules on kind (containerd v2.0.2).
+* **gVisor (kind)**: Fully verified in PR [#229](https://github.com/gke-labs/service-portals/pull/229), CI run [41853971474](https://github.com/gke-labs/service-portals/actions/runs/41853971474) via dedicated CI job (`ap-e2e-gvisor`). The deny suite passes under `runtimeClassName: gvisor`, and fails as expected if host-side rules are removed ([red CI run 41858581883](https://github.com/gke-labs/service-portals/actions/runs/41858581883), pre-#228 tree).
+* **Kata microVMs**: Open (`[unverified]`). Host-side enforcement for microVM runtimes is designed and implemented based on netfilter hook positioning on host veth/tap interfaces, but live verification requires a Kata-capable virtualization environment.
 
 ---
 
