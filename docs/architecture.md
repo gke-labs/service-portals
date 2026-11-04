@@ -158,6 +158,6 @@ While the current recommended production mode is the **transparent sidecar with 
 
 Under this roadmap:
 1. **Host-Side Enforcement**: Egress filtering and redirection attach to the host peer interface (`veth`/`tap`), eliminating `CAP_NET_ADMIN` in workload pods (PSA `baseline` compliant) and guaranteeing interception holds across standard `runc`, `gVisor`, and `Kata Containers` ([#181](https://github.com/gke-labs/service-portals/issues/181)).
-2. **Definitive Single Mode**: Once the NRI implementation meets the acceptance bar on `main` (passing the deny suite including direct-to-proxy cases [#182], sandboxed runtime verification, IPv6/bounded DNS [#183], fail-closed semantics, and pod attribution [#182]), all other deployment modes—including explicit Service mode, explicit `HTTP_PROXY` mode, and in-pod init container mode—will be removed rather than deprecated indefinitely.
+2. **Definitive Single Mode**: Once the NRI implementation meets the acceptance bar on `main` (passing the deny suite including direct-to-proxy cases [#182], sandboxed runtime verification, IPv6/bounded DNS [#183], fail-closed semantics, and pod attribution [#182]), all other deployment modes—including explicit Service mode and in-pod init container mode (explicit `HTTP_PROXY` mode removed in #218)—will be removed rather than deprecated indefinitely.
 
 For the full acceptance bar and removal plan, see [docs/roadmap.md](roadmap.md) and the design documentation in [docs/design/README.md](design/README.md).

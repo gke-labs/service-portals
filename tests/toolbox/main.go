@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,7 +44,7 @@ func main() {
 		runClient(os.Args[2])
 	case "probe":
 		if len(os.Args) < 3 {
-			log.Fatal("Usage: toolbox probe <tcp|dns> [args]")
+			log.Fatal("Usage: toolbox probe <tcp|dns|connect> [args]")
 		}
 		runProbe(os.Args[2:])
 	default:
@@ -114,11 +115,59 @@ func runClient(targetURL string) {
 
 func runProbe(args []string) {
 	if len(args) < 2 {
-		log.Fatal("Usage: toolbox probe tcp <host:port> [timeout] OR toolbox probe dns <server> <name> [timeout]")
+		log.Fatal("Usage: toolbox probe tcp <host:port> [timeout] OR toolbox probe dns <server> <name> [timeout] OR toolbox probe connect <addr> <target> [timeout]")
 	}
 
 	probeType := args[0]
 	switch probeType {
+	case "connect":
+		if len(args) < 3 {
+			log.Fatal("Usage: toolbox probe connect <addr> <target> [timeout]")
+		}
+		addr := args[1]
+		target := args[2]
+		timeout := 3 * time.Second
+		if len(args) >= 4 {
+			d, err := time.ParseDuration(args[3])
+			if err != nil {
+				log.Fatalf("invalid duration %q: %v", args[3], err)
+			}
+			timeout = d
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, timeout)
+		if err != nil {
+			log.Fatalf("tcp dial to %s failed: %v", addr, err)
+		}
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.Printf("failed to close connection to %s: %v", addr, err)
+			}
+		}()
+
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			log.Fatalf("failed to set deadline: %v", err)
+		}
+
+		req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+		if _, err := conn.Write([]byte(req)); err != nil {
+			log.Fatalf("failed to write CONNECT request: %v", err)
+		}
+
+		reader := bufio.NewReader(conn)
+		resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+		if err != nil {
+			log.Fatalf("failed to read response: %v", err)
+		}
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				log.Printf("failed to close response body: %v", err)
+			}
+		}()
+
+		fmt.Printf("STATUS %d\n", resp.StatusCode)
+		os.Exit(0)
+
 	case "tcp":
 		target := args[1]
 		timeout := 3 * time.Second

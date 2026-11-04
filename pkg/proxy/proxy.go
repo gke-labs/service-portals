@@ -109,46 +109,30 @@ func (p *HTTPProxy) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate,
 }
 
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodConnect && p.caCert != nil {
-		p.handleConnect(w, r)
+	if r.Method == http.MethodConnect {
+		// Reject CONNECT / explicit HTTP_PROXY mode with 405 Method Not Allowed.
+		// Workloads are intercepted transparently at the packet level (via NRI or sidecar
+		// iptables redirection) rather than speaking to an explicit proxy. Rejecting CONNECT
+		// prevents an egress hole where a client connects to the proxy and tunnels arbitrary
+		// inner Host requests through the proxy's unfiltered egress.
+		http.Error(w, "CONNECT not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	p.proxyRequest(w, r, false)
+	p.proxyRequest(w, r)
 }
 
-func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request, isMITM bool) {
-	host := r.Host
-	if host == "" {
-		host = r.URL.Host
-	}
-
-	forceTarget := false
-	if host == p.TargetURL.Host {
-		forceTarget = true
-	} else if !isMITM && r.URL.Host == "" {
-		forceTarget = true
-	}
-
+func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	outReq := r.Clone(r.Context())
-	if forceTarget {
-		outReq.URL.Scheme = p.TargetURL.Scheme
-		outReq.URL.Host = p.TargetURL.Host
-		outReq.Host = p.TargetURL.Host
+	outReq.URL.Scheme = p.TargetURL.Scheme
+	outReq.URL.Host = p.TargetURL.Host
+	outReq.Host = p.TargetURL.Host
 
-		if p.AuthToken != "" {
-			if p.AuthHeader == "Authorization" {
-				outReq.Header.Set(p.AuthHeader, "Bearer "+p.AuthToken)
-			} else {
-				outReq.Header.Set(p.AuthHeader, p.AuthToken)
-			}
-		}
-	} else {
-		if outReq.URL.Scheme == "" {
-			outReq.URL.Scheme = "https"
-		}
-		if outReq.URL.Host == "" {
-			outReq.URL.Host = r.Host
+	if p.AuthToken != "" {
+		if p.AuthHeader == "Authorization" {
+			outReq.Header.Set(p.AuthHeader, "Bearer "+p.AuthToken)
+		} else {
+			outReq.Header.Set(p.AuthHeader, p.AuthToken)
 		}
 	}
 
@@ -255,66 +239,6 @@ func splitAndTrim(s string) []string {
 	return res
 }
 
-func (p *HTTPProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-	if err != nil {
-		if closeErr := clientConn.Close(); closeErr != nil {
-			log.Printf("Error closing client connection: %v", closeErr)
-		}
-		return
-	}
-
-	host, _, err := net.SplitHostPort(r.Host)
-	if err != nil {
-		host = r.Host
-	}
-
-	cert, err := p.getCert(host)
-	if err != nil {
-		log.Printf("Failed to get cert for %s: %v", host, err)
-		if closeErr := clientConn.Close(); closeErr != nil {
-			log.Printf("Error closing client connection: %v", closeErr)
-		}
-		return
-	}
-
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-	}
-
-	tlsConn := tls.Server(clientConn, tlsConfig)
-	if err := tlsConn.Handshake(); err != nil {
-		log.Printf("TLS handshake failed for %s: %v", host, err)
-		if closeErr := tlsConn.Close(); closeErr != nil {
-			log.Printf("Error closing TLS connection: %v", closeErr)
-		}
-		return
-	}
-
-	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			p.proxyRequest(w, r, true)
-		}),
-	}
-
-	l := &connectionHandler{conn: tlsConn}
-	if err := server.Serve(l); err != nil && err != http.ErrServerClosed && err != io.EOF {
-		log.Printf("Serve failed: %v", err)
-	}
-}
-
 func (p *HTTPProxy) getCert(host string) (*tls.Certificate, error) {
 	p.mu.RLock()
 	cert, ok := p.certs[host]
@@ -385,28 +309,4 @@ func (p *HTTPProxy) signCert(host string) (*tls.Certificate, error) {
 		return nil, err
 	}
 	return &cert, nil
-}
-
-type connectionHandler struct {
-	conn net.Conn
-	once sync.Once
-}
-
-func (l *connectionHandler) Accept() (net.Conn, error) {
-	var c net.Conn
-	l.once.Do(func() {
-		c = l.conn
-	})
-	if c == nil {
-		return nil, io.EOF
-	}
-	return c, nil
-}
-
-func (l *connectionHandler) Close() error {
-	return nil
-}
-
-func (l *connectionHandler) Addr() net.Addr {
-	return l.conn.LocalAddr()
 }

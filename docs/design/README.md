@@ -24,4 +24,4 @@ This directory contains architectural designs, decision records, and spike repor
 2. **The Target Single Mode**: **containerd NRI DaemonSet with Host-Side Enforcement**  
    Detailed in [`daemonset-mode.md`](daemonset-mode.md) (and the pending decision record in PR #208). Moving redirection and egress filtering to the host end of the `veth`/`tap` interface eliminates `CAP_NET_ADMIN` requirements in workload pods (PSA `baseline` compliance), eliminates the UID-1337 bypass, and uniformly preserves interception across `runc`, `gVisor`, and `Kata Containers`.
 3. **Roadmap & Deprecation Plan**:  
-   See [docs/roadmap.md](../roadmap.md) for the convergence plan, acceptance criteria, and schedule for removing legacy modes (explicit Service mode, explicit `HTTP_PROXY` mode, and in-pod init container mode).
+   See [docs/roadmap.md](../roadmap.md) for the convergence plan, acceptance criteria, and schedule for removing legacy modes (explicit Service mode and in-pod init container mode; explicit `HTTP_PROXY` mode removed in #218).

@@ -86,7 +86,7 @@ The **transparent sidecar** is the single recommended deployment model for `serv
 
 See the [Quick Start](#quick-start-transparent-sidecar) below and the [Sidecar Deployment Guide](docs/sidecar-container.md).
 
-> **Note on other modes & project direction**: Historical and alternative modes (explicit Service mode, explicit `HTTP_PROXY` mode, and the dropped application-level spike) are documented in [docs/deployment-modes.md](docs/deployment-modes.md). The project is converging on a per-node containerd NRI plugin as the future default single mode, after which legacy modes will be removed. See [docs/roadmap.md](docs/roadmap.md) for details.
+> **Note on other modes & project direction**: Historical and alternative modes (explicit Service mode and the dropped application-level spike) are documented in [docs/deployment-modes.md](docs/deployment-modes.md). The project is converging on a per-node containerd NRI plugin as the future default single mode, after which legacy modes will be removed. See [docs/roadmap.md](docs/roadmap.md) for details.
 
 ---
 
