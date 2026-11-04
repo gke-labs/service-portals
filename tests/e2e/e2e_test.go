@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -975,6 +976,9 @@ func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendI
 		if !strings.Contains(logs, "Bearer "+expectedToken) {
 			t.Errorf("positive control HTTP output missing expected token (%s): %s", expectedToken, logs)
 		}
+		if strings.Contains(logs, "X-Consumer-Identity") || strings.Contains(logs, "X-Forwarded-Client-Pod") {
+			t.Errorf("attribution headers leaked to backend without opt-in: %s", logs)
+		}
 
 		backendLogs := h.GetDeploymentLogs("backend")
 		if !strings.Contains(backendLogs, "/positive-control-http") {
@@ -1435,10 +1439,12 @@ spec:
         image: init-service-portals:e2e
         imagePullPolicy: Never
         command: ["/usr/local/bin/init-service-portals"]
-        args: ["-cert-dir=/etc/service-portal/ca", "-key-dir=/etc/service-portal/ca", "-chown-uid=65532", "-chown-gid=65532"]
+        args: ["-cert-dir=/etc/service-portal/ca", "-key-dir=/etc/service-portal/ca", "-socket-dir=/run/service-portal", "-chown-uid=65532", "-chown-gid=65532"]
         volumeMounts:
         - name: ca-volume
           mountPath: /etc/service-portal/ca
+        - name: socket-volume
+          mountPath: /run/service-portal
       containers:
       - name: proxy
         image: all-in-one-portal:e2e
@@ -1448,6 +1454,14 @@ spec:
           value: "8080"
         - name: HTTPS_PORT
           value: "8443"
+        - name: PROXY_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: ENABLE_POD_MAP
+          value: "true"
+        - name: ADMIN_ADDR
+          value: "/run/service-portal/portal.sock"
         - name: CA_CERT_PATH
           value: "/etc/service-portal/ca/tls.crt"
         - name: CA_KEY_PATH
@@ -1460,6 +1474,8 @@ spec:
         - name: ca-volume
           mountPath: /etc/service-portal/ca
           readOnly: true
+        - name: socket-volume
+          mountPath: /run/service-portal
       - name: nri-plugin
         image: portal-nri-plugin:e2e
         imagePullPolicy: Never
@@ -1475,6 +1491,8 @@ spec:
           value: "8080"
         - name: PROXY_HTTPS_PORT
           value: "8443"
+        - name: ADMIN_URL
+          value: "unix:///run/service-portal/portal.sock"
         - name: DNS_SERVERS
           value: "10.96.0.10"
         - name: CA_CERT_PATH
@@ -1489,6 +1507,8 @@ spec:
         - name: netns
           mountPath: /run/netns
           mountPropagation: HostToContainer
+        - name: socket-volume
+          mountPath: /run/service-portal
       volumes:
       - name: rules-volume
         secret:
@@ -1503,6 +1523,10 @@ spec:
       - name: netns
         hostPath:
           path: /run/netns
+      - name: socket-volume
+        hostPath:
+          path: /run/service-portal
+          type: DirectoryOrCreate
 `
 
 	// 1. Taint the node so uninitialized nodes cannot schedule opted-in pods
@@ -1543,7 +1567,7 @@ spec:
 	if err != nil {
 		t.Fatalf("failed to check client pod phase: %v (output: %s)", err, phaseOut)
 	}
-	if string(phaseOut) != "Pending" {
+	if !strings.Contains(string(phaseOut), "Pending") {
 		t.Fatalf("expected client pod to stay Pending while node is tainted, got %s", phaseOut)
 	}
 	t.Logf("Client pod is correctly Pending due to node taint: %s", phaseOut)
@@ -1561,13 +1585,123 @@ spec:
 	// 6. Assert the client pod now schedules, transitions to Running, and becomes Ready
 	h.WaitForPodReady("app=test-client-nri-deny", 2*time.Minute)
 
+	cmdUID := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.metadata.uid}")
+	outUID, err := cmdUID.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to get client pod UID: %v (output: %s)", err, outUID)
+	}
+	clientUID := strings.TrimSpace(string(outUID))
+
+	cmdNodeIP := exec.Command("kubectl", "get", "pod", clientPodName, "-o", "jsonpath={.status.hostIP}")
+	outNodeIP, err := cmdNodeIP.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to get node IP: %v (output: %s)", err, outNodeIP)
+	}
+	nodeIP := strings.TrimSpace(string(outNodeIP))
+
 	backendIPv4ClusterIP := h.GetServiceIPv4ClusterIP("backend")
 	if backendIPv4ClusterIP == "" {
 		backendIPv4ClusterIP = h.GetServiceClusterIP("backend")
 	}
 
+	// 7. Verify unbound opted-in pod fails closed by default
+	t.Run("UnboundPod_Denied", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://backend/unbound-check")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected unbound pod request to be denied, but succeeded: %s", out)
+		}
+		t.Logf("unbound pod request denied as expected: %v (output: %s)", err, out)
+	})
+
+	// 8. Bind pod to user identity and policy via Node Agent Bind API using portal-nri-plugin CLI
+	bindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
+		"portal-nri-plugin", "bind", "--socket", "/run/service-portal/portal.sock", "--uid", clientUID, "--identity", "test-user-alice", "--policy", "backend")
+	bindOut, err := bindCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to bind pod %s via portal-nri-plugin bind: %v (output: %s)", clientUID, err, bindOut)
+	}
+	t.Logf("Successfully bound pod %s via node agent unix socket: %s", clientUID, bindOut)
+
+	// 9. Assert positive controls and standard egress deny suite succeed when bound
 	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "backend", "unlisted-backend", "gemini-nri-token")
 	if h.IsDualStack() {
 		t.Log("IPv6 is not intercepted by the prototype and is tracked in #183")
 	}
+
+	// 10. Assert proxy logs carry the pod namespace/name
+	t.Run("ProxyLogsCarryPodIdentity", func(t *testing.T) {
+		nodeAgentLogs := h.GetPodLogsByLabel("app=portal-node-agent", "proxy")
+		if !strings.Contains(nodeAgentLogs, "Caller: default/"+clientPodName) {
+			t.Fatalf("proxy logs missing expected caller pod 'Caller: default/%s':\n%s", clientPodName, nodeAgentLogs)
+		}
+		t.Logf("proxy logs correctly carry pod identity: default/%s", clientPodName)
+	})
+
+	// 11. Required direct-to-proxy deny case 1:
+	// Opted-in bound pod connecting directly to <proxyHost>:8080 with a Host it is not entitled to is denied
+	t.Run("DirectToProxy_OptedInPod_UnentitledHost_Denied", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "--header=Host: unlisted-backend", fmt.Sprintf("http://%s:8080/direct-unentitled", nodeIP))
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct connection to proxy with unentitled host to be denied, but succeeded: %s", out)
+		}
+		t.Logf("direct connection to proxy with unentitled host denied as expected: %v (output: %s)", err, out)
+	})
+
+	// 12. Required direct-to-proxy deny case 2:
+	// Non-opted-in pod on the same node connecting directly to the proxy port is denied
+	t.Run("DirectToProxy_NonOptedInPod_Denied", func(t *testing.T) {
+		nonOptedPodName := "test-client-non-opted"
+		h.DeletePod(nonOptedPodName)
+		nonOptedManifest := `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client-non-opted
+  labels:
+    app: test-client-non-opted
+spec:
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`
+		h.KubectlApplyContent(nonOptedManifest)
+		h.WaitForPodReady("app=test-client-non-opted", 2*time.Minute)
+		defer h.DeletePod(nonOptedPodName)
+
+		cmd := exec.Command("kubectl", "exec", nonOptedPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", fmt.Sprintf("http://%s:8080/direct-from-non-opted", nodeIP))
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-opted-in pod connection to proxy to be denied, but succeeded: %s", out)
+		}
+		t.Logf("non-opted-in pod connection to proxy denied as expected: %v (output: %s)", err, out)
+	})
+
+	// 13. Unbind the pod and assert same request is then rejected
+	t.Run("Unbind_RevertsToDenied", func(t *testing.T) {
+		unbindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
+			"portal-nri-plugin", "unbind", "--socket", "/run/service-portal/portal.sock", "--uid", clientUID)
+		unbindOut, err := unbindCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to unbind pod %s via portal-nri-plugin unbind: %v (output: %s)", clientUID, err, unbindOut)
+		}
+		t.Logf("Successfully unbound pod %s via node agent unix socket: %s", clientUID, unbindOut)
+
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://backend/positive-control-http")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected request after unbind to be denied, but succeeded: %s", out)
+		}
+		t.Logf("request after unbind denied as expected: %v (output: %s)", err, out)
+	})
 }
