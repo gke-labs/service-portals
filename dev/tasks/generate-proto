@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +20,4 @@ set -o pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "${REPO_ROOT}"
 
-# Run e2e tests in dual-stack mode
-export E2E_IP_FAMILY=dual
-go run github.com/gke-labs/gke-labs-infra/ap@latest e2e .
+protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative pkg/portals/v1/bind.proto
