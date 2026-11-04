@@ -23,4 +23,4 @@ cd "${REPO_ROOT}"
 
 # Run e2e tests in dual-stack mode
 export E2E_IP_FAMILY=dual
-go run github.com/gke-labs/gke-labs-infra/ap@latest e2e .
+go run github.com/gke-labs/gke-labs-infra/ap@v0.0.0-20261104141444-79e9e6ab5f7d e2e .

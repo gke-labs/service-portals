@@ -1,1 +1,2 @@
-version: "latest"
+# Pin ap to pre-#642 version until upstream e2e variant model is fixed (Issue #236)
+version: "v0.0.0-20261104141444-79e9e6ab5f7d"
