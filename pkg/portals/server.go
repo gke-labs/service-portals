@@ -36,6 +36,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"google.golang.org/grpc"
 )
 
 // DefaultAdminSocketPath is the default Unix domain socket path for the local node agent admin and bind API.
@@ -46,17 +47,23 @@ type CertificateProvider interface {
 }
 
 type Config struct {
-	DefaultTargetURL  string
-	DefaultAuthHeader string
-	SetupProxy        func(*proxy.HTTPProxy)
-	CacheTTL          time.Duration
-	RulesDir          string
-	PodMap            *PodMap
-	ServeDNS          bool
-	DNSBindAddr       string
-	ProxyDNSPort      string
-	ProxyBindAddrV6   string
-	DefaultAction     string
+	DefaultTargetURL    string
+	DefaultAuthHeader   string
+	SetupProxy          func(*proxy.HTTPProxy)
+	CacheTTL            time.Duration
+	RulesDir            string
+	PodMap              *PodMap
+	ServeDNS            bool
+	DNSBindAddr         string
+	ProxyDNSPort        string
+	ProxyBindAddrV6     string
+	DefaultAction       string
+	GRPCBindAddr        string
+	GRPCTLSConfig       *tls.Config
+	GRPCTLSCertFile     string
+	GRPCTLSKeyFile      string
+	GRPCTLSClientCAFile string
+	GRPCAllowedCallers  []string
 }
 
 // validateAdminAddr enforces that the administrative and Bind API server binds exclusively
@@ -229,6 +236,72 @@ func Run(ctx context.Context, config Config) error {
 				log.Printf("Starting admin and bind API server on %s", adminAddr)
 				if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					log.Printf("Admin server error: %v", err)
+				}
+			}()
+		}
+	}
+
+	var grpcServer *grpc.Server
+	var grpcListener net.Listener
+	if pm != nil {
+		grpcBindAddr := config.GRPCBindAddr
+		if grpcBindAddr == "" {
+			grpcBindAddr = os.Getenv("GRPC_BIND_ADDR")
+		}
+		grpcCertFile := config.GRPCTLSCertFile
+		if grpcCertFile == "" {
+			grpcCertFile = os.Getenv("GRPC_TLS_CERT_FILE")
+		}
+		grpcKeyFile := config.GRPCTLSKeyFile
+		if grpcKeyFile == "" {
+			grpcKeyFile = os.Getenv("GRPC_TLS_KEY_FILE")
+		}
+		grpcClientCAFile := config.GRPCTLSClientCAFile
+		if grpcClientCAFile == "" {
+			grpcClientCAFile = os.Getenv("GRPC_TLS_CLIENT_CA_FILE")
+		}
+		allowedCallers := config.GRPCAllowedCallers
+		if len(allowedCallers) == 0 && os.Getenv("GRPC_ALLOWED_CALLERS") != "" {
+			for _, c := range strings.Split(os.Getenv("GRPC_ALLOWED_CALLERS"), ",") {
+				if trimmed := strings.TrimSpace(c); trimmed != "" {
+					allowedCallers = append(allowedCallers, trimmed)
+				}
+			}
+		}
+
+		if grpcBindAddr != "" {
+			var tlsConfig *tls.Config
+			if config.GRPCTLSConfig != nil {
+				tlsConfig = config.GRPCTLSConfig
+			} else if grpcCertFile != "" && grpcKeyFile != "" && grpcClientCAFile != "" {
+				var err error
+				tlsConfig, err = LoadServerMTLSConfig(grpcCertFile, grpcKeyFile, grpcClientCAFile)
+				if err != nil {
+					return fmt.Errorf("failed to load gRPC mTLS config: %w", err)
+				}
+			} else {
+				return fmt.Errorf("gRPC bind address %q specified without mTLS certificates; mTLS is required", grpcBindAddr)
+			}
+
+			l, err := net.Listen("tcp", grpcBindAddr)
+			if err != nil {
+				return fmt.Errorf("failed to listen on gRPC address %s: %w", grpcBindAddr, err)
+			}
+			grpcListener = l
+
+			s, err := NewGRPCServer(pm, allowedCallers, tlsConfig)
+			if err != nil {
+				if cErr := grpcListener.Close(); cErr != nil {
+					log.Printf("warning: closing gRPC listener: %v", cErr)
+				}
+				return fmt.Errorf("failed to create gRPC server: %w", err)
+			}
+			grpcServer = s
+
+			go func() {
+				log.Printf("Starting controller-facing gRPC bind API server on %s (mTLS required)", grpcBindAddr)
+				if err := grpcServer.Serve(grpcListener); err != nil && err != grpc.ErrServerStopped {
+					log.Printf("gRPC server error: %v", err)
 				}
 			}()
 		}
@@ -453,6 +526,14 @@ func Run(ctx context.Context, config Config) error {
 		if adminSockPath != "" {
 			if err := os.Remove(adminSockPath); err != nil && !os.IsNotExist(err) {
 				log.Printf("Admin socket remove error: %v", err)
+			}
+		}
+		if grpcServer != nil {
+			grpcServer.GracefulStop()
+		}
+		if grpcListener != nil {
+			if err := grpcListener.Close(); err != nil {
+				log.Printf("gRPC listener close error: %v", err)
 			}
 		}
 		for _, s := range dnsServers {

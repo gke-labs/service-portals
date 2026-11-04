@@ -119,6 +119,18 @@ func (pm *PodMap) GetPodByIP(ip string) (*PodInfo, bool) {
 	return pod, ok
 }
 
+// GetPodByUID looks up a pod by UID.
+func (pm *PodMap) GetPodByUID(uid string) (*PodInfo, bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	pod, ok := pm.byUID[uid]
+	if !ok {
+		return nil, false
+	}
+	clone := *pod
+	return &clone, true
+}
+
 // Bind assigns user identity and policy to a pod by UID.
 func (pm *PodMap) Bind(uid, identity, policy string) error {
 	pm.mu.Lock()
