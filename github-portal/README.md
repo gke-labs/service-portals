@@ -1,5 +1,8 @@
 # GitHub Portal (`github-portal/`)
 
+> **Status: Legacy Single-Target Binary (Scheduled for Removal)**<br>
+> `github-portal` is a legacy single-target proxy binary designed for explicit Service mode. In accordance with the [project roadmap](../docs/roadmap.md), explicit Service mode and per-service portal binaries are scheduled for removal once the per-node containerd NRI mode meets its acceptance bar. New deployments should use the multi-service [`all-in-one-portal`](../cmd/all-in-one-portal/README.md) in the recommended transparent sidecar mode ([docs/sidecar-container.md](../docs/sidecar-container.md)).
+
 `github-portal` is a specialized service portal tailored for the GitHub API (`https://api.github.com/`). It proxies HTTP requests, injects a GitHub personal access token (PAT) or OAuth token into the `Authorization` header, and logs proxied requests while redacting sensitive tokens.
 
 ---

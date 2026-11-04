@@ -1,5 +1,8 @@
 # Service Portal (`cmd/service-portal`)
 
+> **Status: Legacy Single-Target Binary (Scheduled for Removal)**<br>
+> `cmd/service-portal` is a legacy single-target reverse proxy and HTTP proxy binary designed for explicit Service mode and standalone HTTP CONNECT proxying. In accordance with the [project roadmap](../../docs/roadmap.md), explicit Service mode and standalone single-target binaries are scheduled for removal once the per-node containerd NRI mode meets its acceptance bar. New deployments should use the multi-service [`all-in-one-portal`](../all-in-one-portal/README.md) in the recommended transparent sidecar mode ([docs/sidecar-container.md](../../docs/sidecar-container.md)).
+
 `service-portal` is the generic single-target reverse proxy and HTTP proxy server. It is typically deployed as a standalone Kubernetes Deployment and `Service` (explicit service mode) or used as a standard HTTP/HTTPS proxy.
 
 ---

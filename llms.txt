@@ -8,15 +8,17 @@ Service Portals is a credential-swapping, layer-7 intercepting proxy for sandbox
 
 ## Key Deployment Modes
 
-1. **Transparent Sidecar Mode (Primary)**: Uses `init-service-portals` to configure iptables redirection and an ephemeral Root CA, while `all-in-one-portal` intercepts HTTP (:8080) and HTTPS (:8443) traffic, minting dynamic TLS certificates and injecting credentials defined in `PortalRule` YAML files (`k8s/sidecar.yaml`).
-2. **Explicit Service Mode**: A cluster-level reverse proxy (`k8s/manifests.yaml`) that forwards requests to configured upstream targets.
-3. **Explicit HTTP Proxy Mode**: Handles standard `HTTP_PROXY` and `HTTPS_PROXY` (CONNECT tunnels) with TLS interception for a single upstream configured by `TARGET_URL` / `UPSTREAM_AUTH_TOKEN` (other hosts are forwarded without modification; `PortalRule` routing does not apply).
+1. **Transparent Sidecar Mode (Recommended)**: The current recommended deployment mode. Uses `init-service-portals` to configure iptables redirection and an ephemeral Root CA, while `all-in-one-portal` intercepts HTTP (:8080) and HTTPS (:8443) traffic, minting dynamic TLS certificates and injecting credentials defined in `PortalRule` YAML files (`k8s/sidecar.yaml`).
+2. **Per-Node NRI Mode (In Development, Future Default)**: containerd NRI plugin DaemonSet with host-side veth/tap enforcement. Target single mode of operation.
+3. **Other Modes (Legacy / Historical)**: Explicit Service mode (legacy), explicit HTTP proxy mode (legacy), and application-level interception (historical spike; not pursued). Scheduled for removal once NRI meets the acceptance bar.
 
 ## Documentation Index
 
+- `docs/roadmap.md`: Strategic roadmap to converge on NRI as the single supported mode and remove other modes.
 - `docs/architecture.md`: Threat model, trust model, MITM mechanics, iptables egress filtering, and "Duck Identity".
 - `docs/configuration.md`: Comprehensive reference for `PortalRule`, environment variables, flags, and caching.
-- `docs/deployment-modes.md`: In-depth comparison of the three deployment modes and architectural trade-offs.
+- `docs/deployment-modes.md`: Overview of recommended transparent sidecar mode and legacy/experimental modes.
+- `docs/design/README.md`: Consolidated index of architectural designs, decision records, and spike evaluations.
 - `docs/sidecar-container.md`: Deep dive and production walkthrough for transparent sidecar deployment.
 - `docs/opentelemetry.md`: OpenTelemetry tracing and instrumentation guide.
 - `docs/contributing.md`: Contributor guidelines and CLA information.

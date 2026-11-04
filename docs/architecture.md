@@ -149,3 +149,15 @@ With `service-portals`, the workload's identity is defined entirely by the **por
 - Traditional Workload Identity (GCP Workload Identity, AWS IAM Roles for Service Accounts) allows pods to authenticate to a single cloud provider via service accounts.
 - `service-portals` extends this boundary to *arbitrary third-party APIs* (Anthropic, OpenAI, GitHub, arbitrary REST endpoints) without requiring native Workload Identity federation on each upstream provider.
 - In future iterations (see Issue #97), the sidecar configuration itself can be dynamically updated via private gRPC APIs utilizing SPIFFE/mTLS or Kubernetes `PodCertificateRequest`, removing static Secrets from pod manifests entirely.
+
+---
+
+## Architectural Roadmap: Convergence on NRI as Single Mode
+
+While the current recommended production mode is the **transparent sidecar with an init container** (detailed above and in [docs/sidecar-container.md](sidecar-container.md)), the project is actively converging on a per-node **containerd Node Resource Interface (NRI) plugin with host-side interface enforcement** as the single supported mode of operation.
+
+Under this roadmap:
+1. **Host-Side Enforcement**: Egress filtering and redirection attach to the host peer interface (`veth`/`tap`), eliminating `CAP_NET_ADMIN` in workload pods (PSA `baseline` compliant) and guaranteeing interception holds across standard `runc`, `gVisor`, and `Kata Containers` ([#181](https://github.com/gke-labs/service-portals/issues/181)).
+2. **Definitive Single Mode**: Once the NRI implementation meets the acceptance bar on `main` (passing the deny suite including direct-to-proxy cases [#182], sandboxed runtime verification, IPv6/bounded DNS [#183], fail-closed semantics, and pod attribution [#182]), all other deployment modes—including explicit Service mode, explicit `HTTP_PROXY` mode, and in-pod init container mode—will be removed rather than deprecated indefinitely.
+
+For the full acceptance bar and removal plan, see [docs/roadmap.md](roadmap.md) and the design documentation in [docs/design/README.md](design/README.md).

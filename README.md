@@ -77,17 +77,16 @@ Placing an intercepting proxy in the outbound traffic path provides powerful cap
 
 ---
 
-## Deployment Modes
+## How to Deploy
 
-`service-portals` supports three primary deployment architectures:
+The **transparent sidecar** is the single recommended deployment model for `service-portals`:
+- An `initContainer` (`init-service-portals`) configures packet-level `iptables` redirection and generates an ephemeral, pod-local CA.
+- A sidecar proxy (`all-in-one-portal`) intercepts HTTP (`:8080`) and HTTPS (`:8443`) outbound traffic, handles dynamic TLS certificate minting, matches multi-host `PortalRule` declarations, and swaps placeholder tokens for production credentials.
+- Workload containers require **zero application code changes** and run with unprivileged user permissions (`allowPrivilegeEscalation: false`) while egress traffic is strictly filtered.
 
-| Mode | Summary | Documentation |
-| :--- | :--- | :--- |
-| **Transparent Sidecar Mode** *(Primary)* | `init-service-portals` configures iptables redirection and a pod-local CA; `all-in-one-portal` intercepts HTTP (:8080) and HTTPS (:8443) traffic. Requires zero application code changes and provides strict packet-level egress filtering. | [Sidecar Guide](docs/sidecar-container.md) |
-| **Explicit Service Mode** | Centralized, cluster-wide reverse proxy exposed via a standard Kubernetes `Service`. Workloads address the proxy explicitly (e.g. `http://gemini-portal/`). Does not require `NET_ADMIN`. | [Deployment Modes](docs/deployment-modes.md#2-explicit-service-mode-shared-in-cluster-gateway) |
-| **Explicit HTTP Proxy Mode** | Standard `HTTP_PROXY` and `HTTPS_PROXY` tunneling (`CONNECT` method). Supports a single upstream configured by `TARGET_URL` / `UPSTREAM_AUTH_TOKEN`; requests to other hosts are forwarded without modification; `PortalRule` routing is not applied in this mode today (see [#127](https://github.com/gke-labs/service-portals/issues/127)). | [Deployment Modes](docs/deployment-modes.md#3-explicit-http-proxy-mode-httpproxy--httpsproxy) |
+See the [Quick Start](#quick-start-transparent-sidecar) below and the [Sidecar Deployment Guide](docs/sidecar-container.md).
 
-For a detailed architectural comparison and trade-offs, see [docs/deployment-modes.md](docs/deployment-modes.md).
+> **Note on other modes & project direction**: Historical and alternative modes (explicit Service mode, explicit `HTTP_PROXY` mode, and the dropped application-level spike) are documented in [docs/deployment-modes.md](docs/deployment-modes.md). The project is converging on a per-node containerd NRI plugin as the future default single mode, after which legacy modes will be removed. See [docs/roadmap.md](docs/roadmap.md) for details.
 
 ---
 
@@ -158,21 +157,23 @@ The proxy intercepts the request, rewrites the destination to `https://generativ
 
 ## Available Service Portals & Components
 
-- **`all-in-one-portal`** (`cmd/all-in-one-portal/`): Multi-service sidecar proxy with dynamic `PortalRule` routing, SNI TLS termination, and `SIGHUP` reload. ([README](cmd/all-in-one-portal/README.md))
-- **`init-service-portals`** (`cmd/init-service-portals/`): Init container utility for Root CA generation, permission setup, and iptables redirection. ([README](cmd/init-service-portals/README.md))
+- **`all-in-one-portal`** (`cmd/all-in-one-portal/`): Recommended multi-service sidecar proxy with dynamic `PortalRule` routing, SNI TLS termination, and `SIGHUP` reload. ([README](cmd/all-in-one-portal/README.md))
+- **`init-service-portals`** (`cmd/init-service-portals/`): Init container utility for Root CA generation, permission setup, and iptables redirection for transparent sidecar mode. ([README](cmd/init-service-portals/README.md))
 - **`gitproxy-server`** (`cmd/gitproxy-server/`): High-performance Git HTTP caching proxy supporting protocols v0/v1/v2, commit DAG reachability pruning, and packfile generation. ([README](cmd/gitproxy-server/README.md))
-- **`service-portal`** (`cmd/service-portal/`): Generic single-target reverse proxy and explicit HTTP CONNECT proxy. ([README](cmd/service-portal/README.md))
-- **`gemini-portal`** (`gemini-portal/`): Specialized Google Gemini proxy with JSON and gRPC protobuf inspection and token redaction. ([README](gemini-portal/README.md))
-- **`anthropic-portal`** (`anthropic-portal/`): Specialized Anthropic Messages API proxy with JSON message parsing and gzip decompression. ([README](anthropic-portal/README.md))
-- **`github-portal`** (`github-portal/`): Specialized GitHub API proxy with Bearer token injection. ([README](github-portal/README.md))
+- **`service-portal`** (`cmd/service-portal/`): *Legacy single-target binary*: Generic single-target reverse proxy and explicit HTTP CONNECT proxy; scheduled for removal alongside explicit Service mode. ([README](cmd/service-portal/README.md))
+- **`gemini-portal`** (`gemini-portal/`): *Legacy single-target binary*: Specialized Google Gemini proxy; scheduled for removal alongside explicit Service mode. ([README](gemini-portal/README.md))
+- **`anthropic-portal`** (`anthropic-portal/`): *Legacy single-target binary*: Specialized Anthropic Messages API proxy; scheduled for removal alongside explicit Service mode. ([README](anthropic-portal/README.md))
+- **`github-portal`** (`github-portal/`): *Legacy single-target binary*: Specialized GitHub API proxy; scheduled for removal alongside explicit Service mode. ([README](github-portal/README.md))
 
 ---
 
 ## Documentation Index
 
 - **[Architecture & Security Model](docs/architecture.md)**: Threat model, trust model, MITM mechanics, iptables egress filtering, and "Duck Identity".
+- **[Roadmap: NRI Single-Mode Convergence](docs/roadmap.md)**: Transition plan to per-node NRI, acceptance criteria, and removal schedule for legacy modes.
+- **[Design & Decision Records](docs/design/README.md)**: Architectural decision records and spike evaluation reports.
 - **[Configuration Reference](docs/configuration.md)**: `PortalRule` specification, environment variables, flags, caching, and fallback behavior.
-- **[Deployment Modes](docs/deployment-modes.md)**: Comparison of Transparent Sidecar vs. Explicit Service vs. HTTP Proxy modes.
+- **[Deployment Modes](docs/deployment-modes.md)**: Recommended Transparent Sidecar mode and overview of legacy/experimental modes.
 - **[Sidecar Deployment Guide](docs/sidecar-container.md)**: Detailed step-by-step walkthrough and Kubernetes manifest for transparent sidecar pods.
 - **[OpenTelemetry Instrumentation](docs/opentelemetry.md)**: Guide to configuring distributed tracing with OpenTelemetry.
 - **[Contributing](docs/contributing.md)**: Information about submitting contributions and signing the CLA.
