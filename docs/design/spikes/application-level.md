@@ -13,7 +13,7 @@ This spike evaluated **Application-Level Interception** (Candidate #7 from issue
 
 ### Verdict
 * **Status**: **Not pursued**. Following the architectural decision in issue [#200](https://github.com/gke-labs/service-portals/issues/200), the project converges on Node Resource Interface (NRI) as the single operational mode and will not maintain a separate code path for GKE Autopilot.
-* **Property Carried Forward**: The MITM Host-escape fix identified during spike review is fixed standalone in [#186](https://github.com/gke-labs/service-portals/pull/186), protecting explicit proxy mode against tunnel host smuggling.
+* **Property Carried Forward**: the MITM Host-escape found during spike review. It is closed by removing CONNECT support from the proxy (#218); the Host-check patch in #186 was not merged.
 
 ---
 
@@ -84,7 +84,7 @@ The application-level interception model separates policy enforcement into two d
 
 ## 2. Explicit Proxy Mode & PortalRules (#127)
 
-> **Note**: The following was implemented on the spike branch only and is not on `main`; the one piece carried forward is the MITM host check in [#186](https://github.com/gke-labs/service-portals/pull/186).
+> **Note**: The following was implemented on the spike branch only and is not on `main`. The host-escape it describes is closed by removing CONNECT support from the proxy (#218); the Host-check patch in #186 was not merged.
 
 ### 2.1 The Issue with Explicit Proxy Mode
 
@@ -335,7 +335,7 @@ Following the architectural decision in issue [#200](https://github.com/gke-labs
 1. **CONNECT + Injected CA Swap with Zero Privileges**: Workload pods ran completely unprivileged (`runAsNonRoot: true`, UID 1000, `allowPrivilegeEscalation: false`, `NoNewPrivs: 1`, capability drops) with zero init containers, zero `NET_ADMIN` capabilities, and zero node-level daemons. Explicit HTTP requests and HTTPS `CONNECT` tunnels reached the proxy, where credentials were swapped and client TLS validation succeeded via the injected CA bundle (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`).
 2. **NetworkPolicy Default-Deny on kind v0.24+**: With kindnet running Kubernetes NetworkPolicy (available on kind v0.24+; tested on v0.27.0 `[as observed in CI]`), default-deny egress reliably blocked unauthorized traffic. Unsetting proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`) inside the workload container failed closed—direct connections to backend services, non-proxy ports (:8080, :9999), node IPs (:6443, :10250), and non-cluster DNS resolvers (:53 to 8.8.8.8) were dropped by host nftables rules.
 3. **Per-Pod HMAC Tokens in Proxy URL Userinfo Give Attribution**: The mutating webhook minted HMAC-SHA256 tokens embedded into the proxy URL userinfo (`http://pod:<token>@...`). Standard HTTP clients transmitted this in `Proxy-Authorization` headers, allowing the proxy to cryptographically verify caller identity, map it to the pod (`namespace/name`), and log the caller. Requests with missing or tampered tokens returned HTTP 407 Proxy Authentication Required.
-4. **MITM Host-Escape Closure**: The spike review identified a critical escape vector where an attacker inside an allowed TLS `CONNECT` tunnel could issue inner HTTP requests with a forged `Host` header to reach any destination reachable by the proxy. Enforcing that inner `Host` headers must match the `CONNECT` target (`MatchHosts`) closed this escape. This fix was extracted and is fixed standalone in [#186](https://github.com/gke-labs/service-portals/pull/186).
+4. **MITM Host-Escape Closure**: The spike review identified a critical escape vector where an attacker inside an allowed TLS `CONNECT` tunnel could issue inner HTTP requests with a forged `Host` header to reach any destination reachable by the proxy. Enforcing that inner `Host` headers must match the `CONNECT` target (`MatchHosts`) closed this escape. On `main` it is closed by removing CONNECT support from the proxy (#218); the Host-check patch in #186 was not merged.
 
 ### What It Would Have Needed (Reviews of #164 and #187)
 Graduating the application-level mechanism to a production-ready feature would have required resolving significant operational and security complexities identified during the reviews of PR [#164](https://github.com/gke-labs/service-portals/pull/164) and PR [#187](https://github.com/gke-labs/service-portals/pull/187):
