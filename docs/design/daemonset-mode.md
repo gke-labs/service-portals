@@ -429,10 +429,13 @@ The implementation of the NRI per-node architecture proceeds in four distinct, v
   4. Add e2e validation under `runtimeClassName: gvisor` confirming Netstack traffic is intercepted with zero bypass.
 
 ### Stage 3: Pod Identity & Caller Authentication ([#182](https://github.com/gke-labs/service-portals/issues/182))
+- **Status**: Implemented in #222 (pending merge; tracking #182).
 - **Deliverables**:
-  1. Implement synchronous `RemoteAddr` -> Pod identity resolution in `cmd/daemonset-portal`.
-  2. Implement kernel cgroup ID lookup on accepted host sockets to prevent caller spoofing with `CAP_NET_RAW`.
-  3. Enforce `SO_ORIGINAL_DST` inspection to reject direct connections to proxy listening ports.
+  1. Synchronous `RemoteAddr` -> Pod identity resolution in `pkg/portals` backed by an in-memory pod map populated by `portal-nri-plugin` (`RunPodSandbox`, `StopPodSandbox`, `Synchronize`).
+  2. Per-pod policy enforcement: caller pod identity maps to allowed `PortalRule`s; unentitled hosts are rejected with HTTP 403.
+  3. Dynamic Bind API (`/bind` and `/unbind`) on the node agent: warm-pool sandboxes start unbound (fail closed by default), and coordinators bind/unbind identities without pod spec mutations.
+  4. Direct-to-proxy connection protection: direct connections to proxy ports from non-opted-in pods or with unentitled hosts are denied.
+  5. Proxy logs carry pod namespace/name. Attribution headers (`X-Consumer-Identity`, `X-Forwarded-Client-Pod`) are sent upstream only for PortalRules that set `attributionHeaders: true`; by default nothing about the caller leaves the cluster.
 
 ### Stage 4: Dynamic Configurator Integration ([#97](https://github.com/gke-labs/service-portals/issues/97) / [#99](https://github.com/gke-labs/service-portals/issues/99))
 - **Deliverables**:
