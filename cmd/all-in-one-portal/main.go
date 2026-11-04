@@ -30,9 +30,21 @@ func main() {
 	defer stop()
 
 	rulesDir := flag.String("rules-dir", "", "Directory containing configuration rules")
+	serveDNSFlag := flag.Bool("serve-dns", false, "Serve bounded DNS for configured rule hosts")
+	dnsBindAddr := flag.String("dns-bind-addr", "", "Address to bind DNS server")
+	dnsPort := flag.String("dns-port", "", "Port to bind DNS server (default 53)")
 	flag.Parse()
 
-	config := portals.Config{}
+	serveDNS := *serveDNSFlag
+	if env := os.Getenv("SERVE_DNS"); env != "" {
+		serveDNS = (env == "true" || env == "1")
+	}
+
+	config := portals.Config{
+		ServeDNS:     serveDNS,
+		DNSBindAddr:  *dnsBindAddr,
+		ProxyDNSPort: *dnsPort,
+	}
 	if *rulesDir != "" {
 		config.RulesDir = *rulesDir
 	}

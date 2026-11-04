@@ -210,6 +210,19 @@ func (h *Harness) GetPodLogs(name string) string {
 	return string(out)
 }
 
+func (h *Harness) GetPodLogsByLabel(labelSelector, container string) string {
+	h.t.Helper()
+	args := []string{"logs", "-l", labelSelector}
+	if container != "" {
+		args = append(args, "-c", container)
+	}
+	out, err := exec.Command("kubectl", args...).CombinedOutput()
+	if err != nil {
+		h.t.Logf("Failed to get logs for label %s, container %s: %v (output: %s)", labelSelector, container, err, out)
+	}
+	return string(out)
+}
+
 func (h *Harness) WaitForPodSuccess(name string, timeout time.Duration) {
 	h.t.Helper()
 	h.t.Logf("Waiting for pod %s to succeed", name)

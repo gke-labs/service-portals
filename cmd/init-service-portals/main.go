@@ -31,9 +31,23 @@ import (
 func main() {
 	certDir := flag.String("cert-dir", "/etc/service-portal/ca", "Directory to write the public CA cert")
 	keyDir := flag.String("key-dir", "/etc/service-portal/ca-private", "Directory to write the CA cert and key")
+	socketDir := flag.String("socket-dir", "", "Directory for shared unix domain sockets to create and chown")
 	chownUID := flag.Int("chown-uid", -1, "UID to chown the private key file to (-1 for no change)")
 	chownGID := flag.Int("chown-gid", -1, "GID to chown the private key file to (-1 for no change)")
 	flag.Parse()
+
+	if *socketDir != "" {
+		if err := os.MkdirAll(*socketDir, 0750); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating socket dir: %v\n", err)
+			os.Exit(1)
+		}
+		if *chownUID >= 0 && *chownGID >= 0 {
+			if err := os.Chown(*socketDir, *chownUID, *chownGID); err != nil {
+				fmt.Fprintf(os.Stderr, "Error chowning socket dir: %v\n", err)
+				os.Exit(1)
+			}
+		}
+	}
 
 	if err := generateCA(*certDir, *keyDir, *chownUID, *chownGID); err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating CA: %v\n", err)

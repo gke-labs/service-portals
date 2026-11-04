@@ -206,9 +206,40 @@ The plugin inspects `pod.RuntimeHandler` (and CRI annotation `io.kubernetes.cri.
 
 ## 5. Security & Authentication Boundaries
 
-* **Proxy Caller Identity (#182)**: The per-node proxy (`all-in-one-portal`) listens on host ports `0.0.0.0:8080` and `0.0.0.0:8443`. It does not inspect `RemoteAddr` or host cgroups to verify the calling pod's identity or enforce per-pod policies. Any process or pod on the node network capable of reaching host ports can currently connect to the proxy. Caller authentication and per-pod policy enforcement are tracked in [#182](https://github.com/gke-labs/service-portals/issues/182).
+* **Proxy Caller Identity & Per-Pod Policy (#182)**:
+  * **Pod Map Lifecycle**: `portal-nri-plugin` maintains an in-memory pod map indexed by Pod UID and IP addresses through `RunPodSandbox`, `StopPodSandbox`, and `Synchronize`. It exposes this state to the proxy on the same node via an internal Admin API (`127.0.0.1:8081`).
+  * **Loopback Admin Restriction**: The Admin and Bind API binds strictly to `127.0.0.1:8081` (or a private Unix domain socket) and refuses non-loopback addresses (`validateAdminAddr`). Because the node agent operates with `hostNetwork: true`, binding to `0.0.0.0` or an external node IP would expose pod registration and policy binding to any unintercepted pod or external host, creating an unauthenticated privilege escalation vulnerability. Bind operations are called locally on the node or driven via authenticated cluster mechanisms (e.g. `kubectl exec`).
+  * **Caller Resolution & Fail-Closed Enforcement**: On each incoming HTTP request (`:8080`) and TLS ClientHello (`:8443`), the proxy extracts the client IP from `RemoteAddr` (or `net.Conn.RemoteAddr()`). If the caller is unknown or not an opted-in pod, the proxy denies the request immediately with HTTP 403 Forbidden (or aborts the TLS handshake).
+  * **Per-Pod Policy Enforcement**: The proxy evaluates the pod's assigned policy against the target rule and host. An opted-in pod connecting directly or via transparent interception with a host/SNI it is not entitled to is denied with HTTP 403 Forbidden and receives no credential.
+  * **Pod Attribution & Logging**: Proxy logs carry caller pod attribution (`Caller: <namespace>/<name> (identity: <id>)`). To prevent leaking internal cluster pod identity to external public upstreams, upstream requests carry attribution headers (`X-Consumer-Identity` and `X-Forwarded-Client-Pod`) only when a `PortalRule` explicitly opts in via `attributionHeaders: true`.
+  * **Proxy Address Binding**: The proxy binds to `${PROXY_HOST}:${PORT}` (the node's pod-facing address) rather than `0.0.0.0` where the CNI makes that possible. On CNIs where the node IP faces both cluster traffic and the pod network (such as kindnet), caller IP authentication at the proxy provides the security boundary against non-opted-in callers.
+
+* **Dynamic Bind API for Warm Pools**:
+  * In warm-pool architectures (such as agent-sandbox prelaunched pools), sandboxes are created before the tenant or user identity is known.
+  * The node agent exposes an explicit **Bind API** (`POST /bind` and `POST /unbind`). A coordinator (e.g. sandbox claim controller) calls `Bind(pod UID, identity, policy)` immediately before issuing commands in the sandbox, and `Unbind(pod UID)` upon sandbox release.
+  * Unbound opted-in pods fail closed by default: they get only deny rules and receive no credentials.
+  * Rebinding a warm pod requires no pod mutation, eliminating the need to propagate tenant identities through mutable pod specs. NRI pod synchronization (`Synchronize`) and background reconciliation serve as the fallback to recover state after agent restarts and prune disappeared pods.
+
+* **Spoofing Analysis: `CAP_NET_RAW` and Host-Side Pod Map Trustworthiness**:
+  * **What `CAP_NET_RAW` Permits**: Under Kubernetes Pod Security Standards (PSS) Baseline profile, containers retain `CAP_NET_RAW`. A compromised workload or untrusted tenant code can open `SOCK_RAW` / `AF_PACKET` sockets, craft arbitrary Ethernet/IP packets with forged Source IP addresses, and send raw ICMP frames.
+  * **Why the Host-Side Pod Map is Trustworthy**:
+    1. *TCP 3-Way Handshake Protection*: The service-portal operates as an L7 HTTP/HTTPS reverse proxy over TCP. Initiating an HTTP request or TLS handshake strictly requires completing the TCP three-way handshake (SYN -> SYN-ACK -> ACK). If Pod A emits a TCP SYN forging the Source IP of Pod B (`10.244.0.10`):
+       * The proxy responds with a TCP SYN-ACK packet addressed to `10.244.0.10`.
+       * The host Linux kernel and CNI bridge route the SYN-ACK to Pod B's veth interface.
+       * Pod A never receives the SYN-ACK and cannot determine the TCP sequence numbers.
+       * Pod B receives an unexpected SYN-ACK for a connection it never initiated; its kernel immediately responds with a TCP RST (reset) packet back to the proxy, tearing down the embryonic connection.
+       * Pod A cannot complete the TCP handshake, cannot establish a stream, and cannot transmit HTTP headers or obtain swapped credentials.
+    2. *Host-Side Veth / Tap Isolation*: Each pod is attached to a dedicated host-side peer interface (`veth*` or `tap*`). Host-side reverse path filtering (`rp_filter`) and CNI ingress filters prevent packets with forged source IPs from being delivered to the host stack.
+    3. *Host Cgroup Tracking*: Because the proxy runs on the host, future eBPF `sock_ops` integration can correlate accepted sockets directly to the kernel cgroup ID on the host.
+
 * **Per-Pod Certificates (#182 follow-up)**: As noted during review, generating per-pod leaf certificates (encoding pod identity or UID in leaf SANs) would surface if the proxy ever confused one pod for another ("crossed the streams"). A workload would fail TLS validation if served another pod's certificate, exposing cross-pod routing bugs immediately. This will be evaluated as part of the caller identity and TLS termination work in [#182](https://github.com/gke-labs/service-portals/issues/182).
-* **IPv6 and Bounded DNS (#183)**: The current rules install only IPv4 iptables rules. IPv6 traffic is unfiltered in the network namespace, and CoreDNS forwarding for unlisted external domains is unrestricted. Enforcing IPv6 parity and bounding DNS queries to policy-listed hostnames are tracked in [#183](https://github.com/gke-labs/service-portals/issues/183).
+* **IPv6 Rules and Bounded DNS (#183)**:
+  - *Dual-Stack IPv6 Egress Parity*: Dual-stack is detected from sandbox pod IP addresses. `portal-nri-plugin` installs the same host-side per-interface chains (`PORTAL_PR_<iface>` in nat PREROUTING, `PORTAL_EG_<iface>` in filter INPUT/FORWARD) via `ip6tables`. TCP ports 80 and 443 are DNAT'd to `[PROXY_HOST_V6]:PORT`, port 53 (UDP & TCP) is DNAT'd to `[PROXY_HOST_V6]:53`, ICMPv6 Neighbor Discovery (NDP types 133-137) and error messages (types 1-4) are accepted for link-local reachability and PMTU, and all other IPv6 egress is rejected with `icmp6-port-unreachable`.
+  - *Bounded DNS Architecture (Option b)*: Port 53 (UDP & TCP) on the host peer interface is redirected via DNAT to the node proxy's DNS server (`pkg/dns`). The server responds with synthetic A records pointing to `PROXY_HOST` and AAAA records pointing to `PROXY_HOST_V6` for configured `PortalRule` hosts. All unlisted names return `NXDOMAIN` by default. Hard-coded resolver fallbacks (`10.96.0.10`) are removed. CoreDNS is completely inaccessible to opted-in pods, closing the DNS exfiltration side channel.
+  - *Design Limits*:
+    1. *No Arbitrary External or In-Cluster Resolution*: Workloads cannot resolve unlisted domains or unlisted in-cluster Service names. Any endpoint the workload must reach must be declared in a `PortalRule`.
+    2. *CNAME Chaining*: The bounded DNS server synthesizes A/AAAA records directly for matched names without resolving upstream CNAME chains. Upstream resolution is performed exclusively by the L7 proxy.
+    3. *Workload DNS Search Domains*: Pod `/etc/resolv.conf` search path expansions (e.g. `backend.default.svc.cluster.local`) are matched against declared rule hosts by prefix to avoid resolution failures under `ndots:5`.
 
 ---
 
@@ -221,95 +252,13 @@ The plugin inspects `pod.RuntimeHandler` (and CRI annotation `io.kubernetes.cri.
 
 ---
 
-## 7. E2E Test Execution Output
+## 7. E2E Test Coverage
 
-The following test results were captured directly from a complete run of `TestNRIPluginEgressDenied` against a live kind cluster running containerd v2.0.2:
-
-```
-=== RUN   TestNRIPluginEgressDenied
-    e2e_test.go:1027: Creating cluster nri-egress-denied-e2e
-    e2e_test.go:1027: Waiting for CoreDNS deployment rollout
-    e2e_test.go:1027: Waiting for kube-dns service endpoints
-    e2e_test.go:1027: kube-dns endpoint slice ready: 10.244.0.2 10.244.0.3
-    e2e_test.go:1032: Building docker image all-in-one-portal:e2e
-    e2e_test.go:1033: Building docker image init-service-portals:e2e
-    e2e_test.go:1034: Building docker image portal-nri-plugin:e2e
-    e2e_test.go:1035: Building docker image toolbox:e2e
-    e2e_test.go:1037: Loading image all-in-one-portal:e2e into kind
-    e2e_test.go:1038: Loading image init-service-portals:e2e into kind
-    e2e_test.go:1039: Loading image portal-nri-plugin:e2e into kind
-    e2e_test.go:1040: Loading image toolbox:e2e into kind
-    e2e_test.go:1095: Applying manifest content
-    e2e_test.go:1096: Waiting for deployment backend
-    e2e_test.go:1100: Backend ClusterIP: 10.96.10.242
-    e2e_test.go:1250: Applying manifest content
-    e2e_test.go:1262: Client pod is correctly Pending due to node taint: Pending
-    e2e_test.go:1265: Applying manifest content
-    e2e_test.go:1266: Waiting for pod with label app=portal-node-agent to be ready
-    e2e_test.go:1275: Waiting for pod with label app=test-client-nri-deny to be ready
-=== RUN   TestNRIPluginEgressDenied/DirectIP_InterceptedPort_HTTP
-    e2e_test.go:811: direct IP HTTP request failed as expected: exit status 8 (output: command terminated with exit code 8
-        )
-=== RUN   TestNRIPluginEgressDenied/DirectIP_InterceptedPort_HTTPS
-    e2e_test.go:826: direct IP HTTPS request failed as expected: exit status 4 (output: command terminated with exit code 4
-        )
-=== RUN   TestNRIPluginEgressDenied/UnlistedHostname_InterceptedPort_HTTP
-    e2e_test.go:842: unlisted host HTTP request failed as expected: exit status 8 (output: command terminated with exit code 8
-        )
-=== RUN   TestNRIPluginEgressDenied/UnlistedHostname_InterceptedPort_HTTPS
-    e2e_test.go:857: unlisted host HTTPS request failed as expected: exit status 4 (output: command terminated with exit code 4
-        )
-=== RUN   TestNRIPluginEgressDenied/NonInterceptedPort_HTTP_8080
-    e2e_test.go:873: non-intercepted port HTTP request failed as expected: exit status 4 (output: command terminated with exit code 4
-        )
-=== RUN   TestNRIPluginEgressDenied/NonInterceptedPort_RawTCP_9999
-    e2e_test.go:888: raw TCP connection to port 9999 failed as expected: exit status 1 (output: 2026/11/03 22:27:13 tcp dial to 10.96.10.242:9999 failed: dial tcp 10.96.10.242:9999: connect: connection refused
-        command terminated with exit code 1
-        )
-=== RUN   TestNRIPluginEgressDenied/ArbitraryDNS_Blocked
-    e2e_test.go:900: toolbox probe dns to 8.8.8.8 failed as expected: exit status 1 (output: 2026/11/03 22:27:13 dns lookup of example.com via 8.8.8.8:53 failed: lookup example.com on 10.96.0.10:53: write udp 10.244.0.6:58495->8.8.8.8:53: write: operation not permitted
-        command terminated with exit code 1
-        )
-    e2e_test.go:909: nslookup to 8.8.8.8 failed as expected: exit status 1 (output: ;; communications error to 8.8.8.8#53: connection refused
-        ;; communications error to 8.8.8.8#53: connection refused
-        ;; communications error to 8.8.8.8#53: connection refused
-        ;; no servers could be reached
-        
-        command terminated with exit code 1
-        )
-=== RUN   TestNRIPluginEgressDenied/ClusterDNS_Allowed
-    e2e_test.go:921: cluster DNS probe succeeded: RESOLVED backend: [10.96.10.242]
-    e2e_test.go:931: cluster nslookup succeeded: ;; Got recursion not available from 10.96.0.10
-        Server:		10.96.0.10
-        Address:	10.96.0.10#53
-        
-        Name:	backend.default.svc.cluster.local
-        Address: 10.96.10.242
-        ;; Got recursion not available from 10.96.0.10
-        
-=== RUN   TestNRIPluginEgressDenied/PositiveControl_HTTP
-    e2e_test.go:943: positive control HTTP output: {"body":"","headers":{"Accept":["*/*"],"Accept-Encoding":["identity"],"Authorization":["Bearer gemini-nri-token"],"User-Agent":["Wget/1.21.3"]},"method":"GET","path":"/positive-control-http"}
-=== RUN   TestNRIPluginEgressDenied/PositiveControl_HTTPS
-    e2e_test.go:966: positive control output: {"body":"","headers":{"Accept":["*/*"],"Accept-Encoding":["identity"],"Authorization":["Bearer gemini-nri-token"],"User-Agent":["Wget/1.21.3"]},"method":"GET","path":"/positive-control"}
-=== RUN   TestNRIPluginEgressDenied/BypassAttempt_Disallowed
-    e2e_test.go:1005: workload NoNewPrivs status: NoNewPrivs:	1
-    e2e_test.go:1017: su to UID 1337 failed as expected: exit status 1 (output: su: user 1337 does not exist or the user entry does not contain all the required fields
-        command terminated with exit code 1
-        )
-=== NAME  TestNRIPluginEgressDenied
-    harness.go:55: Deleting cluster nri-egress-denied-e2e
---- PASS: TestNRIPluginEgressDenied (121.98s)
-    --- PASS: TestNRIPluginEgressDenied/DirectIP_InterceptedPort_HTTP (0.14s)
-    --- PASS: TestNRIPluginEgressDenied/DirectIP_InterceptedPort_HTTPS (0.14s)
-    --- PASS: TestNRIPluginEgressDenied/UnlistedHostname_InterceptedPort_HTTP (0.13s)
-    --- PASS: TestNRIPluginEgressDenied/UnlistedHostname_InterceptedPort_HTTPS (0.15s)
-    --- PASS: TestNRIPluginEgressDenied/NonInterceptedPort_HTTP_8080 (1.15s)
-    --- PASS: TestNRIPluginEgressDenied/NonInterceptedPort_RawTCP_9999 (0.08s)
-    --- PASS: TestNRIPluginEgressDenied/ArbitraryDNS_Blocked (0.18s)
-    --- PASS: TestNRIPluginEgressDenied/ClusterDNS_Allowed (0.18s)
-    --- PASS: TestNRIPluginEgressDenied/PositiveControl_HTTP (0.14s)
-    --- PASS: TestNRIPluginEgressDenied/PositiveControl_HTTPS (0.25s)
-    --- PASS: TestNRIPluginEgressDenied/BypassAttempt_Disallowed (0.23s)
-PASS
-ok  	github.com/gke-labs/service-portals/tests/e2e	121.984s
-```
+The end-to-end test suite (`TestNRIPluginEgressDenied` in `tests/e2e/e2e_test.go`) verifies the complete set of interception and security behaviors against a live kind cluster running containerd v2.0.2:
+- **Node Initialization Taint**: Opted-in pods remain `Pending` until the `portal-node-agent` DaemonSet is ready and removes the node initialization taint.
+- **Fail-Closed Unbound State**: Opted-in pods start unbound and fail closed by default, rejecting outbound requests until explicitly bound.
+- **Dynamic Bind API**: The node agent Bind API binds the pod UID to user identity and policy over the local Unix domain socket (`portal-nri-plugin bind`), enabling subsequent requests to receive swapped credentials.
+- **Attribution & Logging**: Proxy logs carry caller pod identity (`Caller: <namespace>/<name>`), and upstream requests preserve confidentiality by omitting attribution headers unless explicitly opted in via `attributionHeaders: true`.
+- **Direct-to-Proxy Denials**: Opted-in pods connecting directly to the proxy port with unentitled hostnames receive a 403, and non-opted-in pods on the node connecting directly to the proxy port receive a 403.
+- **Unbind Reversion**: Unbinding the pod UID (`portal-nri-plugin unbind`) immediately reverts subsequent requests to denied (403).
+- **Network Egress Isolation**: Direct IP requests, unlisted hostnames, non-intercepted ports, raw TCP, and arbitrary external DNS queries to public resolvers are strictly blocked, while cluster DNS queries to CoreDNS continue to resolve normally.

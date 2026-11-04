@@ -15,22 +15,27 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/stub"
+	"github.com/gke-labs/service-portals/pkg/networking"
+	"github.com/gke-labs/service-portals/pkg/portals"
 	"k8s.io/klog/v2"
 )
 
@@ -44,23 +49,29 @@ type pluginConfig struct {
 	pluginName     string
 	pluginIndex    string
 	proxyHost      string
+	proxyHostV6    string
 	proxyPort      string
 	proxyHTTPSPort string
-	dnsServers     []string
+	proxyDNSPort   string
+	adminURL       string
 	caCertPath     string
 }
 
 type podNetworkState struct {
 	hostInterface string
 	podIP         string
+	podIPv6       string
+	isDualStack   bool
 	runtimeClass  string
 }
 
 type portalPlugin struct {
-	cfg         pluginConfig
-	mu          sync.Mutex
-	pods        map[string]podNetworkState
-	runIptables func([][]string) error
+	cfg          pluginConfig
+	mu           sync.Mutex
+	pods         map[string]podNetworkState
+	activePods   map[string]portals.PodInfo
+	runIptables  func([][]string) error
+	runIp6tables func([][]string) error
 }
 
 func envOrDefault(key, fallback string) string {
@@ -72,15 +83,16 @@ func envOrDefault(key, fallback string) string {
 
 func parseFlags() (pluginConfig, error) {
 	var cfg pluginConfig
-	var rawDNSServers string
 
 	flag.StringVar(&cfg.socketPath, "socket-path", envOrDefault("NRI_SOCKET_PATH", "/var/run/nri/nri.sock"), "Path to containerd NRI socket")
 	flag.StringVar(&cfg.pluginName, "plugin-name", envOrDefault("NRI_PLUGIN_NAME", "service-portal"), "NRI plugin name")
 	flag.StringVar(&cfg.pluginIndex, "plugin-index", envOrDefault("NRI_PLUGIN_INDEX", envOrDefault("NRI_PLUGIN_IDX", "01")), "NRI plugin index")
 	flag.StringVar(&cfg.proxyHost, "proxy-host", envOrDefault("PROXY_HOST", ""), "Proxy destination host or node IP")
+	flag.StringVar(&cfg.proxyHostV6, "proxy-host-v6", envOrDefault("PROXY_HOST_V6", ""), "Proxy destination IPv6 host or node IPv6")
 	flag.StringVar(&cfg.proxyPort, "proxy-port", envOrDefault("PROXY_PORT", "8080"), "Proxy HTTP port")
 	flag.StringVar(&cfg.proxyHTTPSPort, "proxy-https-port", envOrDefault("PROXY_HTTPS_PORT", "8443"), "Proxy HTTPS port")
-	flag.StringVar(&rawDNSServers, "dns-servers", envOrDefault("DNS_SERVERS", ""), "Comma-separated cluster DNS server IPs")
+	flag.StringVar(&cfg.proxyDNSPort, "proxy-dns-port", envOrDefault("PROXY_DNS_PORT", envOrDefault("DNS_PORT", "53")), "Proxy DNS port")
+	flag.StringVar(&cfg.adminURL, "admin-url", envOrDefault("ADMIN_URL", "unix://"+portals.DefaultAdminSocketPath), "URL or unix domain socket of the node proxy admin server")
 	flag.StringVar(&cfg.caCertPath, "ca-cert-path", envOrDefault("CA_CERT_PATH", "/etc/service-portal/ca/tls.crt"), "Host path to CA certificate bundle")
 	flag.Parse()
 
@@ -92,18 +104,9 @@ func parseFlags() (pluginConfig, error) {
 	}
 	cfg.proxyHost = strings.TrimSpace(cfg.proxyHost)
 
-	for _, s := range strings.Split(rawDNSServers, ",") {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if net.ParseIP(s) == nil {
-			return cfg, fmt.Errorf("invalid DNS server IP %q in --dns-servers", s)
-		}
-		cfg.dnsServers = append(cfg.dnsServers, s)
-	}
-	if len(cfg.dnsServers) == 0 {
-		return cfg, fmt.Errorf("missing required configuration: --dns-servers or DNS_SERVERS must specify at least one valid DNS server IP")
+	cfg.proxyHostV6 = strings.TrimSpace(cfg.proxyHostV6)
+	if cfg.proxyHostV6 == "" {
+		cfg.proxyHostV6 = networking.DiscoverNodeIPv6()
 	}
 
 	if strings.TrimSpace(cfg.caCertPath) == "" {
@@ -140,12 +143,7 @@ func getRuntimeClass(pod *api.PodSandbox) string {
 	if pod.RuntimeHandler != "" {
 		return pod.RuntimeHandler
 	}
-	if pod.Annotations != nil {
-		if rc, ok := pod.Annotations["io.kubernetes.cri.runtime-handler"]; ok && rc != "" {
-			return rc
-		}
-	}
-	return ""
+	return pod.Annotations["io.kubernetes.cri.runtime-handler"]
 }
 
 func isSupportedRuntime(runtimeClass string) bool {
@@ -157,118 +155,20 @@ func isSupportedRuntime(runtimeClass string) bool {
 	}
 }
 
-func parsePeerIndex(output string) (int, error) {
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		nameField := strings.TrimSuffix(fields[1], ":")
-		if nameField == "lo" || strings.HasPrefix(nameField, "lo@") {
-			continue
-		}
-		if idx := strings.Index(nameField, "@if"); idx != -1 {
-			pIdxStr := nameField[idx+3:]
-			if pIdx, err := strconv.Atoi(pIdxStr); err == nil && pIdx > 0 {
-				return pIdx, nil
-			}
-		}
+func (p *portalPlugin) validateRuntime(pod *api.PodSandbox) error {
+	runtimeClass := getRuntimeClass(pod)
+	if !isSupportedRuntime(runtimeClass) {
+		return fmt.Errorf("unsupported runtime class %q for opted-in pod %s: refusing to start unprotected pod", runtimeClass, podID(pod))
 	}
-	return 0, fmt.Errorf("no peer interface found in ip link output")
-}
-
-func parsePodIPv4(output string) string {
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			nameField := strings.TrimSuffix(fields[1], ":")
-			if nameField == "lo" || strings.HasPrefix(nameField, "lo@") {
-				continue
-			}
-		}
-		for i, f := range fields {
-			if f == "inet" && i+1 < len(fields) {
-				cidr := fields[i+1]
-				if ip, _, err := net.ParseCIDR(cidr); err == nil && !ip.IsLoopback() {
-					return ip.String()
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func parseHostInterfaceFromHostLinks(output, netnsBasename string) string {
-	for _, line := range strings.Split(output, "\n") {
-		if strings.Contains(line, "link-netns "+netnsBasename) {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				rawName := strings.TrimSuffix(fields[1], ":")
-				if atIdx := strings.Index(rawName, "@"); atIdx != -1 {
-					rawName = rawName[:atIdx]
-				}
-				if rawName != "" && rawName != "lo" {
-					return rawName
-				}
-			}
-		}
-	}
-	return ""
+	return nil
 }
 
 func (p *portalPlugin) findHostInterface(ctx context.Context, pod *api.PodSandbox, netnsPath string) (string, string, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	var ips []string
+	if pod != nil {
+		ips = pod.Ips
 	}
-	log := klog.FromContext(ctx)
-
-	cmd := exec.Command("nsenter", "--net="+netnsPath, "ip", "-o", "link", "show")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", "", fmt.Errorf("nsenter ip link show: %w (output: %s)", err, out)
-	}
-
-	var hostIface string
-	if peerIndex, err := parsePeerIndex(string(out)); err == nil && peerIndex > 0 {
-		if iface, err := net.InterfaceByIndex(peerIndex); err == nil && iface.Name != "" {
-			hostIface = iface.Name
-		}
-	}
-
-	if hostIface == "" {
-		base := filepath.Base(netnsPath)
-		hCmd := exec.Command("ip", "-o", "link", "show")
-		hOut, err := hCmd.CombinedOutput()
-		if err != nil {
-			log.V(1).Info("Host ip link show fallback query failed", "err", err)
-		} else {
-			hostIface = parseHostInterfaceFromHostLinks(string(hOut), base)
-		}
-	}
-
-	if hostIface == "" {
-		return "", "", fmt.Errorf("could not identify host-side interface for pod %s (netns %s)", podID(pod), netnsPath)
-	}
-
-	var podIP string
-	if pod != nil && len(pod.Ips) > 0 && pod.Ips[0] != "" {
-		podIP = pod.Ips[0]
-	}
-	if podIP == "" {
-		ipCmd := exec.Command("nsenter", "--net="+netnsPath, "ip", "-o", "-4", "addr", "show")
-		ipOut, err := ipCmd.CombinedOutput()
-		if err != nil {
-			log.V(1).Info("Could not determine pod IPv4 via nsenter", "pod", podID(pod), "err", err)
-		} else {
-			podIP = parsePodIPv4(string(ipOut))
-		}
-	}
-
-	return hostIface, podIP, nil
+	return networking.FindHostInterface(ctx, ips, netnsPath)
 }
 
 func (p *portalPlugin) findNetnsPath(pod *api.PodSandbox) (string, error) {
@@ -292,7 +192,6 @@ func (p *portalPlugin) findNetnsPath(pod *api.PodSandbox) (string, error) {
 		return "", fmt.Errorf("stat netns path %s for pod %s: %w", netnsPath, podID(pod), err)
 	}
 
-	// Ensure netnsPath is not equal to the plugin's own host network namespace
 	selfStat, err := os.Stat("/proc/self/ns/net")
 	if err != nil {
 		return "", fmt.Errorf("stat /proc/self/ns/net: %w", err)
@@ -304,51 +203,68 @@ func (p *portalPlugin) findNetnsPath(pod *api.PodSandbox) (string, error) {
 	return netnsPath, nil
 }
 
-func buildHostIptablesRules(hostIface, proxyHost, proxyPort, proxyHTTPSPort string, dnsServers []string) [][]string {
+func buildHostNetfilterRules(isIPv6 bool, hostIface, proxyHost, proxyPort, proxyHTTPSPort, proxyDNSPort string) [][]string {
+	if proxyDNSPort == "" {
+		proxyDNSPort = "53"
+	}
 	prChain := "PORTAL_PR_" + hostIface
 	egChain := "PORTAL_EG_" + hostIface
 
-	var rules [][]string
+	dest := func(p string) string { return net.JoinHostPort(proxyHost, p) }
 
-	// 1. NAT table: DNAT ports 80 and 443 on host-side interface to node proxy
-	rules = append(rules,
-		[]string{"-t", "nat", "-N", prChain},
-		[]string{"-t", "nat", "-F", prChain},
-		[]string{"-t", "nat", "-D", "PREROUTING", "-i", hostIface, "-j", prChain},
-		[]string{"-t", "nat", "-I", "PREROUTING", "1", "-i", hostIface, "-j", prChain},
-		[]string{"-t", "nat", "-A", prChain, "-p", "tcp", "--dport", "80", "-j", "DNAT", "--to-destination", net.JoinHostPort(proxyHost, proxyPort)},
-		[]string{"-t", "nat", "-A", prChain, "-p", "tcp", "--dport", "443", "-j", "DNAT", "--to-destination", net.JoinHostPort(proxyHost, proxyHTTPSPort)},
-	)
+	rules := [][]string{
+		{"-t", "nat", "-N", prChain},
+		{"-t", "nat", "-F", prChain},
+		{"-t", "nat", "-D", "PREROUTING", "-i", hostIface, "-j", prChain},
+		{"-t", "nat", "-I", "PREROUTING", "1", "-i", hostIface, "-j", prChain},
+		{"-t", "nat", "-A", prChain, "-p", "tcp", "--dport", "80", "-j", "DNAT", "--to-destination", dest(proxyPort)},
+		{"-t", "nat", "-A", prChain, "-p", "tcp", "--dport", "443", "-j", "DNAT", "--to-destination", dest(proxyHTTPSPort)},
+		{"-t", "nat", "-A", prChain, "-p", "udp", "--dport", "53", "-j", "DNAT", "--to-destination", dest(proxyDNSPort)},
+		{"-t", "nat", "-A", prChain, "-p", "tcp", "--dport", "53", "-j", "DNAT", "--to-destination", dest(proxyDNSPort)},
 
-	// 2. Filter table: Egress isolation and default-deny
-	rules = append(rules,
-		[]string{"-t", "filter", "-N", egChain},
-		[]string{"-t", "filter", "-F", egChain},
-		[]string{"-t", "filter", "-D", "INPUT", "-i", hostIface, "-j", egChain},
-		[]string{"-t", "filter", "-I", "INPUT", "1", "-i", hostIface, "-j", egChain},
-		[]string{"-t", "filter", "-D", "FORWARD", "-i", hostIface, "-j", egChain},
-		[]string{"-t", "filter", "-I", "FORWARD", "1", "-i", hostIface, "-j", egChain},
-		[]string{"-t", "filter", "-A", egChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
-		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "tcp", "--dport", proxyPort, "-j", "ACCEPT"},
-		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "tcp", "--dport", proxyHTTPSPort, "-j", "ACCEPT"},
-	)
+		{"-t", "filter", "-N", egChain},
+		{"-t", "filter", "-F", egChain},
+		{"-t", "filter", "-D", "INPUT", "-i", hostIface, "-j", egChain},
+		{"-t", "filter", "-I", "INPUT", "1", "-i", hostIface, "-j", egChain},
+		{"-t", "filter", "-D", "FORWARD", "-i", hostIface, "-j", egChain},
+		{"-t", "filter", "-I", "FORWARD", "1", "-i", hostIface, "-j", egChain},
+		{"-t", "filter", "-A", egChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
+	}
 
-	for _, dns := range dnsServers {
-		rules = append(rules,
-			[]string{"-t", "filter", "-A", egChain, "-d", dns, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
-			[]string{"-t", "filter", "-A", egChain, "-d", dns, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
-			[]string{"-t", "filter", "-A", egChain, "-m", "conntrack", "--ctorigdst", dns, "-p", "udp", "--dport", "53", "-j", "ACCEPT"},
-			[]string{"-t", "filter", "-A", egChain, "-m", "conntrack", "--ctorigdst", dns, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"},
-		)
+	if isIPv6 {
+		// Allow PMTU and neighbor discovery from the pod (types 1-4, 133, 135, 136).
+		// Router Advertisement (134) and Redirect (137) are dropped as a pod has no legitimate reason to send them.
+		for _, icmpType := range []string{"1", "2", "3", "4", "133", "135", "136"} {
+			rules = append(rules, []string{"-t", "filter", "-A", egChain, "-p", "ipv6-icmp", "--icmpv6-type", icmpType, "-j", "ACCEPT"})
+		}
 	}
 
 	rules = append(rules,
-		[]string{"-t", "filter", "-A", egChain, "-p", "tcp", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
-		[]string{"-t", "filter", "-A", egChain, "-p", "udp", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
-		[]string{"-t", "filter", "-A", egChain, "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "tcp", "--dport", proxyPort, "-j", "ACCEPT"},
+		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "tcp", "--dport", proxyHTTPSPort, "-j", "ACCEPT"},
+		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "udp", "--dport", proxyDNSPort, "-j", "ACCEPT"},
+		[]string{"-t", "filter", "-A", egChain, "-d", proxyHost, "-p", "tcp", "--dport", proxyDNSPort, "-j", "ACCEPT"},
+	)
+
+	rejectTarget := "icmp-port-unreachable"
+	if isIPv6 {
+		rejectTarget = "icmp6-port-unreachable"
+	}
+	rules = append(rules,
+		[]string{"-t", "filter", "-A", egChain, "-p", "tcp", "-j", "REJECT", "--reject-with", rejectTarget},
+		[]string{"-t", "filter", "-A", egChain, "-p", "udp", "-j", "REJECT", "--reject-with", rejectTarget},
+		[]string{"-t", "filter", "-A", egChain, "-j", "REJECT", "--reject-with", rejectTarget},
 	)
 
 	return rules
+}
+
+func buildHostIptablesRules(hostIface, proxyHost, proxyPort, proxyHTTPSPort, proxyDNSPort string) [][]string {
+	return buildHostNetfilterRules(false, hostIface, proxyHost, proxyPort, proxyHTTPSPort, proxyDNSPort)
+}
+
+func buildHostIp6tablesRules(hostIface, proxyHostV6, proxyPort, proxyHTTPSPort, proxyDNSPort string) [][]string {
+	return buildHostNetfilterRules(true, hostIface, proxyHostV6, proxyPort, proxyHTTPSPort, proxyDNSPort)
 }
 
 func buildHostCleanupRules(hostIface string) [][]string {
@@ -366,18 +282,19 @@ func buildHostCleanupRules(hostIface string) [][]string {
 	}
 }
 
-func runIptables(ruleCmds [][]string) error {
+func runNetfilter(bin string, ruleCmds [][]string) error {
 	for _, args := range ruleCmds {
-		cmd := exec.Command("iptables", args...)
+		cmd := exec.Command(bin, args...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
+			if errors.Is(err, exec.ErrNotFound) {
+				return nil
+			}
 			msg := string(out)
 			if len(args) >= 3 {
-				// -N fails if chain already exists: "Chain already exists"
 				if args[2] == "-N" && strings.Contains(strings.ToLower(msg), "already exists") {
 					continue
 				}
-				// -D or -X fails if rule or chain does not exist:
 				if (args[2] == "-D" || args[2] == "-X") && (strings.Contains(strings.ToLower(msg), "does not exist") ||
 					strings.Contains(msg, "No chain/target/match by that name") ||
 					strings.Contains(strings.ToLower(msg), "bad rule") ||
@@ -385,10 +302,18 @@ func runIptables(ruleCmds [][]string) error {
 					continue
 				}
 			}
-			return fmt.Errorf("iptables %v failed: %w (output: %s)", args, err, out)
+			return fmt.Errorf("%s %v failed: %w (output: %s)", bin, args, err, out)
 		}
 	}
 	return nil
+}
+
+func runIptables(ruleCmds [][]string) error {
+	return runNetfilter("iptables", ruleCmds)
+}
+
+func runIp6tables(ruleCmds [][]string) error {
+	return runNetfilter("ip6tables", ruleCmds)
 }
 
 func (p *portalPlugin) executeIptables(ruleCmds [][]string) error {
@@ -398,26 +323,172 @@ func (p *portalPlugin) executeIptables(ruleCmds [][]string) error {
 	return runIptables(ruleCmds)
 }
 
+func (p *portalPlugin) executeIp6tables(ruleCmds [][]string) error {
+	if p.runIp6tables != nil {
+		return p.runIp6tables(ruleCmds)
+	}
+	if p.runIptables != nil {
+		return p.runIptables(ruleCmds)
+	}
+	return runIp6tables(ruleCmds)
+}
+
 func (p *portalPlugin) installHostIptablesRules(hostIface string) error {
-	rules := buildHostIptablesRules(hostIface, p.cfg.proxyHost, p.cfg.proxyPort, p.cfg.proxyHTTPSPort, p.cfg.dnsServers)
+	rules := buildHostIptablesRules(hostIface, p.cfg.proxyHost, p.cfg.proxyPort, p.cfg.proxyHTTPSPort, p.cfg.proxyDNSPort)
 	return p.executeIptables(rules)
+}
+
+func (p *portalPlugin) installHostIp6tablesRules(hostIface string) error {
+	proxyHostV6 := p.cfg.proxyHostV6
+	if proxyHostV6 == "" {
+		proxyHostV6 = networking.DiscoverNodeIPv6()
+	}
+	if proxyHostV6 == "" {
+		return errors.New("dual-stack pod but no IPv6 proxy address: set PROXY_HOST_V6")
+	}
+	rules := buildHostIp6tablesRules(hostIface, proxyHostV6, p.cfg.proxyPort, p.cfg.proxyHTTPSPort, p.cfg.proxyDNSPort)
+	return p.executeIp6tables(rules)
 }
 
 func (p *portalPlugin) removeHostIptablesRules(hostIface string) error {
 	rules := buildHostCleanupRules(hostIface)
-	return p.executeIptables(rules)
+	if err := p.executeIptables(rules); err != nil {
+		return err
+	}
+	return p.executeIp6tables(rules)
+}
+
+func newAdminHTTPClient(adminURL string) (*http.Client, string, error) {
+	if strings.HasPrefix(adminURL, "unix://") || (strings.HasPrefix(adminURL, "/") && !strings.HasPrefix(adminURL, "http")) {
+		socketPath := strings.TrimPrefix(adminURL, "unix://")
+		return &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+				},
+			},
+			Timeout: 2 * time.Second,
+		}, "http://unix", nil
+	}
+	return &http.Client{Timeout: 2 * time.Second}, strings.TrimRight(adminURL, "/"), nil
+}
+
+func (p *portalPlugin) notifyPodUpdate(ctx context.Context, method, path string, payload any) error {
+	if p.cfg.adminURL == "" {
+		return nil
+	}
+	var data []byte
+	if payload != nil {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal pod payload: %w", err)
+		}
+		data = b
+	}
+	client, baseURL, err := newAdminHTTPClient(p.cfg.adminURL)
+	if err != nil {
+		return fmt.Errorf("invalid admin URL %q: %w", p.cfg.adminURL, err)
+	}
+	url := baseURL + path
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+		}
+		body, rErr := io.ReadAll(resp.Body)
+		if rErr != nil {
+			body = nil
+		}
+		if err := resp.Body.Close(); err != nil {
+			klog.V(4).Infof("error closing response body: %v", err)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("admin server returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return nil
+	}
+	return fmt.Errorf("failed to notify proxy at %s: %w", url, lastErr)
+}
+
+func (p *portalPlugin) syncActivePodsWithProxy(ctx context.Context) {
+	p.mu.Lock()
+	if len(p.activePods) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	pods := make([]portals.PodInfo, 0, len(p.activePods))
+	for _, pod := range p.activePods {
+		pods = append(pods, pod)
+	}
+	p.mu.Unlock()
+
+	client, baseURL, err := newAdminHTTPClient(p.cfg.adminURL)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/pods", nil)
+	if err != nil {
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	var existing []*portals.PodInfo
+	if err := json.NewDecoder(resp.Body).Decode(&existing); err != nil {
+		if cErr := resp.Body.Close(); cErr != nil {
+			klog.V(4).Infof("error closing response body: %v", cErr)
+		}
+		return
+	}
+	if err := resp.Body.Close(); err != nil {
+		klog.V(4).Infof("error closing response body: %v", err)
+	}
+
+	if len(existing) < len(pods) {
+		if err := p.notifyPodUpdate(ctx, http.MethodPut, "/api/v1/pods", pods); err != nil {
+			klog.V(2).Infof("reconciliation sync to proxy failed: %v", err)
+		}
+	}
+}
+
+func (p *portalPlugin) startProxySyncLoop(ctx context.Context) {
+	if p.cfg.adminURL == "" {
+		return
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.syncActivePodsWithProxy(ctx)
+			}
+		}
+	}()
 }
 
 func (p *portalPlugin) configurePod(ctx context.Context, pod *api.PodSandbox) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	log := klog.FromContext(ctx)
 	log.Info("Configuring pod sandbox", "pod", podID(pod), "id", pod.Id)
 
 	runtimeClass := getRuntimeClass(pod)
-	if !isSupportedRuntime(runtimeClass) {
-		return fmt.Errorf("unsupported runtime class %q for opted-in pod %s: refusing to start unprotected pod", runtimeClass, podID(pod))
+	if err := p.validateRuntime(pod); err != nil {
+		return err
 	}
 
 	netnsPath, err := p.findNetnsPath(pod)
@@ -425,31 +496,48 @@ func (p *portalPlugin) configurePod(ctx context.Context, pod *api.PodSandbox) er
 		return fmt.Errorf("unable to determine netns path for pod %s: %w", podID(pod), err)
 	}
 
-	hostIface, podIP, err := p.findHostInterface(ctx, pod, netnsPath)
+	hostIface, _, err := p.findHostInterface(ctx, pod, netnsPath)
 	if err != nil {
 		return fmt.Errorf("unable to find host interface for pod %s: %w", podID(pod), err)
 	}
+
+	var ips []string
+	if pod != nil {
+		ips = pod.Ips
+	}
+	podIPv4, podIPv6, err := networking.DiscoverPodIPs(ctx, ips, netnsPath)
+	if err != nil {
+		log.Error(err, "Failed to discover pod IPs", "pod", podID(pod))
+		return fmt.Errorf("discover pod IPs for %s: %w", podID(pod), err)
+	}
+	isDualStack := (podIPv6 != "")
 
 	if err := p.installHostIptablesRules(hostIface); err != nil {
 		return fmt.Errorf("install host iptables rules on %s for pod %s: %w", hostIface, podID(pod), err)
 	}
 
+	if isDualStack {
+		if err := p.installHostIp6tablesRules(hostIface); err != nil {
+			log.Error(err, "Failed to install host ip6tables rules", "pod", podID(pod), "hostIface", hostIface)
+			return fmt.Errorf("install host ip6tables rules on %s for pod %s: %w", hostIface, podID(pod), err)
+		}
+	}
+
 	p.mu.Lock()
 	p.pods[pod.Id] = podNetworkState{
 		hostInterface: hostIface,
-		podIP:         podIP,
+		podIP:         podIPv4,
+		podIPv6:       podIPv6,
+		isDualStack:   isDualStack,
 		runtimeClass:  runtimeClass,
 	}
 	p.mu.Unlock()
 
-	log.Info("Successfully installed host-side iptables rules for pod", "pod", podID(pod), "hostIface", hostIface, "podIP", podIP, "runtimeClass", runtimeClass)
+	log.Info("Successfully installed host-side netfilter rules for pod", "pod", podID(pod), "hostIface", hostIface, "podIPv4", podIPv4, "podIPv6", podIPv6, "dualStack", isDualStack, "runtimeClass", runtimeClass)
 	return nil
 }
 
 func (p *portalPlugin) cleanupPod(ctx context.Context, pod *api.PodSandbox) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	log := klog.FromContext(ctx)
 	if pod == nil {
 		return nil
@@ -460,6 +548,7 @@ func (p *portalPlugin) cleanupPod(ctx context.Context, pod *api.PodSandbox) erro
 	if found {
 		delete(p.pods, pod.Id)
 	}
+	delete(p.activePods, pod.Uid)
 	p.mu.Unlock()
 
 	var hostIface string
@@ -468,11 +557,11 @@ func (p *portalPlugin) cleanupPod(ctx context.Context, pod *api.PodSandbox) erro
 	} else {
 		netnsPath, err := p.findNetnsPath(pod)
 		if err != nil {
-			log.V(1).Info("Could not resolve netns path during cleanup", "pod", podID(pod), "err", err)
+			log.Error(err, "Could not resolve netns path during cleanup", "pod", podID(pod))
 		} else {
 			iface, _, err := p.findHostInterface(ctx, pod, netnsPath)
 			if err != nil {
-				log.V(1).Info("Could not find host interface during cleanup", "pod", podID(pod), "err", err)
+				log.Error(err, "Could not find host interface during cleanup", "pod", podID(pod))
 			} else {
 				hostIface = iface
 			}
@@ -480,11 +569,19 @@ func (p *portalPlugin) cleanupPod(ctx context.Context, pod *api.PodSandbox) erro
 	}
 
 	if hostIface != "" {
-		log.Info("Cleaning up host-side iptables rules for pod", "pod", podID(pod), "hostIface", hostIface)
+		log.Info("Cleaning up host-side netfilter rules for pod", "pod", podID(pod), "hostIface", hostIface)
 		if err := p.removeHostIptablesRules(hostIface); err != nil {
-			return fmt.Errorf("clean up host iptables rules on %s for pod %s: %w", hostIface, podID(pod), err)
+			return fmt.Errorf("clean up host netfilter rules on %s for pod %s: %w", hostIface, podID(pod), err)
 		}
 	}
+
+	if pod.Uid != "" {
+		if err := p.notifyPodUpdate(ctx, http.MethodDelete, "/api/v1/pods/"+pod.Uid, nil); err != nil {
+			log.Error(err, "Failed to unregister pod with proxy", "pod", podID(pod))
+			return fmt.Errorf("unregister pod %s with proxy: %w", podID(pod), err)
+		}
+	}
+
 	return nil
 }
 
@@ -507,6 +604,12 @@ func (p *portalPlugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, 
 	log.Info("Synchronize called", "pods", len(pods), "containers", len(containers))
 
 	var syncErrors []error
+	var syncedPods []portals.PodInfo
+
+	p.mu.Lock()
+	p.activePods = make(map[string]portals.PodInfo)
+	p.mu.Unlock()
+
 	for _, pod := range pods {
 		if !p.matchesPod(pod) {
 			continue
@@ -515,26 +618,101 @@ func (p *portalPlugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, 
 		if err := p.configurePod(ctx, pod); err != nil {
 			log.Error(err, "Error synchronizing rules for pod", "pod", podID(pod))
 			syncErrors = append(syncErrors, fmt.Errorf("pod %s: %w", podID(pod), err))
+		} else {
+			p.mu.Lock()
+			state := p.pods[pod.Id]
+			p.mu.Unlock()
+
+			var ips []string
+			if len(pod.Ips) > 0 {
+				ips = pod.Ips
+			} else {
+				if state.podIP != "" {
+					ips = append(ips, state.podIP)
+				}
+				if state.podIPv6 != "" {
+					ips = append(ips, state.podIPv6)
+				}
+			}
+			info := portals.PodInfo{
+				UID:         pod.Uid,
+				Namespace:   pod.Namespace,
+				Name:        pod.Name,
+				IPs:         ips,
+				Annotations: pod.Annotations,
+				Labels:      pod.Labels,
+			}
+			syncedPods = append(syncedPods, info)
+
+			p.mu.Lock()
+			p.activePods[pod.Uid] = info
+			p.mu.Unlock()
+		}
+	}
+
+	if len(syncedPods) > 0 {
+		if err := p.notifyPodUpdate(ctx, http.MethodPut, "/api/v1/pods", syncedPods); err != nil {
+			log.Error(err, "Failed to synchronize pods with proxy")
+			return nil, fmt.Errorf("synchronize pods with proxy: %w", err)
 		}
 	}
 
 	if len(syncErrors) > 0 {
-		// Note on failure consequence: containerd treats a non-nil error returned from
-		// Synchronize as plugin registration failure and terminates the connection.
-		// One misconfigured or failing existing pod will take the entire plugin offline,
-		// leaving new pods to start unprotected (fail-open) until the DaemonSet pod restarts.
-		// This behavior is accepted for the spike because a proper cluster-level admission
-		// and fail-closed gate is deferred to #181/#182.
 		return nil, errors.Join(syncErrors...)
 	}
 	return nil, nil
 }
 
 func (p *portalPlugin) RunPodSandbox(ctx context.Context, pod *api.PodSandbox) error {
+	log := klog.FromContext(ctx)
 	if !p.matchesPod(pod) {
 		return nil
 	}
-	return p.configurePod(ctx, pod)
+	if err := p.validateRuntime(pod); err != nil {
+		return err
+	}
+	if err := p.configurePod(ctx, pod); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	state := p.pods[pod.Id]
+	p.mu.Unlock()
+
+	var ips []string
+	if len(pod.Ips) > 0 {
+		ips = pod.Ips
+	} else {
+		if state.podIP != "" {
+			ips = append(ips, state.podIP)
+		}
+		if state.podIPv6 != "" {
+			ips = append(ips, state.podIPv6)
+		}
+	}
+
+	info := portals.PodInfo{
+		UID:         pod.Uid,
+		Namespace:   pod.Namespace,
+		Name:        pod.Name,
+		IPs:         ips,
+		Annotations: pod.Annotations,
+		Labels:      pod.Labels,
+	}
+
+	if err := p.notifyPodUpdate(ctx, http.MethodPost, "/api/v1/pods", info); err != nil {
+		log.Error(err, "Failed to register pod with proxy", "pod", podID(pod))
+		if cErr := p.cleanupPod(ctx, pod); cErr != nil {
+			log.Error(cErr, "Failed to cleanup pod after registration failure", "pod", podID(pod))
+		}
+		return fmt.Errorf("register pod %s with proxy: %w", podID(pod), err)
+	}
+
+	p.mu.Lock()
+	p.activePods[pod.Uid] = info
+	p.mu.Unlock()
+
+	return nil
 }
 
 func (p *portalPlugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
@@ -542,25 +720,17 @@ func (p *portalPlugin) CreateContainer(ctx context.Context, pod *api.PodSandbox,
 		return nil, nil, nil
 	}
 
-	runtimeClass := getRuntimeClass(pod)
-	if !isSupportedRuntime(runtimeClass) {
-		return nil, nil, fmt.Errorf("unsupported runtime class %q for opted-in pod %s: refusing to start unprotected pod", runtimeClass, podID(pod))
+	if err := p.validateRuntime(pod); err != nil {
+		return nil, nil, err
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	log := klog.FromContext(ctx)
 	log.Info("Intercepting container creation", "pod", podID(pod), "container", ctr.Name)
 
-	// Fail closed if the CA certificate bundle is missing on the host
 	if _, err := os.Stat(p.cfg.caCertPath); err != nil {
 		return nil, nil, fmt.Errorf("CA certificate bundle not found at %s: %w", p.cfg.caCertPath, err)
 	}
 
-	// Injected mounts in NRI adjustments are resolved on the host by containerd.
-	// This works because the DaemonSet mounts the CA directory at the identical
-	// hostPath and containerPath (/etc/service-portal/ca).
 	adjustment := &api.ContainerAdjustment{}
 	adjustment.AddEnv("SSL_CERT_FILE", "/etc/service-portal/ca/tls.crt")
 	adjustment.AddMount(&api.Mount{
@@ -574,7 +744,114 @@ func (p *portalPlugin) CreateContainer(ctx context.Context, pod *api.PodSandbox,
 	return adjustment, nil, nil
 }
 
+func runBindCommand(args []string) {
+	fs := flag.NewFlagSet("bind", flag.ExitOnError)
+	socket := fs.String("socket", portals.DefaultAdminSocketPath, "Path to admin unix domain socket or HTTP URL")
+	uid := fs.String("uid", "", "Pod UID to bind")
+	identity := fs.String("identity", "", "User identity")
+	policy := fs.String("policy", "", "Allowed policy rules")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *uid == "" {
+		fmt.Fprintf(os.Stderr, "error: --uid is required\n")
+		os.Exit(1)
+	}
+
+	client, baseURL, err := newAdminHTTPClient(*socket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating client: %v\n", err)
+		os.Exit(1)
+	}
+
+	payload, err := json.Marshal(portals.BindRequest{
+		PodUID:   *uid,
+		Identity: *identity,
+		Policy:   *policy,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error marshaling bind payload: %v\n", err)
+		os.Exit(1)
+	}
+	resp, err := client.Post(baseURL+"/bind", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bind request failed: %v\n", err)
+		os.Exit(1)
+	}
+	body, rErr := io.ReadAll(resp.Body)
+	if rErr != nil {
+		body = nil
+	}
+	if err := resp.Body.Close(); err != nil {
+		klog.V(4).Infof("error closing response body: %v", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "bind failed (status %d): %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+	fmt.Printf("%s\n", string(body))
+}
+
+func runUnbindCommand(args []string) {
+	fs := flag.NewFlagSet("unbind", flag.ExitOnError)
+	socket := fs.String("socket", portals.DefaultAdminSocketPath, "Path to admin unix domain socket or HTTP URL")
+	uid := fs.String("uid", "", "Pod UID to unbind")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *uid == "" {
+		fmt.Fprintf(os.Stderr, "error: --uid is required\n")
+		os.Exit(1)
+	}
+
+	client, baseURL, err := newAdminHTTPClient(*socket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating client: %v\n", err)
+		os.Exit(1)
+	}
+
+	payload, err := json.Marshal(portals.UnbindRequest{
+		PodUID: *uid,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error marshaling unbind payload: %v\n", err)
+		os.Exit(1)
+	}
+	resp, err := client.Post(baseURL+"/unbind", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unbind request failed: %v\n", err)
+		os.Exit(1)
+	}
+	body, rErr := io.ReadAll(resp.Body)
+	if rErr != nil {
+		body = nil
+	}
+	if err := resp.Body.Close(); err != nil {
+		klog.V(4).Infof("error closing response body: %v", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "unbind failed (status %d): %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+	fmt.Printf("%s\n", string(body))
+}
+
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "bind":
+			runBindCommand(os.Args[2:])
+			return
+		case "unbind":
+			runUnbindCommand(os.Args[2:])
+			return
+		}
+	}
+
 	klog.InitFlags(nil)
 	cfg, err := parseFlags()
 	if err != nil {
@@ -582,8 +859,9 @@ func main() {
 	}
 
 	p := &portalPlugin{
-		cfg:  cfg,
-		pods: make(map[string]podNetworkState),
+		cfg:        cfg,
+		pods:       make(map[string]podNetworkState),
+		activePods: make(map[string]portals.PodInfo),
 	}
 
 	s, err := stub.New(p,
@@ -598,7 +876,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	klog.Infof("Starting portal-nri-plugin (name=%s, index=%s, socket=%s, proxyHost=%s)...", cfg.pluginName, cfg.pluginIndex, cfg.socketPath, cfg.proxyHost)
+	p.startProxySyncLoop(ctx)
+
+	klog.Infof("Starting portal-nri-plugin (name=%s, index=%s, socket=%s, proxyHost=%s, adminURL=%s)...", cfg.pluginName, cfg.pluginIndex, cfg.socketPath, cfg.proxyHost, cfg.adminURL)
 	if err := s.Run(ctx); err != nil {
 		klog.Fatalf("NRI stub run failed: %v", err)
 	}
