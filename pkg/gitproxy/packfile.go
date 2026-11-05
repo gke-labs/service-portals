@@ -36,11 +36,51 @@ const (
 	ObjRefDelta = 7
 )
 
-// RawObject represents a decompressed, whole Git object.
+// RawObject represents a whole Git object, which may be stored compressed in memory.
 type RawObject struct {
-	Type int    // ObjCommit, ObjTree, ObjBlob, ObjTag
-	Data []byte // Uncompressed payload
-	OID  string // 40-character hex SHA-1
+	Type       int    // ObjCommit, ObjTree, ObjBlob, ObjTag
+	Data       []byte // Uncompressed payload (nil when stored compressed)
+	Compressed []byte // Zlib-compressed payload as arrived in pack or deflated
+	Size       uint64 // Uncompressed size in bytes
+	OID        string // 40-character hex SHA-1
+}
+
+// DecompressedData returns the uncompressed payload of the object.
+// If Data is not nil, it is returned directly. Otherwise, Compressed is decompressed with zlib.
+func (o *RawObject) DecompressedData() ([]byte, error) {
+	if o.Data != nil {
+		return o.Data, nil
+	}
+	if len(o.Compressed) == 0 {
+		return nil, nil
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(o.Compressed))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zlib reader for %s: %w", o.OID, err)
+	}
+	defer func() {
+		if closeErr := zr.Close(); closeErr != nil {
+			log.Printf("failed to close zlib reader for %s: %v", o.OID, closeErr)
+		}
+	}()
+	data, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress object %s: %w", o.OID, err)
+	}
+	return data, nil
+}
+
+// EnsureDecompressed ensures that o.Data contains the uncompressed payload.
+func (o *RawObject) EnsureDecompressed() error {
+	if o.Data != nil {
+		return nil
+	}
+	data, err := o.DecompressedData()
+	if err != nil {
+		return err
+	}
+	o.Data = data
+	return nil
 }
 
 // ComputeOID computes the Git Object ID (SHA-1) for a given object type and uncompressed data.
@@ -176,6 +216,7 @@ type rawPackEntry struct {
 	baseOffset     int    // for OBJ_OFS_DELTA
 	baseOID        string // for OBJ_REF_DELTA
 	decompressed   []byte
+	compressed     []byte
 }
 
 // ParsePackfile parses a raw Git packfile and resolves all deltas into whole RawObjects.
@@ -257,6 +298,7 @@ func ParsePackfileWithBase(data []byte, baseLookup func(oid string) *RawObject) 
 			pos += 20
 		}
 
+		zlibStart := pos
 		cbr := &countingByteReader{
 			data: data,
 			pos:  pos,
@@ -274,12 +316,21 @@ func ParsePackfileWithBase(data []byte, baseLookup func(oid string) *RawObject) 
 			}
 			return nil, fmt.Errorf("failed to decompress object data at offset %d (type %d, expected %d bytes): %w", entryOffset, objType, size, err)
 		}
+		var dummy [1]byte
+		for {
+			_, err := zr.Read(dummy[:])
+			if err != nil {
+				break
+			}
+		}
 		if err := zr.Close(); err != nil {
 			return nil, fmt.Errorf("failed to close zlib reader at offset %d: %w", entryOffset, err)
 		}
 
-		pos += cbr.count
+		zlibEnd := pos + cbr.count
+		pos = zlibEnd
 		entry.decompressed = decompressed
+		entry.compressed = append([]byte(nil), data[zlibStart:zlibEnd]...)
 		entries = append(entries, entry)
 		offsetMap[entryOffset] = entry
 	}
@@ -293,9 +344,11 @@ func ParsePackfileWithBase(data []byte, baseLookup func(oid string) *RawObject) 
 		if entry.objType != ObjOfsDelta && entry.objType != ObjRefDelta {
 			oid := ComputeOID(entry.objType, entry.decompressed)
 			obj := &RawObject{
-				Type: entry.objType,
-				Data: entry.decompressed,
-				OID:  oid,
+				Type:       entry.objType,
+				Data:       entry.decompressed,
+				Compressed: entry.compressed,
+				Size:       entry.uncompressedSz,
+				OID:        oid,
 			}
 			resolvedObjects[oid] = obj
 			resolvedByOffset[entry.offset] = obj
@@ -315,15 +368,29 @@ func ParsePackfileWithBase(data []byte, baseLookup func(oid string) *RawObject) 
 				if !ok {
 					continue
 				}
-				applied, err := applyDelta(baseObj.Data, entry.decompressed)
+				baseData, err := baseObj.DecompressedData()
+				if err != nil {
+					return nil, fmt.Errorf("failed to decompress base object at offset %d: %w", entry.baseOffset, err)
+				}
+				applied, err := applyDelta(baseData, entry.decompressed)
 				if err != nil {
 					return nil, fmt.Errorf("failed to apply ofs-delta at offset %d: %w", entry.offset, err)
 				}
 				oid := ComputeOID(baseObj.Type, applied)
+				var compBuf bytes.Buffer
+				zw := zlib.NewWriter(&compBuf)
+				if _, err := zw.Write(applied); err != nil {
+					return nil, fmt.Errorf("failed to compress resolved ofs-delta object %s: %w", oid, err)
+				}
+				if err := zw.Close(); err != nil {
+					return nil, fmt.Errorf("failed to close zlib writer for ofs-delta object %s: %w", oid, err)
+				}
 				obj := &RawObject{
-					Type: baseObj.Type,
-					Data: applied,
-					OID:  oid,
+					Type:       baseObj.Type,
+					Data:       applied,
+					Compressed: compBuf.Bytes(),
+					Size:       uint64(len(applied)),
+					OID:        oid,
 				}
 				resolvedObjects[oid] = obj
 				resolvedByOffset[entry.offset] = obj
@@ -342,15 +409,29 @@ func ParsePackfileWithBase(data []byte, baseLookup func(oid string) *RawObject) 
 				if !ok {
 					continue
 				}
-				applied, err := applyDelta(baseObj.Data, entry.decompressed)
+				baseData, err := baseObj.DecompressedData()
+				if err != nil {
+					return nil, fmt.Errorf("failed to decompress base object %s: %w", entry.baseOID, err)
+				}
+				applied, err := applyDelta(baseData, entry.decompressed)
 				if err != nil {
 					return nil, fmt.Errorf("failed to apply ref-delta at offset %d on base %s: %w", entry.offset, entry.baseOID, err)
 				}
 				oid := ComputeOID(baseObj.Type, applied)
+				var compBuf bytes.Buffer
+				zw := zlib.NewWriter(&compBuf)
+				if _, err := zw.Write(applied); err != nil {
+					return nil, fmt.Errorf("failed to compress resolved ref-delta object %s: %w", oid, err)
+				}
+				if err := zw.Close(); err != nil {
+					return nil, fmt.Errorf("failed to close zlib writer for ref-delta object %s: %w", oid, err)
+				}
 				obj := &RawObject{
-					Type: baseObj.Type,
-					Data: applied,
-					OID:  oid,
+					Type:       baseObj.Type,
+					Data:       applied,
+					Compressed: compBuf.Bytes(),
+					Size:       uint64(len(applied)),
+					OID:        oid,
 				}
 				resolvedObjects[oid] = obj
 				resolvedByOffset[entry.offset] = obj
@@ -530,7 +611,19 @@ func BuildPackfile(objects []*RawObject) ([]byte, error) {
 
 	for _, obj := range objects {
 		var objHeader bytes.Buffer
-		size := uint64(len(obj.Data))
+		size := obj.Size
+		if size == 0 {
+			if len(obj.Data) > 0 {
+				size = uint64(len(obj.Data))
+			} else if len(obj.Compressed) > 0 && obj.OID != "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" {
+				d, err := obj.DecompressedData()
+				if err != nil {
+					return nil, fmt.Errorf("failed to decompress object %s to determine size: %w", obj.OID, err)
+				}
+				size = uint64(len(d))
+				obj.Size = size
+			}
+		}
 		b := byte(obj.Type<<4) | byte(size&0x0f)
 		size >>= 4
 		if size > 0 {
@@ -550,19 +643,24 @@ func BuildPackfile(objects []*RawObject) ([]byte, error) {
 		buf.Write(headerBytes)
 		hasher.Write(headerBytes)
 
-		// Deflate object data
-		var compressedBuf bytes.Buffer
-		zw := zlib.NewWriter(&compressedBuf)
-		if _, err := zw.Write(obj.Data); err != nil {
-			return nil, fmt.Errorf("failed to compress object %s: %w", obj.OID, err)
-		}
-		if err := zw.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close zlib writer for object %s: %w", obj.OID, err)
-		}
+		if len(obj.Compressed) > 0 {
+			buf.Write(obj.Compressed)
+			hasher.Write(obj.Compressed)
+		} else {
+			// Deflate object data
+			var compressedBuf bytes.Buffer
+			zw := zlib.NewWriter(&compressedBuf)
+			if _, err := zw.Write(obj.Data); err != nil {
+				return nil, fmt.Errorf("failed to compress object %s: %w", obj.OID, err)
+			}
+			if err := zw.Close(); err != nil {
+				return nil, fmt.Errorf("failed to close zlib writer for object %s: %w", obj.OID, err)
+			}
 
-		compBytes := compressedBuf.Bytes()
-		buf.Write(compBytes)
-		hasher.Write(compBytes)
+			compBytes := compressedBuf.Bytes()
+			buf.Write(compBytes)
+			hasher.Write(compBytes)
+		}
 	}
 
 	// 20-byte SHA-1 trailer
