@@ -169,6 +169,7 @@ The proxy intercepts the request, rewrites the destination to `https://generativ
 
 ## Documentation Index
 
+- **[PortalPolicy CRD & Specification](docs/portal-policy.md)**: Declarative per-pod policy for rules, secret references, and default-deny egress boundaries.
 - **[Architecture & Security Model](docs/architecture.md)**: Threat model, trust model, MITM mechanics, iptables egress filtering, and "Duck Identity".
 - **[Roadmap: NRI Single-Mode Convergence](docs/roadmap.md)**: Transition plan to per-node NRI, acceptance criteria, and removal schedule for legacy modes.
 - **[Design & Decision Records](docs/design/README.md)**: Architectural decision records and spike evaluation reports.
