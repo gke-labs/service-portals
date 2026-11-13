@@ -16,6 +16,7 @@ package gitproxy
 
 import (
 	"bytes"
+	"compress/zlib"
 	"testing"
 )
 
@@ -124,3 +125,63 @@ func TestParseCommitObject(t *testing.T) {
 		t.Errorf("unexpected message: %q", info.Message)
 	}
 }
+
+func TestRawObjectDecompressedDataAndCompressedPassThrough(t *testing.T) {
+	origPayload := []byte("decompressed test payload data")
+	oid := ComputeOID(ObjBlob, origPayload)
+
+	var compBuf bytes.Buffer
+	zw := zlib.NewWriter(&compBuf)
+	if _, err := zw.Write(origPayload); err != nil {
+		t.Fatalf("failed to write zlib payload: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("failed to close zlib writer: %v", err)
+	}
+
+	// Object with Compressed populated and Data == nil
+	obj := &RawObject{
+		Type:       ObjBlob,
+		Compressed: compBuf.Bytes(),
+		Size:       uint64(len(origPayload)),
+		OID:        oid,
+	}
+
+	decomp, err := obj.DecompressedData()
+	if err != nil {
+		t.Fatalf("DecompressedData failed: %v", err)
+	}
+	if !bytes.Equal(decomp, origPayload) {
+		t.Errorf("expected %q, got %q", origPayload, decomp)
+	}
+	// obj.Data should still be nil after DecompressedData
+	if obj.Data != nil {
+		t.Errorf("expected obj.Data to remain nil")
+	}
+
+	// EnsureDecompressed should populate obj.Data
+	if err := obj.EnsureDecompressed(); err != nil {
+		t.Fatalf("EnsureDecompressed failed: %v", err)
+	}
+	if !bytes.Equal(obj.Data, origPayload) {
+		t.Errorf("expected obj.Data = %q, got %q", origPayload, obj.Data)
+	}
+
+	// Test BuildPackfile with pre-compressed object (pass-through)
+	packBytes, err := BuildPackfile([]*RawObject{obj})
+	if err != nil {
+		t.Fatalf("BuildPackfile failed: %v", err)
+	}
+
+	parsed, err := ParsePackfile(packBytes)
+	if err != nil {
+		t.Fatalf("ParsePackfile failed: %v", err)
+	}
+	if len(parsed) != 1 || parsed[0].OID != oid {
+		t.Fatalf("unexpected parsed objects: %v", parsed)
+	}
+	if !bytes.Equal(parsed[0].Data, origPayload) {
+		t.Errorf("expected parsed data %q, got %q", origPayload, parsed[0].Data)
+	}
+}
+
