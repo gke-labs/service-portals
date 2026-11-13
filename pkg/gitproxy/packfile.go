@@ -512,63 +512,75 @@ func readLEB128(data []byte) (uint64, int) {
 	return 0, 0
 }
 
-// BuildPackfile builds a standard Git packfile containing the provided whole objects.
-func BuildPackfile(objects []*RawObject) ([]byte, error) {
-	var buf bytes.Buffer
+// WritePackfile writes a standard Git packfile containing the provided whole objects to w.
+func WritePackfile(w io.Writer, objects []*RawObject) error {
+	hasher := sha1.New()
+	mw := io.MultiWriter(w, hasher)
 
 	// 12-byte header: "PACK", version 2, numObjects
-	buf.WriteString("PACK")
-	if err := binary.Write(&buf, binary.BigEndian, uint32(2)); err != nil {
-		return nil, fmt.Errorf("failed to write packfile version: %w", err)
-	}
-	if err := binary.Write(&buf, binary.BigEndian, uint32(len(objects))); err != nil {
-		return nil, fmt.Errorf("failed to write packfile object count: %w", err)
+	var hdr [12]byte
+	copy(hdr[0:4], "PACK")
+	binary.BigEndian.PutUint32(hdr[4:8], 2)
+	binary.BigEndian.PutUint32(hdr[8:12], uint32(len(objects)))
+	if _, err := mw.Write(hdr[:]); err != nil {
+		return fmt.Errorf("failed to write packfile header: %w", err)
 	}
 
-	hasher := sha1.New()
-	hasher.Write(buf.Bytes())
-
+	var zw *zlib.Writer
 	for _, obj := range objects {
-		var objHeader bytes.Buffer
+		var objHeader [32]byte
 		size := uint64(len(obj.Data))
 		b := byte(obj.Type<<4) | byte(size&0x0f)
 		size >>= 4
 		if size > 0 {
 			b |= 0x80
 		}
-		objHeader.WriteByte(b)
+		n := 0
+		objHeader[n] = b
+		n++
 		for size > 0 {
 			b = byte(size & 0x7f)
 			size >>= 7
 			if size > 0 {
 				b |= 0x80
 			}
-			objHeader.WriteByte(b)
+			objHeader[n] = b
+			n++
 		}
 
-		headerBytes := objHeader.Bytes()
-		buf.Write(headerBytes)
-		hasher.Write(headerBytes)
+		if _, err := mw.Write(objHeader[:n]); err != nil {
+			return fmt.Errorf("failed to write object header for %s: %w", obj.OID, err)
+		}
 
-		// Deflate object data
-		var compressedBuf bytes.Buffer
-		zw := zlib.NewWriter(&compressedBuf)
+		// Deflate object data directly into mw
+		if zw == nil {
+			zw = zlib.NewWriter(mw)
+		} else {
+			zw.Reset(mw)
+		}
 		if _, err := zw.Write(obj.Data); err != nil {
-			return nil, fmt.Errorf("failed to compress object %s: %w", obj.OID, err)
+			return fmt.Errorf("failed to compress object %s: %w", obj.OID, err)
 		}
 		if err := zw.Close(); err != nil {
-			return nil, fmt.Errorf("failed to close zlib writer for object %s: %w", obj.OID, err)
+			return fmt.Errorf("failed to close zlib writer for object %s: %w", obj.OID, err)
 		}
-
-		compBytes := compressedBuf.Bytes()
-		buf.Write(compBytes)
-		hasher.Write(compBytes)
 	}
 
-	// 20-byte SHA-1 trailer
+	// 20-byte SHA-1 trailer (written to w directly, not hashed)
 	checksum := hasher.Sum(nil)
-	buf.Write(checksum)
+	if _, err := w.Write(checksum); err != nil {
+		return fmt.Errorf("failed to write packfile checksum: %w", err)
+	}
 
+	return nil
+}
+
+// BuildPackfile builds a standard Git packfile containing the provided whole objects.
+func BuildPackfile(objects []*RawObject) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := WritePackfile(&buf, objects); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
 
@@ -626,52 +638,244 @@ func ExtractPackfileFromResponse(respBody []byte) ([]byte, error) {
 	return nil, fmt.Errorf("no packfile found in upload-pack response")
 }
 
-// FormatSidebandPackfile formats a packfile into sideband pkt-lines for Git protocol v0/v1 or v2.
-func FormatSidebandPackfile(packfile []byte, isV2 bool, acks []string, hasHaves bool) []byte {
-	var buf bytes.Buffer
+const (
+	maxSidebandPayload = 65515
+	maxSidebandPktLen  = maxSidebandPayload + 5 // 65520
+)
 
+const hexDigits = "0123456789abcdef"
+
+func encodeHex4(dst []byte, v int) {
+	dst[0] = hexDigits[(v>>12)&0xf]
+	dst[1] = hexDigits[(v>>8)&0xf]
+	dst[2] = hexDigits[(v>>4)&0xf]
+	dst[3] = hexDigits[v&0xf]
+}
+
+// SidebandWriter wraps an io.Writer to format written data into Git sideband pkt-lines.
+type SidebandWriter struct {
+	w      io.Writer
+	band   byte
+	buf    []byte
+	closed bool
+}
+
+type sidebandWriter = SidebandWriter
+
+// NewSidebandWriter creates a new SidebandWriter wrapping w for the given band channel.
+func NewSidebandWriter(w io.Writer, band byte) *SidebandWriter {
+	return &SidebandWriter{
+		w:    w,
+		band: band,
+		buf:  make([]byte, 5, maxSidebandPktLen),
+	}
+}
+
+func newSidebandWriter(w io.Writer, band byte) *SidebandWriter {
+	return NewSidebandWriter(w, band)
+}
+
+func (sw *SidebandWriter) Write(p []byte) (int, error) {
+	if sw.closed {
+		return 0, fmt.Errorf("sideband writer is closed")
+	}
+	total := len(p)
+	for len(p) > 0 {
+		avail := maxSidebandPayload - (len(sw.buf) - 5)
+		toCopy := len(p)
+		if toCopy > avail {
+			toCopy = avail
+		}
+		sw.buf = append(sw.buf, p[:toCopy]...)
+		p = p[toCopy:]
+		if len(sw.buf)-5 == maxSidebandPayload {
+			if err := sw.flush(); err != nil {
+				return total - len(p), err
+			}
+		}
+	}
+	return total, nil
+}
+
+func (sw *SidebandWriter) flush() error {
+	payloadLen := len(sw.buf) - 5
+	if payloadLen == 0 {
+		return nil
+	}
+	pktLen := payloadLen + 5
+	encodeHex4(sw.buf[:4], pktLen)
+	sw.buf[4] = sw.band
+	if _, err := sw.w.Write(sw.buf); err != nil {
+		return err
+	}
+	sw.buf = sw.buf[:5]
+	return nil
+}
+
+// Close flushes any pending data and writes the flush pkt "0000".
+func (sw *SidebandWriter) Close() error {
+	if sw.closed {
+		return nil
+	}
+	sw.closed = true
+	if err := sw.flush(); err != nil {
+		return err
+	}
+	if _, err := sw.w.Write([]byte("0000")); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writePktLineToWriter(w io.Writer, s string) error {
+	pktLen := len(s) + 4
+	if _, err := fmt.Fprintf(w, "%04x%s", pktLen, s); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeDelimPktToWriter(w io.Writer) error {
+	_, err := io.WriteString(w, "0001")
+	return err
+}
+
+func writeSidebandPrelude(w io.Writer, isV2 bool, acks []string, hasHaves bool) error {
 	if isV2 {
 		// Protocol v2 header
 		if hasHaves {
-			writePktLineString(&buf, "acknowledgments\n")
+			if err := writePktLineToWriter(w, "acknowledgments\n"); err != nil {
+				return err
+			}
 			for _, ack := range acks {
-				writePktLineString(&buf, fmt.Sprintf("ACK %s\n", ack))
+				if err := writePktLineToWriter(w, fmt.Sprintf("ACK %s\n", ack)); err != nil {
+					return err
+				}
 			}
 			if len(acks) == 0 {
-				writePktLineString(&buf, "NAK\n")
+				if err := writePktLineToWriter(w, "NAK\n"); err != nil {
+					return err
+				}
 			}
-			writePktLineString(&buf, "ready\n")
-			writeDelimPkt(&buf)
+			if err := writePktLineToWriter(w, "ready\n"); err != nil {
+				return err
+			}
+			if err := writeDelimPktToWriter(w); err != nil {
+				return err
+			}
 		}
-		writePktLineString(&buf, "packfile\n")
+		if err := writePktLineToWriter(w, "packfile\n"); err != nil {
+			return err
+		}
 	} else {
 		// Protocol v0/v1 header
 		if len(acks) > 0 {
 			for _, ack := range acks {
-				writePktLineString(&buf, fmt.Sprintf("ACK %s common\n", ack))
+				if err := writePktLineToWriter(w, fmt.Sprintf("ACK %s common\n", ack)); err != nil {
+					return err
+				}
 			}
 		} else {
-			writePktLineString(&buf, "NAK\n")
+			if err := writePktLineToWriter(w, "NAK\n"); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
 
-	// Stream packfile in 65515-byte chunks (band 1)
-	const maxChunk = 65515
-	for pos := 0; pos < len(packfile); pos += maxChunk {
-		end := pos + maxChunk
-		if end > len(packfile) {
-			end = len(packfile)
-		}
-		chunk := packfile[pos:end]
-		pktLen := len(chunk) + 5 // 4 bytes len + 1 byte band
-		fmt.Fprintf(&buf, "%04x\x01", pktLen)
-		buf.Write(chunk)
+// FormatSidebandPackfile formats a packfile into sideband pkt-lines for Git protocol v0/v1 or v2.
+func FormatSidebandPackfile(packfile []byte, isV2 bool, acks []string, hasHaves bool) []byte {
+	var buf bytes.Buffer
+	if err := writeSidebandPrelude(&buf, isV2, acks, hasHaves); err != nil {
+		return nil
 	}
-
-	// Flush
-	writeFlushPkt(&buf)
-
+	sw := NewSidebandWriter(&buf, 1)
+	if _, err := sw.Write(packfile); err != nil {
+		return nil
+	}
+	if err := sw.Close(); err != nil {
+		return nil
+	}
 	return buf.Bytes()
+}
+
+// PackfileResponse represents a streaming Git packfile response with sideband framing.
+type PackfileResponse struct {
+	objects  []*RawObject
+	isV2     bool
+	acks     []string
+	hasHaves bool
+
+	pr *io.PipeReader
+}
+
+type packfileResponse = PackfileResponse
+
+// NewPackfileResponse creates a new PackfileResponse implementing io.WriterTo and io.Reader.
+func NewPackfileResponse(objects []*RawObject, isV2 bool, acks []string, hasHaves bool) *PackfileResponse {
+	return &PackfileResponse{
+		objects:  objects,
+		isV2:     isV2,
+		acks:     acks,
+		hasHaves: hasHaves,
+	}
+}
+
+func newPackfileResponse(objects []*RawObject, isV2 bool, acks []string, hasHaves bool) *packfileResponse {
+	return NewPackfileResponse(objects, isV2, acks, hasHaves)
+}
+
+// WriteTo writes the sideband-framed packfile response to w, satisfying io.WriterTo.
+func (r *PackfileResponse) WriteTo(w io.Writer) (int64, error) {
+	cw := &countingWriter{w: w}
+
+	if err := writeSidebandPrelude(cw, r.isV2, r.acks, r.hasHaves); err != nil {
+		return cw.n, err
+	}
+
+	sw := NewSidebandWriter(cw, 1)
+	if err := WritePackfile(sw, r.objects); err != nil {
+		return cw.n, err
+	}
+	if err := sw.Close(); err != nil {
+		return cw.n, err
+	}
+
+	return cw.n, nil
+}
+
+// Read satisfies io.Reader for PackfileResponse by streaming through an in-memory pipe.
+// When io.Copy is used, Go standard library will detect io.WriterTo and bypass Read.
+func (r *PackfileResponse) Read(p []byte) (int, error) {
+	if r.pr == nil {
+		pr, pw := io.Pipe()
+		r.pr = pr
+		go func() {
+			_, err := r.WriteTo(pw)
+			_ = pw.CloseWithError(err)
+		}()
+	}
+	return r.pr.Read(p)
+}
+
+// Close closes the underlying reader pipe if one was created.
+func (r *PackfileResponse) Close() error {
+	if r.pr != nil {
+		return r.pr.Close()
+	}
+	return nil
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
 }
 
 func writePktLineString(buf *bytes.Buffer, s string) {
