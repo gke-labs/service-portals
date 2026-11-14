@@ -1,0 +1,66 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package portals.v1;
+
+option go_package = "github.com/gke-labs/service-portals/pkg/portals/v1;portalsv1";
+
+// PodBindService manages the dynamic binding of sandbox pods to user identities
+// and access policies. Called by sandbox claim controllers over authenticated gRPC.
+service PodBindService {
+  // Bind associates a pod UID with an identity and policy.
+  rpc Bind(BindRequest) returns (BindResponse);
+
+  // Unbind dissociates a pod UID, reverting it to fail-closed state.
+  rpc Unbind(UnbindRequest) returns (UnbindResponse);
+
+  // Get retrieves the current binding and status of a pod.
+  rpc Get(GetRequest) returns (GetResponse);
+}
+
+message BindRequest {
+  string pod_uid = 1;
+  string identity = 2;
+  string policy = 3;
+}
+
+message BindResponse {
+  string pod_uid = 1;
+  bool bound = 2;
+}
+
+message UnbindRequest {
+  string pod_uid = 1;
+}
+
+message UnbindResponse {
+  string pod_uid = 1;
+  bool bound = 2;
+}
+
+message GetRequest {
+  string pod_uid = 1;
+}
+
+message GetResponse {
+  string pod_uid = 1;
+  string namespace = 2;
+  string name = 3;
+  repeated string ips = 4;
+  string identity = 5;
+  string policy = 6;
+  bool bound = 7;
+}
