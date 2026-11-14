@@ -35,29 +35,30 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-type BindRequest struct {
+// PodPolicy defines the identity and egress policy for a sandbox pod, keyed by pod UID.
+type PodPolicy struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
 	Identity      string                 `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
-	Policy        string                 `protobuf:"bytes,3,opt,name=policy,proto3" json:"policy,omitempty"`
+	Policy        *EgressPolicy          `protobuf:"bytes,3,opt,name=policy,proto3" json:"policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *BindRequest) Reset() {
-	*x = BindRequest{}
+func (x *PodPolicy) Reset() {
+	*x = PodPolicy{}
 	mi := &file_pkg_portals_v1_bind_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *BindRequest) String() string {
+func (x *PodPolicy) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*BindRequest) ProtoMessage() {}
+func (*PodPolicy) ProtoMessage() {}
 
-func (x *BindRequest) ProtoReflect() protoreflect.Message {
+func (x *PodPolicy) ProtoReflect() protoreflect.Message {
 	mi := &file_pkg_portals_v1_bind_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -69,30 +70,86 @@ func (x *BindRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use BindRequest.ProtoReflect.Descriptor instead.
-func (*BindRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use PodPolicy.ProtoReflect.Descriptor instead.
+func (*PodPolicy) Descriptor() ([]byte, []int) {
 	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *BindRequest) GetPodUid() string {
+func (x *PodPolicy) GetPodUid() string {
 	if x != nil {
 		return x.PodUid
 	}
 	return ""
 }
 
-func (x *BindRequest) GetIdentity() string {
+func (x *PodPolicy) GetIdentity() string {
 	if x != nil {
 		return x.Identity
 	}
 	return ""
 }
 
-func (x *BindRequest) GetPolicy() string {
+func (x *PodPolicy) GetPolicy() *EgressPolicy {
 	if x != nil {
 		return x.Policy
 	}
+	return nil
+}
+
+// PodSecrets defines named secret token bytes for a sandbox pod, keyed by pod UID.
+// Note: protobuf-go does not honour debug_redact in String() or prototext, so this
+// message must never be logged or passed to a logger as a value; Format only
+// covers fmt verbs.
+type PodSecrets struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	Secrets       map[string][]byte      `protobuf:"bytes,2,rep,name=secrets,proto3" json:"secrets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PodSecrets) Reset() {
+	*x = PodSecrets{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PodSecrets) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PodSecrets) ProtoMessage() {}
+
+func (x *PodSecrets) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PodSecrets.ProtoReflect.Descriptor instead.
+func (*PodSecrets) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *PodSecrets) GetPodUid() string {
+	if x != nil {
+		return x.PodUid
+	}
 	return ""
+}
+
+func (x *PodSecrets) GetSecrets() map[string][]byte {
+	if x != nil {
+		return x.Secrets
+	}
+	return nil
 }
 
 type BindResponse struct {
@@ -105,7 +162,7 @@ type BindResponse struct {
 
 func (x *BindResponse) Reset() {
 	*x = BindResponse{}
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[1]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -117,7 +174,7 @@ func (x *BindResponse) String() string {
 func (*BindResponse) ProtoMessage() {}
 
 func (x *BindResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[1]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -130,7 +187,7 @@ func (x *BindResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindResponse.ProtoReflect.Descriptor instead.
 func (*BindResponse) Descriptor() ([]byte, []int) {
-	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{1}
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *BindResponse) GetPodUid() string {
@@ -147,6 +204,50 @@ func (x *BindResponse) GetBound() bool {
 	return false
 }
 
+type InjectSecretsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InjectSecretsResponse) Reset() {
+	*x = InjectSecretsResponse{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InjectSecretsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InjectSecretsResponse) ProtoMessage() {}
+
+func (x *InjectSecretsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InjectSecretsResponse.ProtoReflect.Descriptor instead.
+func (*InjectSecretsResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *InjectSecretsResponse) GetPodUid() string {
+	if x != nil {
+		return x.PodUid
+	}
+	return ""
+}
+
 type UnbindRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
@@ -156,7 +257,7 @@ type UnbindRequest struct {
 
 func (x *UnbindRequest) Reset() {
 	*x = UnbindRequest{}
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[2]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -168,7 +269,7 @@ func (x *UnbindRequest) String() string {
 func (*UnbindRequest) ProtoMessage() {}
 
 func (x *UnbindRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[2]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -181,7 +282,7 @@ func (x *UnbindRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnbindRequest.ProtoReflect.Descriptor instead.
 func (*UnbindRequest) Descriptor() ([]byte, []int) {
-	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{2}
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *UnbindRequest) GetPodUid() string {
@@ -201,7 +302,7 @@ type UnbindResponse struct {
 
 func (x *UnbindResponse) Reset() {
 	*x = UnbindResponse{}
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[3]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -213,7 +314,7 @@ func (x *UnbindResponse) String() string {
 func (*UnbindResponse) ProtoMessage() {}
 
 func (x *UnbindResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[3]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -226,7 +327,7 @@ func (x *UnbindResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnbindResponse.ProtoReflect.Descriptor instead.
 func (*UnbindResponse) Descriptor() ([]byte, []int) {
-	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{3}
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *UnbindResponse) GetPodUid() string {
@@ -252,7 +353,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[4]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -264,7 +365,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[4]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -277,7 +378,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{4}
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetRequest) GetPodUid() string {
@@ -294,7 +395,7 @@ type GetResponse struct {
 	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
 	Ips           []string               `protobuf:"bytes,4,rep,name=ips,proto3" json:"ips,omitempty"`
 	Identity      string                 `protobuf:"bytes,5,opt,name=identity,proto3" json:"identity,omitempty"`
-	Policy        string                 `protobuf:"bytes,6,opt,name=policy,proto3" json:"policy,omitempty"`
+	Policy        *EgressPolicy          `protobuf:"bytes,6,opt,name=policy,proto3" json:"policy,omitempty"`
 	Bound         bool                   `protobuf:"varint,7,opt,name=bound,proto3" json:"bound,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -302,7 +403,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[5]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -314,7 +415,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_portals_v1_bind_proto_msgTypes[5]
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -327,7 +428,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{5}
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetResponse) GetPodUid() string {
@@ -365,11 +466,11 @@ func (x *GetResponse) GetIdentity() string {
 	return ""
 }
 
-func (x *GetResponse) GetPolicy() string {
+func (x *GetResponse) GetPolicy() *EgressPolicy {
 	if x != nil {
 		return x.Policy
 	}
-	return ""
+	return nil
 }
 
 func (x *GetResponse) GetBound() bool {
@@ -384,14 +485,23 @@ var File_pkg_portals_v1_bind_proto protoreflect.FileDescriptor
 const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\n" +
 	"\x19pkg/portals/v1/bind.proto\x12\n" +
-	"portals.v1\"Z\n" +
-	"\vBindRequest\x12\x17\n" +
+	"portals.v1\x1a\x1bpkg/portals/v1/egress.proto\"r\n" +
+	"\tPodPolicy\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x1a\n" +
-	"\bidentity\x18\x02 \x01(\tR\bidentity\x12\x16\n" +
-	"\x06policy\x18\x03 \x01(\tR\x06policy\"=\n" +
+	"\bidentity\x18\x02 \x01(\tR\bidentity\x120\n" +
+	"\x06policy\x18\x03 \x01(\v2\x18.portals.v1.EgressPolicyR\x06policy\"\xa5\x01\n" +
+	"\n" +
+	"PodSecrets\x12\x17\n" +
+	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12B\n" +
+	"\asecrets\x18\x02 \x03(\v2#.portals.v1.PodSecrets.SecretsEntryB\x03\x80\x01\x01R\asecrets\x1a:\n" +
+	"\fSecretsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"=\n" +
 	"\fBindResponse\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x14\n" +
-	"\x05bound\x18\x02 \x01(\bR\x05bound\"(\n" +
+	"\x05bound\x18\x02 \x01(\bR\x05bound\"0\n" +
+	"\x15InjectSecretsResponse\x12\x17\n" +
+	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"(\n" +
 	"\rUnbindRequest\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"?\n" +
 	"\x0eUnbindResponse\x12\x17\n" +
@@ -399,17 +509,18 @@ const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\x05bound\x18\x02 \x01(\bR\x05bound\"%\n" +
 	"\n" +
 	"GetRequest\x12\x17\n" +
-	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"\xb4\x01\n" +
+	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"\xce\x01\n" +
 	"\vGetResponse\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x10\n" +
 	"\x03ips\x18\x04 \x03(\tR\x03ips\x12\x1a\n" +
-	"\bidentity\x18\x05 \x01(\tR\bidentity\x12\x16\n" +
-	"\x06policy\x18\x06 \x01(\tR\x06policy\x12\x14\n" +
-	"\x05bound\x18\a \x01(\bR\x05bound2\xc4\x01\n" +
-	"\x0ePodBindService\x129\n" +
-	"\x04Bind\x12\x17.portals.v1.BindRequest\x1a\x18.portals.v1.BindResponse\x12?\n" +
+	"\bidentity\x18\x05 \x01(\tR\bidentity\x120\n" +
+	"\x06policy\x18\x06 \x01(\v2\x18.portals.v1.EgressPolicyR\x06policy\x12\x14\n" +
+	"\x05bound\x18\a \x01(\bR\x05bound2\x8e\x02\n" +
+	"\x0ePodBindService\x127\n" +
+	"\x04Bind\x12\x15.portals.v1.PodPolicy\x1a\x18.portals.v1.BindResponse\x12J\n" +
+	"\rInjectSecrets\x12\x16.portals.v1.PodSecrets\x1a!.portals.v1.InjectSecretsResponse\x12?\n" +
 	"\x06Unbind\x12\x19.portals.v1.UnbindRequest\x1a\x1a.portals.v1.UnbindResponse\x126\n" +
 	"\x03Get\x12\x16.portals.v1.GetRequest\x1a\x17.portals.v1.GetResponseB>Z<github.com/gke-labs/service-portals/pkg/portals/v1;portalsv1b\x06proto3"
 
@@ -425,27 +536,36 @@ func file_pkg_portals_v1_bind_proto_rawDescGZIP() []byte {
 	return file_pkg_portals_v1_bind_proto_rawDescData
 }
 
-var file_pkg_portals_v1_bind_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_pkg_portals_v1_bind_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_pkg_portals_v1_bind_proto_goTypes = []any{
-	(*BindRequest)(nil),    // 0: portals.v1.BindRequest
-	(*BindResponse)(nil),   // 1: portals.v1.BindResponse
-	(*UnbindRequest)(nil),  // 2: portals.v1.UnbindRequest
-	(*UnbindResponse)(nil), // 3: portals.v1.UnbindResponse
-	(*GetRequest)(nil),     // 4: portals.v1.GetRequest
-	(*GetResponse)(nil),    // 5: portals.v1.GetResponse
+	(*PodPolicy)(nil),             // 0: portals.v1.PodPolicy
+	(*PodSecrets)(nil),            // 1: portals.v1.PodSecrets
+	(*BindResponse)(nil),          // 2: portals.v1.BindResponse
+	(*InjectSecretsResponse)(nil), // 3: portals.v1.InjectSecretsResponse
+	(*UnbindRequest)(nil),         // 4: portals.v1.UnbindRequest
+	(*UnbindResponse)(nil),        // 5: portals.v1.UnbindResponse
+	(*GetRequest)(nil),            // 6: portals.v1.GetRequest
+	(*GetResponse)(nil),           // 7: portals.v1.GetResponse
+	nil,                           // 8: portals.v1.PodSecrets.SecretsEntry
+	(*EgressPolicy)(nil),          // 9: portals.v1.EgressPolicy
 }
 var file_pkg_portals_v1_bind_proto_depIdxs = []int32{
-	0, // 0: portals.v1.PodBindService.Bind:input_type -> portals.v1.BindRequest
-	2, // 1: portals.v1.PodBindService.Unbind:input_type -> portals.v1.UnbindRequest
-	4, // 2: portals.v1.PodBindService.Get:input_type -> portals.v1.GetRequest
-	1, // 3: portals.v1.PodBindService.Bind:output_type -> portals.v1.BindResponse
-	3, // 4: portals.v1.PodBindService.Unbind:output_type -> portals.v1.UnbindResponse
-	5, // 5: portals.v1.PodBindService.Get:output_type -> portals.v1.GetResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	9, // 0: portals.v1.PodPolicy.policy:type_name -> portals.v1.EgressPolicy
+	8, // 1: portals.v1.PodSecrets.secrets:type_name -> portals.v1.PodSecrets.SecretsEntry
+	9, // 2: portals.v1.GetResponse.policy:type_name -> portals.v1.EgressPolicy
+	0, // 3: portals.v1.PodBindService.Bind:input_type -> portals.v1.PodPolicy
+	1, // 4: portals.v1.PodBindService.InjectSecrets:input_type -> portals.v1.PodSecrets
+	4, // 5: portals.v1.PodBindService.Unbind:input_type -> portals.v1.UnbindRequest
+	6, // 6: portals.v1.PodBindService.Get:input_type -> portals.v1.GetRequest
+	2, // 7: portals.v1.PodBindService.Bind:output_type -> portals.v1.BindResponse
+	3, // 8: portals.v1.PodBindService.InjectSecrets:output_type -> portals.v1.InjectSecretsResponse
+	5, // 9: portals.v1.PodBindService.Unbind:output_type -> portals.v1.UnbindResponse
+	7, // 10: portals.v1.PodBindService.Get:output_type -> portals.v1.GetResponse
+	7, // [7:11] is the sub-list for method output_type
+	3, // [3:7] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_pkg_portals_v1_bind_proto_init() }
@@ -453,13 +573,14 @@ func file_pkg_portals_v1_bind_proto_init() {
 	if File_pkg_portals_v1_bind_proto != nil {
 		return
 	}
+	file_pkg_portals_v1_egress_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_portals_v1_bind_proto_rawDesc), len(file_pkg_portals_v1_bind_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
