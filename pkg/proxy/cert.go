@@ -15,6 +15,7 @@
 package proxy
 
 import (
+	"container/list"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -31,13 +32,22 @@ import (
 	"time"
 )
 
+const defaultMaxCerts = 256
+
+type certEntry struct {
+	host string
+	cert *tls.Certificate
+}
+
 // CertSigner dynamically signs and caches TLS certificates for hosts using a CA key pair.
 type CertSigner struct {
 	caCert *x509.Certificate
 	caKey  crypto.PrivateKey
 
-	certs map[string]*tls.Certificate
-	mu    sync.RWMutex
+	mu       sync.Mutex
+	certs    map[string]*list.Element
+	order    *list.List
+	maxCerts int
 }
 
 // NewCertSigner loads a CA certificate and private key from disk and returns a CertSigner.
@@ -62,9 +72,11 @@ func NewCertSigner(caCertPath, caKeyPath string) (*CertSigner, error) {
 	}
 
 	return &CertSigner{
-		caCert: caCert,
-		caKey:  tlsCert.PrivateKey,
-		certs:  make(map[string]*tls.Certificate),
+		caCert:   caCert,
+		caKey:    tlsCert.PrivateKey,
+		certs:    make(map[string]*list.Element),
+		order:    list.New(),
+		maxCerts: defaultMaxCerts,
 	}, nil
 }
 
@@ -82,25 +94,38 @@ func (s *CertSigner) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate
 func (s *CertSigner) getCert(host string) (*tls.Certificate, error) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 
-	s.mu.RLock()
-	cert, ok := s.certs[host]
-	s.mu.RUnlock()
-	if ok {
-		return cert, nil
-	}
-
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if cert, ok := s.certs[host]; ok {
+	if elem, ok := s.certs[host]; ok {
+		s.order.MoveToFront(elem)
+		cert := elem.Value.(*certEntry).cert
+		s.mu.Unlock()
 		return cert, nil
 	}
+	s.mu.Unlock()
 
 	cert, err := s.signCert(host)
 	if err != nil {
 		return nil, err
 	}
-	s.certs[host] = cert
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if elem, ok := s.certs[host]; ok {
+		s.order.MoveToFront(elem)
+		return elem.Value.(*certEntry).cert, nil
+	}
+
+	if s.maxCerts > 0 && len(s.certs) >= s.maxCerts {
+		oldest := s.order.Back()
+		if oldest != nil {
+			s.order.Remove(oldest)
+			delete(s.certs, oldest.Value.(*certEntry).host)
+		}
+	}
+
+	elem := s.order.PushFront(&certEntry{host: host, cert: cert})
+	s.certs[host] = elem
 	return cert, nil
 }
 

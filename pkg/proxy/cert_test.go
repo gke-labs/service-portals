@@ -121,3 +121,56 @@ func TestCertSigner(t *testing.T) {
 		t.Error("expected different certificate for different host")
 	}
 }
+
+func TestCertSigner_CacheLimitAndEviction(t *testing.T) {
+	caCertPath, caKeyPath := createTestCA(t)
+
+	signer, err := NewCertSigner(caCertPath, caKeyPath)
+	if err != nil {
+		t.Fatalf("NewCertSigner failed: %v", err)
+	}
+
+	signer.maxCerts = 3
+
+	hosts := []string{
+		"host1.example.com",
+		"host2.example.com",
+		"host3.example.com",
+		"host4.example.com",
+		"host5.example.com",
+	}
+
+	for _, h := range hosts {
+		info := &tls.ClientHelloInfo{ServerName: h}
+		cert, err := signer.GetCertificate(info)
+		if err != nil {
+			t.Fatalf("GetCertificate(%q) failed: %v", h, err)
+		}
+		if cert == nil {
+			t.Fatalf("expected non-nil cert for %q", h)
+		}
+	}
+
+	signer.mu.Lock()
+	count := len(signer.certs)
+	_, hasHost1 := signer.certs["host1.example.com"]
+	_, hasHost2 := signer.certs["host2.example.com"]
+	_, hasHost3 := signer.certs["host3.example.com"]
+	_, hasHost4 := signer.certs["host4.example.com"]
+	_, hasHost5 := signer.certs["host5.example.com"]
+	signer.mu.Unlock()
+
+	if count > 3 {
+		t.Errorf("cache size %d exceeded maximum limit %d", count, signer.maxCerts)
+	}
+	if count != 3 {
+		t.Errorf("expected cache size 3, got %d", count)
+	}
+
+	if hasHost1 || hasHost2 {
+		t.Errorf("expected host1 and host2 to be evicted, got hasHost1=%v, hasHost2=%v", hasHost1, hasHost2)
+	}
+	if !hasHost3 || !hasHost4 || !hasHost5 {
+		t.Errorf("expected host3, host4, host5 to remain in cache; got %v, %v, %v", hasHost3, hasHost4, hasHost5)
+	}
+}

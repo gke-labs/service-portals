@@ -17,16 +17,19 @@ package portals
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
+	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
 func newTestEnv(t *testing.T) (*PodMap, *portalsv1.BindingStore) {
@@ -113,7 +116,7 @@ func TestEgressHandler_MatchingRequestReplacesPlaceholder(t *testing.T) {
 	}
 
 	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
-	handler := NewEgressHandler(pm, store, transport)
+	handler := NewEgressHandler(pm, store, transport, nil)
 
 	req := httptest.NewRequest("GET", "http://api.example.com/v1/user", nil)
 	req.RemoteAddr = podIP + ":45678"
@@ -205,7 +208,7 @@ func TestEgressHandler_RequestWithoutPlaceholderForwardedWithoutOne(t *testing.T
 	}
 
 	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
-	handler := NewEgressHandler(pm, store, transport)
+	handler := NewEgressHandler(pm, store, transport, nil)
 
 	req := httptest.NewRequest("GET", "http://api.example.com/public", nil)
 	req.RemoteAddr = podIP + ":54321"
@@ -242,7 +245,7 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 	t.Run("unknown source address", func(t *testing.T) {
 		upstreamCalled.Store(0)
 		pm, store := newTestEnv(t)
-		handler := NewEgressHandler(pm, store, transport)
+		handler := NewEgressHandler(pm, store, transport, nil)
 
 		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
 		req.RemoteAddr = "192.168.1.99:50000" // Not in PodMap
@@ -269,7 +272,7 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
 		// Pod registered in PodMap but never bound in store
 
-		handler := NewEgressHandler(pm, store, transport)
+		handler := NewEgressHandler(pm, store, transport, nil)
 
 		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
 		req.RemoteAddr = podIP + ":50000"
@@ -312,7 +315,7 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 			t.Fatalf("Bind failed: %v", err)
 		}
 
-		handler := NewEgressHandler(pm, store, transport)
+		handler := NewEgressHandler(pm, store, transport, nil)
 
 		req := httptest.NewRequest("GET", "http://denied.example.com/test", nil)
 		req.RemoteAddr = podIP + ":50000"
@@ -355,7 +358,7 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 			t.Fatalf("Bind failed: %v", err)
 		}
 
-		handler := NewEgressHandler(pm, store, transport)
+		handler := NewEgressHandler(pm, store, transport, nil)
 
 		req := httptest.NewRequest("GET", "http://api.example.com:8080/test", nil)
 		req.RemoteAddr = podIP + ":50000"
@@ -399,7 +402,7 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 			t.Fatalf("Bind failed: %v", err)
 		}
 
-		handler := NewEgressHandler(pm, store, transport)
+		handler := NewEgressHandler(pm, store, transport, nil)
 
 		// Request is cleartext HTTP
 		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
@@ -452,7 +455,7 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 		}
 		// No secret injected!
 
-		handler := NewEgressHandler(pm, store, transport)
+		handler := NewEgressHandler(pm, store, transport, nil)
 
 		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
 		req.RemoteAddr = podIP + ":50000"
@@ -475,7 +478,7 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 	t.Run("reject CONNECT", func(t *testing.T) {
 		upstreamCalled.Store(0)
 		pm, store := newTestEnv(t)
-		handler := NewEgressHandler(pm, store, transport)
+		handler := NewEgressHandler(pm, store, transport, nil)
 
 		req := httptest.NewRequest(http.MethodConnect, "http://api.example.com:443", nil)
 		req.RemoteAddr = "10.0.0.1:12345"
@@ -506,7 +509,7 @@ func TestEgressHandler_SecretsIsolatedBetweenPods(t *testing.T) {
 
 	pm, store := newTestEnv(t)
 	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
-	handler := NewEgressHandler(pm, store, transport)
+	handler := NewEgressHandler(pm, store, transport, nil)
 
 	podAIP := "10.1.0.1"
 	podAUID := "pod-a"
@@ -661,7 +664,7 @@ func TestEgressHandler_HTTPSMatchingRequest(t *testing.T) {
 	tlsConfig.InsecureSkipVerify = true
 	transport := dialRoutingTransport(upstream.Listener.Addr().String(), tlsConfig)
 
-	handler := NewEgressHandler(pm, store, transport)
+	handler := NewEgressHandler(pm, store, transport, nil)
 
 	req := httptest.NewRequest("GET", "https://api.secure.com/secure/endpoint", nil)
 	req.RemoteAddr = podIP + ":41234"
@@ -721,7 +724,7 @@ func TestEgressHandler_DefaultTransportDirectAddress(t *testing.T) {
 	}
 
 	// NewEgressHandler with nil transport defaults to http.DefaultTransport
-	handler := NewEgressHandler(pm, store, nil)
+	handler := NewEgressHandler(pm, store, nil, nil)
 
 	req := httptest.NewRequest("GET", "http://localhost:"+portStr+"/direct", nil)
 	req.RemoteAddr = podIP + ":34567"
@@ -777,7 +780,7 @@ func TestEgressHandler_ClearTextRequestWithHTTPSAbsoluteFormTargetMatchedAsHTTP(
 	}
 
 	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
-	handler := NewEgressHandler(pm, store, transport)
+	handler := NewEgressHandler(pm, store, transport, nil)
 
 	// Send a clear-text request (r.TLS == nil) where the client specifies an absolute-form https:// URI.
 	// httptest.NewRequest sets req.TLS when the URL starts with https://, so clear req.TLS to represent
@@ -944,4 +947,290 @@ func TestRequestTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+type mockAddr struct {
+	addr string
+}
+
+func (a mockAddr) Network() string { return "tcp" }
+func (a mockAddr) String() string  { return a.addr }
+
+type mockConn struct {
+	net.Conn
+	remoteAddr net.Addr
+}
+
+func (c *mockConn) RemoteAddr() net.Addr {
+	return c.remoteAddr
+}
+
+func TestEgressHandler_GetCertificate(t *testing.T) {
+	caCertPath, caKeyPath := createTestCA(t)
+	signer, err := proxy.NewCertSigner(caCertPath, caKeyPath)
+	if err != nil {
+		t.Fatalf("failed to create CertSigner: %v", err)
+	}
+
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("failed to read ca.crt: %v", err)
+	}
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(caCertPEM)
+
+	pm, store := newTestEnv(t)
+	podIP := "10.244.1.5"
+	podUID := "pod-bound-tls"
+
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podUID,
+		Namespace: "default",
+		Name:      "tls-pod",
+		IPs:       []string{podIP},
+	})
+
+	_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"api.example.com", "*.sub.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{443},
+						},
+					},
+				},
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"cleartext.example.com"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	// Register an unbound pod in PodMap (not bound in store)
+	unboundIP := "10.244.1.20"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       "pod-unbound",
+		Namespace: "default",
+		Name:      "unbound-pod",
+		IPs:       []string{unboundIP},
+	})
+
+	handler := NewEgressHandler(pm, store, nil, signer)
+
+	clientHello := func(sni, remoteAddr string) *tls.ClientHelloInfo {
+		var conn net.Conn
+		if remoteAddr != "" {
+			conn = &mockConn{remoteAddr: mockAddr{addr: remoteAddr}}
+		}
+		return &tls.ClientHelloInfo{
+			ServerName: sni,
+			Conn:       conn,
+		}
+	}
+
+	t.Run("bound pod gets certificate that chains to test CA and is valid for name", func(t *testing.T) {
+		cert, err := handler.GetCertificate(clientHello("api.example.com", podIP+":12345"))
+		if err != nil {
+			t.Fatalf("expected certificate, got error: %v", err)
+		}
+		if cert == nil || len(cert.Certificate) == 0 {
+			t.Fatal("expected non-empty certificate")
+		}
+
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			t.Fatalf("failed to parse leaf certificate: %v", err)
+		}
+		if _, err := leaf.Verify(x509.VerifyOptions{
+			Roots:   caPool,
+			DNSName: "api.example.com",
+		}); err != nil {
+			t.Errorf("certificate failed verification against CA: %v", err)
+		}
+	})
+
+	t.Run("unknown source address gets no certificate", func(t *testing.T) {
+		_, err := handler.GetCertificate(clientHello("api.example.com", "10.99.99.99:12345"))
+		if err == nil {
+			t.Fatal("expected error for unknown source address, got nil")
+		}
+		if !strings.Contains(err.Error(), "unknown caller") {
+			t.Errorf("expected error to mention unknown caller, got: %v", err)
+		}
+	})
+
+	t.Run("unbound pod gets no certificate", func(t *testing.T) {
+		_, err := handler.GetCertificate(clientHello("api.example.com", unboundIP+":12345"))
+		if err == nil {
+			t.Fatal("expected error for unbound pod, got nil")
+		}
+		if !strings.Contains(err.Error(), "unbound pod") {
+			t.Errorf("expected error to mention unbound pod, got: %v", err)
+		}
+	})
+
+	t.Run("empty server name gets no certificate", func(t *testing.T) {
+		_, err := handler.GetCertificate(clientHello("", podIP+":12345"))
+		if err == nil {
+			t.Fatal("expected error for empty server name, got nil")
+		}
+		if !strings.Contains(err.Error(), "missing server name") {
+			t.Errorf("expected error to mention missing server name, got: %v", err)
+		}
+	})
+
+	t.Run("repeated handshakes for same name do not sign again", func(t *testing.T) {
+		cert1, err := handler.GetCertificate(clientHello("api.example.com", podIP+":12345"))
+		if err != nil {
+			t.Fatalf("first GetCertificate failed: %v", err)
+		}
+
+		// Subsequent handshake for the same host (including case and trailing dot variations)
+		cert2, err := handler.GetCertificate(clientHello("API.EXAMPLE.COM.", podIP+":54321"))
+		if err != nil {
+			t.Fatalf("second GetCertificate failed: %v", err)
+		}
+
+		if cert1 != cert2 {
+			t.Error("expected cert1 and cert2 to be the exact same cached certificate pointer")
+		}
+	})
+
+	t.Run("bound on certificates for names outside the policy holds", func(t *testing.T) {
+		// Host that only has an HTTP rule, no HTTPS rule
+		_, err := handler.GetCertificate(clientHello("cleartext.example.com", podIP+":12345"))
+		if err == nil {
+			t.Error("expected error for cleartext-only host on TLS handshake, got nil")
+		}
+
+		// Arbitrary host not in policy
+		_, err = handler.GetCertificate(clientHello("unmatched.example.com", podIP+":12345"))
+		if err == nil {
+			t.Error("expected error for unmatched host, got nil")
+		}
+
+		// Another arbitrary foreign host
+		_, err = handler.GetCertificate(clientHello("evil.attacker.com", podIP+":12345"))
+		if err == nil {
+			t.Error("expected error for attacker host, got nil")
+		}
+	})
+
+	t.Run("nil signer returns error", func(t *testing.T) {
+		noSignerHandler := NewEgressHandler(pm, store, nil, nil)
+		_, err := noSignerHandler.GetCertificate(clientHello("api.example.com", podIP+":12345"))
+		if err == nil {
+			t.Fatal("expected error when signer is nil, got nil")
+		}
+	})
+}
+
+func TestEgressHandler_TLSHandshakeEndToEnd(t *testing.T) {
+	caCertPath, caKeyPath := createTestCA(t)
+	signer, err := proxy.NewCertSigner(caCertPath, caKeyPath)
+	if err != nil {
+		t.Fatalf("failed to create CertSigner: %v", err)
+	}
+
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("failed to read ca.crt: %v", err)
+	}
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(caCertPEM)
+
+	pm, store := newTestEnv(t)
+
+	// In this test, client dials the TLS server from 127.0.0.1.
+	// Bind 127.0.0.1 as the pod IP so caller resolution succeeds.
+	podIP := "127.0.0.1"
+	podUID := "pod-local-tls"
+
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podUID,
+		Namespace: "test",
+		Name:      "test-sandbox",
+		IPs:       []string{podIP},
+	})
+
+	_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"allowed.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{443},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, nil, signer)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer listener.Close()
+
+	tlsListener := tls.NewListener(listener, &tls.Config{
+		GetCertificate: handler.GetCertificate,
+	})
+	defer tlsListener.Close()
+
+	go func() {
+		for {
+			conn, err := tlsListener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.(*tls.Conn).Handshake()
+			_ = conn.Close()
+		}
+	}()
+
+	t.Run("allowed host completes TLS handshake and verifies against CA", func(t *testing.T) {
+		conn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+			RootCAs:    caPool,
+			ServerName: "allowed.example.com",
+		})
+		if err != nil {
+			t.Fatalf("TLS handshake failed: %v", err)
+		}
+		defer conn.Close()
+
+		state := conn.ConnectionState()
+		if len(state.PeerCertificates) == 0 {
+			t.Fatal("expected peer certificates")
+		}
+		if state.PeerCertificates[0].Subject.CommonName != "allowed.example.com" {
+			t.Errorf("expected CommonName allowed.example.com, got %q", state.PeerCertificates[0].Subject.CommonName)
+		}
+	})
+
+	t.Run("disallowed host handshake fails", func(t *testing.T) {
+		conn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{
+			RootCAs:    caPool,
+			ServerName: "disallowed.example.com",
+		})
+		if err == nil {
+			conn.Close()
+			t.Fatal("expected TLS handshake to fail for disallowed host, but it succeeded")
+		}
+	})
 }

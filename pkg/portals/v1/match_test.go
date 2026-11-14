@@ -776,3 +776,57 @@ func TestMatch_ProtojsonLoadedPolicy(t *testing.T) {
 		t.Errorf("expected nil for HTTPS to static.crates.io; got %v", got)
 	}
 }
+
+func TestCouldMatch(t *testing.T) {
+	var nilPolicy *EgressPolicy
+	if nilPolicy.CouldMatch(ProtocolHTTPS, "api.example.com") {
+		t.Error("expected false for nil policy")
+	}
+
+	emptyPolicy := &EgressPolicy{}
+	if emptyPolicy.CouldMatch(ProtocolHTTPS, "api.example.com") {
+		t.Error("expected false for empty policy")
+	}
+
+	policy := &EgressPolicy{
+		Rules: []*EgressRule{
+			{
+				Https: &HttpsRule{
+					Hostnames: []string{"api.example.com", "*.sub.example.com"},
+				},
+			},
+			{
+				Http: &HttpRule{
+					Hostnames: []string{"http.example.com"},
+				},
+			},
+			nil,
+		},
+	}
+
+	tests := []struct {
+		name     string
+		proto    Protocol
+		host     string
+		expected bool
+	}{
+		{"exact match https", ProtocolHTTPS, "api.example.com", true},
+		{"exact match case insensitive", ProtocolHTTPS, "API.EXAMPLE.COM", true},
+		{"exact match trailing dot", ProtocolHTTPS, "api.example.com.", true},
+		{"wildcard match https", ProtocolHTTPS, "foo.sub.example.com", true},
+		{"wildcard base domain does not match", ProtocolHTTPS, "sub.example.com", false},
+		{"unrelated host https", ProtocolHTTPS, "other.com", false},
+		{"http rule checked against https", ProtocolHTTPS, "http.example.com", false},
+		{"http rule checked against http", ProtocolHTTP, "http.example.com", true},
+		{"empty host", ProtocolHTTPS, "", false},
+		{"dot only host", ProtocolHTTPS, ".", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := policy.CouldMatch(tc.proto, tc.host); got != tc.expected {
+				t.Errorf("CouldMatch(%s, %q) = %v; want %v", tc.proto, tc.host, got, tc.expected)
+			}
+		})
+	}
+}
