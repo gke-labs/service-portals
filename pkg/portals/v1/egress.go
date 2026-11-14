@@ -292,28 +292,28 @@ func validateEffects(i int, member string, effects *HttpRuleEffects, errs *[]err
 		}
 		if inj.CredentialUri == "" {
 			*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects.replace_headers[%d].credential_uri: credential_uri is required", i, member, j))
-		} else if !isValidCredentialURI(inj.CredentialUri) {
-			*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects.replace_headers[%d].credential_uri: invalid credential URI %q, must be secret://<name>", i, member, j, inj.CredentialUri))
+		} else if _, err := parseCredentialURI(inj.CredentialUri); err != nil {
+			*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects.replace_headers[%d].credential_uri: %w", i, member, j, err))
 		}
 	}
 }
 
-func isValidCredentialURI(raw string) bool {
+func parseCredentialURI(raw string) (string, error) {
 	name, ok := strings.CutPrefix(raw, "secret://")
 	if !ok || name == "" {
-		return false
+		return "", fmt.Errorf("invalid credential URI %q, must be secret://<name>", raw)
 	}
 	for i := 0; i < len(name); i++ {
 		c := name[i]
 		if c <= ' ' || c >= 0x7f || strings.ContainsRune("/?#@:%\t\r\n", rune(c)) {
-			return false
+			return "", fmt.Errorf("invalid credential URI %q, must be secret://<name>", raw)
 		}
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "secret" || u.Host != name || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return false
+		return "", fmt.Errorf("invalid credential URI %q, must be secret://<name>", raw)
 	}
-	return true
+	return name, nil
 }
 
 func isValidHeaderName(v string) bool {

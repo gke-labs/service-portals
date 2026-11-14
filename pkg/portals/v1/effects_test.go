@@ -768,3 +768,125 @@ func TestApplyEffects_IntegrationWithLoadPolicyAndMatch(t *testing.T) {
 		t.Errorf("Authorization should be absent, got %q", got)
 	}
 }
+
+func TestApplyEffects_MalformedCredentialURI(t *testing.T) {
+	tests := []struct {
+		name          string
+		credentialURI string
+	}{
+		{
+			name:          "empty credential_uri",
+			credentialURI: "",
+		},
+		{
+			name:          "missing secret:// prefix",
+			credentialURI: "my-token",
+		},
+		{
+			name:          "secret:// with empty name",
+			credentialURI: "secret://",
+		},
+		{
+			name:          "https scheme",
+			credentialURI: "https://example.com/secret",
+		},
+		{
+			name:          "secret:// with path",
+			credentialURI: "secret://my-token/extra",
+		},
+		{
+			name:          "secret:// with port",
+			credentialURI: "secret://my-token:80",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := &EgressRule{
+				Https: &HttpsRule{
+					Hostnames: []string{"api.example.com"},
+					Effects: &HttpRuleEffects{
+						ReplaceHeaders: []*CredentialHeader{
+							{
+								Header:        "Authorization",
+								Prefix:        "Bearer ",
+								CredentialUri: tc.credentialURI,
+							},
+						},
+					},
+				},
+			}
+
+			resolverCalled := false
+			resolver := func(name string) ([]byte, error) {
+				resolverCalled = true
+				return []byte("secret_value"), nil
+			}
+
+			headers := http.Header{
+				"Authorization": []string{"placeholder"},
+				"Content-Type":  []string{"application/json"},
+			}
+
+			err := rule.ApplyEffects(headers, resolver)
+			if err == nil {
+				t.Fatalf("expected error for credential URI %q, got nil", tc.credentialURI)
+			}
+			if resolverCalled {
+				t.Error("resolver was called for malformed credential URI")
+			}
+			if got := headers.Get("Authorization"); got != "placeholder" {
+				t.Errorf("Authorization header was modified: %q, want %q", got, "placeholder")
+			}
+			if got := headers.Get("Content-Type"); got != "application/json" {
+				t.Errorf("Content-Type header was modified: %q, want %q", got, "application/json")
+			}
+		})
+	}
+
+	t.Run("atomic failure with malformed credential URI leaves other headers untouched", func(t *testing.T) {
+		rule := &EgressRule{
+			Https: &HttpsRule{
+				Hostnames: []string{"api.example.com"},
+				Effects: &HttpRuleEffects{
+					ReplaceHeaders: []*CredentialHeader{
+						{
+							Header:        "Authorization",
+							Prefix:        "Bearer ",
+							CredentialUri: "secret://valid-token",
+						},
+						{
+							Header:        "X-Bad-Cred",
+							Prefix:        "",
+							CredentialUri: "malformed-uri",
+						},
+					},
+				},
+			},
+		}
+
+		resolver := func(name string) ([]byte, error) {
+			if name == "valid-token" {
+				return []byte("valid_token_val"), nil
+			}
+			t.Errorf("unexpected secret lookup for %q", name)
+			return nil, errors.New("unexpected lookup")
+		}
+
+		headers := http.Header{
+			"Authorization": []string{"placeholder1"},
+			"X-Bad-Cred":    []string{"placeholder2"},
+		}
+
+		err := rule.ApplyEffects(headers, resolver)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if got := headers.Get("Authorization"); got != "placeholder1" {
+			t.Errorf("Authorization header was modified: %q", got)
+		}
+		if got := headers.Get("X-Bad-Cred"); got != "placeholder2" {
+			t.Errorf("X-Bad-Cred header was modified: %q", got)
+		}
+	})
+}
