@@ -53,3 +53,10 @@ The git history is the permanent record; the GitHub PR description is not. It is
 - **A good PR changes at most 200 lines, including tests.** The time to review and understand a PR grows roughly with the square of the lines in the diff, so two 100-line PRs cost a quarter of one 200-line PR. If the one idea needs more than 200 lines, say so on the issue before pushing and propose where to cut or how to order the parts.
 - **Issues carry a line budget** for the same reason; an issue without one should be given one before it is assigned.
 - **Do not stack unmerged PRs.** Open the next part after the previous one merges; a PR that carries another PR's commits cannot be reviewed on its own.
+
+---
+
+## One name per thing
+
+- **One exported name per operation and per type.** New code gets one exported name per operation and per type; no aliases, forwarding wrappers, or convenience variants until a caller needs them (such as a method plus a package function plus a forwarding wrapper, type aliases, or `GetX` next to `X`).
+- **No unused exported identifiers.** Exported identifiers with no caller in the PR are not added. Reviewers and future readers have to work out that the names are the same thing, and unused exported API is surface we then have to keep.
