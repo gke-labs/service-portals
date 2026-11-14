@@ -852,6 +852,12 @@ func main() {
 		case "unbind":
 			runUnbindCommand(os.Args[2:])
 			return
+		case "bind-service":
+			if err := runBindServiceCommand(context.Background(), os.Args[2:], os.Stdout, os.Stdin); err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 	}
 
