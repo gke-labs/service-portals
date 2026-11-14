@@ -33,20 +33,25 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	PodBindService_Bind_FullMethodName   = "/portals.v1.PodBindService/Bind"
-	PodBindService_Unbind_FullMethodName = "/portals.v1.PodBindService/Unbind"
-	PodBindService_Get_FullMethodName    = "/portals.v1.PodBindService/Get"
+	PodBindService_Bind_FullMethodName          = "/portals.v1.PodBindService/Bind"
+	PodBindService_InjectSecrets_FullMethodName = "/portals.v1.PodBindService/InjectSecrets"
+	PodBindService_Unbind_FullMethodName        = "/portals.v1.PodBindService/Unbind"
+	PodBindService_Get_FullMethodName           = "/portals.v1.PodBindService/Get"
 )
 
 // PodBindServiceClient is the client API for PodBindService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// PodBindService manages the dynamic binding of sandbox pods to user identities
-// and access policies. Called by sandbox claim controllers over authenticated gRPC.
+// PodBindService manages the dynamic binding of sandbox pods to user identities,
+// access policies, and credentials. Called by sandbox claim controllers over authenticated gRPC.
 type PodBindServiceClient interface {
-	// Bind associates a pod UID with an identity and policy.
-	Bind(ctx context.Context, in *BindRequest, opts ...grpc.CallOption) (*BindResponse, error)
+	// Bind associates a pod UID with an identity and egress policy.
+	Bind(ctx context.Context, in *PodPolicy, opts ...grpc.CallOption) (*BindResponse, error)
+	// InjectSecrets supplies named secrets for a pod UID. A call replaces the
+	// pod's whole set of secrets rather than merging into it, so rotation and
+	// removal overwrite previously supplied secrets.
+	InjectSecrets(ctx context.Context, in *PodSecrets, opts ...grpc.CallOption) (*InjectSecretsResponse, error)
 	// Unbind dissociates a pod UID, reverting it to fail-closed state.
 	Unbind(ctx context.Context, in *UnbindRequest, opts ...grpc.CallOption) (*UnbindResponse, error)
 	// Get retrieves the current binding and status of a pod.
@@ -61,10 +66,20 @@ func NewPodBindServiceClient(cc grpc.ClientConnInterface) PodBindServiceClient {
 	return &podBindServiceClient{cc}
 }
 
-func (c *podBindServiceClient) Bind(ctx context.Context, in *BindRequest, opts ...grpc.CallOption) (*BindResponse, error) {
+func (c *podBindServiceClient) Bind(ctx context.Context, in *PodPolicy, opts ...grpc.CallOption) (*BindResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BindResponse)
 	err := c.cc.Invoke(ctx, PodBindService_Bind_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *podBindServiceClient) InjectSecrets(ctx context.Context, in *PodSecrets, opts ...grpc.CallOption) (*InjectSecretsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InjectSecretsResponse)
+	err := c.cc.Invoke(ctx, PodBindService_InjectSecrets_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -95,11 +110,15 @@ func (c *podBindServiceClient) Get(ctx context.Context, in *GetRequest, opts ...
 // All implementations must embed UnimplementedPodBindServiceServer
 // for forward compatibility.
 //
-// PodBindService manages the dynamic binding of sandbox pods to user identities
-// and access policies. Called by sandbox claim controllers over authenticated gRPC.
+// PodBindService manages the dynamic binding of sandbox pods to user identities,
+// access policies, and credentials. Called by sandbox claim controllers over authenticated gRPC.
 type PodBindServiceServer interface {
-	// Bind associates a pod UID with an identity and policy.
-	Bind(context.Context, *BindRequest) (*BindResponse, error)
+	// Bind associates a pod UID with an identity and egress policy.
+	Bind(context.Context, *PodPolicy) (*BindResponse, error)
+	// InjectSecrets supplies named secrets for a pod UID. A call replaces the
+	// pod's whole set of secrets rather than merging into it, so rotation and
+	// removal overwrite previously supplied secrets.
+	InjectSecrets(context.Context, *PodSecrets) (*InjectSecretsResponse, error)
 	// Unbind dissociates a pod UID, reverting it to fail-closed state.
 	Unbind(context.Context, *UnbindRequest) (*UnbindResponse, error)
 	// Get retrieves the current binding and status of a pod.
@@ -114,8 +133,11 @@ type PodBindServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedPodBindServiceServer struct{}
 
-func (UnimplementedPodBindServiceServer) Bind(context.Context, *BindRequest) (*BindResponse, error) {
+func (UnimplementedPodBindServiceServer) Bind(context.Context, *PodPolicy) (*BindResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Bind not implemented")
+}
+func (UnimplementedPodBindServiceServer) InjectSecrets(context.Context, *PodSecrets) (*InjectSecretsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InjectSecrets not implemented")
 }
 func (UnimplementedPodBindServiceServer) Unbind(context.Context, *UnbindRequest) (*UnbindResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Unbind not implemented")
@@ -145,7 +167,7 @@ func RegisterPodBindServiceServer(s grpc.ServiceRegistrar, srv PodBindServiceSer
 }
 
 func _PodBindService_Bind_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(BindRequest)
+	in := new(PodPolicy)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
@@ -157,7 +179,25 @@ func _PodBindService_Bind_Handler(srv interface{}, ctx context.Context, dec func
 		FullMethod: PodBindService_Bind_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(PodBindServiceServer).Bind(ctx, req.(*BindRequest))
+		return srv.(PodBindServiceServer).Bind(ctx, req.(*PodPolicy))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PodBindService_InjectSecrets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PodSecrets)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PodBindServiceServer).InjectSecrets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PodBindService_InjectSecrets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PodBindServiceServer).InjectSecrets(ctx, req.(*PodSecrets))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -208,6 +248,10 @@ var PodBindService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Bind",
 			Handler:    _PodBindService_Bind_Handler,
+		},
+		{
+			MethodName: "InjectSecrets",
+			Handler:    _PodBindService_InjectSecrets_Handler,
 		},
 		{
 			MethodName: "Unbind",
