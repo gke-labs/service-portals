@@ -15,24 +15,15 @@
 package proxy
 
 import (
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"fmt"
+	"errors"
 	"io"
 	"log"
-	"math/big"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"sync"
-	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -42,11 +33,7 @@ type HTTPProxy struct {
 	AuthToken  string
 	AuthHeader string
 
-	caCert *x509.Certificate
-	caKey  crypto.PrivateKey
-
-	certs map[string]*tls.Certificate
-	mu    sync.RWMutex
+	signer *CertSigner
 
 	Transport http.RoundTripper
 }
@@ -56,7 +43,6 @@ func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, 
 		TargetURL:  targetURL,
 		AuthToken:  authToken,
 		AuthHeader: authHeader,
-		certs:      make(map[string]*tls.Certificate),
 		Transport:  http.DefaultTransport,
 	}
 
@@ -65,25 +51,11 @@ func NewHTTPProxy(targetURL *url.URL, authToken, authHeader string, caCertPath, 
 	}
 
 	if caCertPath != "" && caKeyPath != "" {
-		certPEM, err := os.ReadFile(caCertPath)
+		signer, err := NewCertSigner(caCertPath, caKeyPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read CA cert: %w", err)
+			return nil, err
 		}
-		keyPEM, err := os.ReadFile(caKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read CA key: %w", err)
-		}
-
-		tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load CA key pair: %w", err)
-		}
-
-		p.caCert, err = x509.ParseCertificate(tlsCert.Certificate[0])
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
-		}
-		p.caKey = tlsCert.PrivateKey
+		p.signer = signer
 	}
 
 	return p, nil
@@ -100,12 +72,10 @@ func HostWithoutPort(host string) string {
 }
 
 func (p *HTTPProxy) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	host := info.ServerName
-	if host == "" {
-		host = "localhost"
+	if p.signer == nil {
+		return nil, errors.New("no CA configured to sign certificate")
 	}
-	host = HostWithoutPort(host)
-	return p.getCert(host)
+	return p.signer.GetCertificate(info)
 }
 
 func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -248,76 +218,4 @@ func splitAndTrim(s string) []string {
 		}
 	}
 	return res
-}
-
-func (p *HTTPProxy) getCert(host string) (*tls.Certificate, error) {
-	p.mu.RLock()
-	cert, ok := p.certs[host]
-	p.mu.RUnlock()
-	if ok {
-		return cert, nil
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if cert, ok := p.certs[host]; ok {
-		return cert, nil
-	}
-
-	cert, err := p.signCert(host)
-	if err != nil {
-		return nil, err
-	}
-	p.certs[host] = cert
-	return cert, nil
-}
-
-func (p *HTTPProxy) signCert(host string) (*tls.Certificate, error) {
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, err
-	}
-
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: host,
-		},
-		NotBefore: time.Now().Add(-time.Hour),
-		NotAfter:  time.Now().Add(time.Hour * 24 * 365),
-
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-
-	if ip := net.ParseIP(host); ip != nil {
-		template.IPAddresses = []net.IP{ip}
-	} else {
-		template.DNSNames = []string{host}
-	}
-
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
-
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, p.caCert, &priv.PublicKey, p.caKey)
-	if err != nil {
-		return nil, err
-	}
-
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	keyBytes, err := x509.MarshalPKCS8PrivateKey(priv)
-	if err != nil {
-		return nil, err
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyBytes})
-
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, err
-	}
-	return &cert, nil
 }
