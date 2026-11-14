@@ -17,6 +17,7 @@ package portals
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -32,14 +33,19 @@ import (
 	"github.com/gke-labs/service-portals/pkg/cache"
 	"github.com/gke-labs/service-portals/pkg/dns"
 	"github.com/gke-labs/service-portals/pkg/networking"
+	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"google.golang.org/grpc"
 )
 
 // DefaultAdminSocketPath is the default Unix domain socket path for the local node agent admin and bind API.
 const DefaultAdminSocketPath = "/run/service-portal/portal.sock"
+
+// DefaultBindSocketPath is the default Unix domain socket path for the local node agent PodBindService gRPC API.
+const DefaultBindSocketPath = "/run/service-portal/bind.sock"
 
 type CertificateProvider interface {
 	GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error)
@@ -52,11 +58,79 @@ type Config struct {
 	CacheTTL          time.Duration
 	RulesDir          string
 	PodMap            *PodMap
+	BindingStore      *portalsv1.BindingStore
+	BindSocketPath    string
 	ServeDNS          bool
 	DNSBindAddr       string
 	ProxyDNSPort      string
 	ProxyBindAddrV6   string
 	DefaultAction     string
+}
+
+// servePodBindService starts a gRPC server hosting PodBindService on a private Unix domain socket.
+// The socket is chmod 0600 (only accessible by proxy UID and root). Secret values are never logged;
+// no message-logging interceptors are installed. Failing to create the socket or set its mode
+// fails closed and stops startup.
+func servePodBindService(sockPath string, store *portalsv1.BindingStore) (func(), error) {
+	if store == nil {
+		return nil, errors.New("cannot serve PodBindService with nil BindingStore")
+	}
+	if !filepath.IsAbs(sockPath) {
+		return nil, fmt.Errorf("bind socket path %q must be an absolute path", sockPath)
+	}
+
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("warning: removing existing bind socket %s: %v", sockPath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0750); err != nil {
+		return nil, fmt.Errorf("failed to create bind socket directory: %w", err)
+	}
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on bind unix socket %s: %w", sockPath, err)
+	}
+
+	// Security: The bind unix socket must be mode 0600 (accessible only by the listening
+	// proxy UID and root). Making the socket world-writable would allow any process that can
+	// see the hostPath to register arbitrary pods or bind policies, bypassing security
+	// controls. A failure to enforce permissions must fail closed and stop startup.
+	if err := os.Chmod(sockPath, 0600); err != nil {
+		if cErr := l.Close(); cErr != nil {
+			log.Printf("warning: closing bind listener: %v", cErr)
+		}
+		if rErr := os.Remove(sockPath); rErr != nil && !os.IsNotExist(rErr) {
+			log.Printf("warning: removing bind socket %s: %v", sockPath, rErr)
+		}
+		return nil, fmt.Errorf("failed to chmod bind socket %s to 0600: %w", sockPath, err)
+	}
+
+	grpcServer := grpc.NewServer()
+	portalsv1.RegisterPodBindServiceServer(grpcServer, store)
+
+	go func() {
+		log.Printf("Starting PodBindService gRPC server on unix socket %s", sockPath)
+		if err := grpcServer.Serve(l); err != nil && err != grpc.ErrServerStopped {
+			log.Printf("PodBindService gRPC server error: %v", err)
+		}
+	}()
+
+	stop := func() {
+		stopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(2 * time.Second):
+			grpcServer.Stop()
+		}
+		if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("warning: removing bind socket %s: %v", sockPath, err)
+		}
+	}
+
+	return stop, nil
 }
 
 // validateAdminAddr enforces that the administrative and Bind API server binds exclusively
@@ -168,10 +242,33 @@ func Run(ctx context.Context, config Config) error {
 		pm = NewPodMap()
 	}
 
+	var store *portalsv1.BindingStore
 	var adminSrv *http.Server
 	var adminListener net.Listener
 	var adminSockPath string
 	if pm != nil {
+		store = config.BindingStore
+		if store == nil {
+			store = portalsv1.NewBindingStore()
+		}
+
+		// Security: The PodBindService gRPC API must bind exclusively to a private Unix domain
+		// socket reachable only by the proxy UID and root (mode 0600), never a TCP address.
+		// Because the node proxy runs with hostNetwork: true, binding to a TCP port would expose
+		// policy binding and secret injection to any workload on the node network, creating an
+		// unauthenticated privilege escalation bypass. Controller-facing remote transport with
+		// gRPC and mTLS is tracked separately in #227.
+		bindSockPath := config.BindSocketPath
+		if bindSockPath == "" {
+			bindSockPath = DefaultBindSocketPath
+		}
+
+		stopBind, err := servePodBindService(bindSockPath, store)
+		if err != nil {
+			return fmt.Errorf("failed to start PodBindService: %w", err)
+		}
+		defer stopBind()
+
 		// Security: The admin and Bind API must bind exclusively to a private Unix domain socket
 		// or loopback (127.0.0.1 or ::1). Because the node proxy runs with hostNetwork: true,
 		// binding to 0.0.0.0 or an external interface would expose pod registration and policy
@@ -233,6 +330,9 @@ func Run(ctx context.Context, config Config) error {
 			}()
 		}
 	}
+
+	// store holds the BindingStore served by PodBindService, ready for EgressHandler in the next issue.
+	_ = store
 
 	var handler http.Handler
 	if rulesDir != "" {
