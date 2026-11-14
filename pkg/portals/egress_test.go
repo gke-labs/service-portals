@@ -1,0 +1,947 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package portals
+
+import (
+	"context"
+	"crypto/tls"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
+)
+
+func newTestEnv(t *testing.T) (*PodMap, *portalsv1.BindingStore) {
+	t.Helper()
+	pm := NewPodMap()
+	store := portalsv1.NewBindingStore()
+	return pm, store
+}
+
+// dialRoutingTransport creates an http.Transport that routes requests destined for targetAddr
+// to the upstream listener address over TCP.
+func dialRoutingTransport(upstreamAddr string, tlsConfig *tls.Config) http.RoundTripper {
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, upstreamAddr)
+		},
+		TLSClientConfig: tlsConfig,
+	}
+	return tr
+}
+
+func TestEgressHandler_MatchingRequestReplacesPlaceholder(t *testing.T) {
+	var upstreamCalled atomic.Int32
+	var receivedAuth string
+	var receivedHost string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled.Add(1)
+		receivedAuth = r.Header.Get("Authorization")
+		receivedHost = r.Host
+		w.Header().Set("X-Upstream-Resp", "ok")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("hello from upstream"))
+	}))
+	defer upstream.Close()
+
+	pm, store := newTestEnv(t)
+	podIP := "10.244.1.5"
+	podUID := "pod-test-uid"
+
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podUID,
+		Namespace: "default",
+		Name:      "test-pod",
+		IPs:       []string{podIP},
+	})
+
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"api.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{80},
+						},
+						Effects: &portalsv1.HttpRuleEffects{
+							ReplaceHeaders: []*portalsv1.CredentialHeader{
+								{
+									Header:        "Authorization",
+									Prefix:        "Bearer ",
+									CredentialUri: "secret://github-token",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	_, err = store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+		PodUid: podUID,
+		Secrets: map[string][]byte{
+			"github-token": []byte("ghp_realSecretToken123"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("InjectSecrets failed: %v", err)
+	}
+
+	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
+	handler := NewEgressHandler(pm, store, transport)
+
+	req := httptest.NewRequest("GET", "http://api.example.com/v1/user", nil)
+	req.RemoteAddr = podIP + ":45678"
+	req.Header.Set("Authorization", "placeholder-token")
+	req.Header.Set("Connection", "close")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if upstreamCalled.Load() != 1 {
+		t.Fatalf("expected upstream to be called once, got %d", upstreamCalled.Load())
+	}
+	if receivedAuth != "Bearer ghp_realSecretToken123" {
+		t.Errorf("expected Authorization 'Bearer ghp_realSecretToken123', got %q", receivedAuth)
+	}
+	if receivedHost != "api.example.com" {
+		t.Errorf("expected Host 'api.example.com', got %q", receivedHost)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello from upstream" {
+		t.Errorf("expected body 'hello from upstream', got %q", string(body))
+	}
+	if resp.Header.Get("X-Upstream-Resp") != "ok" {
+		t.Errorf("expected X-Upstream-Resp 'ok', got %q", resp.Header.Get("X-Upstream-Resp"))
+	}
+}
+
+func TestEgressHandler_RequestWithoutPlaceholderForwardedWithoutOne(t *testing.T) {
+	var upstreamCalled atomic.Int32
+	var receivedAuth string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled.Add(1)
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	pm, store := newTestEnv(t)
+	podIP := "10.244.1.5"
+	podUID := "pod-test-uid"
+
+	pm.AddOrUpdatePod(&PodInfo{
+		UID: podUID,
+		IPs: []string{podIP},
+	})
+
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"api.example.com"},
+						Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+						Effects: &portalsv1.HttpRuleEffects{
+							ReplaceHeaders: []*portalsv1.CredentialHeader{
+								{
+									Header:        "Authorization",
+									Prefix:        "Bearer ",
+									CredentialUri: "secret://my-token",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	_, err = store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+		PodUid: podUID,
+		Secrets: map[string][]byte{
+			"my-token": []byte("super-secret"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("InjectSecrets failed: %v", err)
+	}
+
+	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
+	handler := NewEgressHandler(pm, store, transport)
+
+	req := httptest.NewRequest("GET", "http://api.example.com/public", nil)
+	req.RemoteAddr = podIP + ":54321"
+	// Request carries no Authorization header
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if upstreamCalled.Load() != 1 {
+		t.Fatalf("expected upstream to be called once, got %d", upstreamCalled.Load())
+	}
+	if receivedAuth != "" {
+		t.Errorf("expected no Authorization header forwarded, got %q", receivedAuth)
+	}
+}
+
+func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
+	var upstreamCalled atomic.Int32
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
+
+	t.Run("unknown source address", func(t *testing.T) {
+		upstreamCalled.Store(0)
+		pm, store := newTestEnv(t)
+		handler := NewEgressHandler(pm, store, transport)
+
+		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
+		req.RemoteAddr = "192.168.1.99:50000" // Not in PodMap
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+		if upstreamCalled.Load() != 0 {
+			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
+		}
+	})
+
+	t.Run("unbound pod", func(t *testing.T) {
+		upstreamCalled.Store(0)
+		pm, store := newTestEnv(t)
+		podIP := "10.0.0.10"
+		podUID := "pod-unbound"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+		// Pod registered in PodMap but never bound in store
+
+		handler := NewEgressHandler(pm, store, transport)
+
+		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
+		req.RemoteAddr = podIP + ":50000"
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+		if upstreamCalled.Load() != 0 {
+			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
+		}
+	})
+
+	t.Run("non-matching host", func(t *testing.T) {
+		upstreamCalled.Store(0)
+		pm, store := newTestEnv(t)
+		podIP := "10.0.0.11"
+		podUID := "pod-bound"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Http: &portalsv1.HttpRule{
+							Hostnames: []string{"allowed.example.com"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, transport)
+
+		req := httptest.NewRequest("GET", "http://denied.example.com/test", nil)
+		req.RemoteAddr = podIP + ":50000"
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+		if upstreamCalled.Load() != 0 {
+			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
+		}
+	})
+
+	t.Run("non-matching port", func(t *testing.T) {
+		upstreamCalled.Store(0)
+		pm, store := newTestEnv(t)
+		podIP := "10.0.0.12"
+		podUID := "pod-bound-port"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Http: &portalsv1.HttpRule{
+							Hostnames: []string{"api.example.com"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, transport)
+
+		req := httptest.NewRequest("GET", "http://api.example.com:8080/test", nil)
+		req.RemoteAddr = podIP + ":50000"
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+		if upstreamCalled.Load() != 0 {
+			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
+		}
+	})
+
+	t.Run("wrong protocol", func(t *testing.T) {
+		upstreamCalled.Store(0)
+		pm, store := newTestEnv(t)
+		podIP := "10.0.0.13"
+		podUID := "pod-https-only"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+		// Rule allows HTTPS only
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Https: &portalsv1.HttpsRule{
+							Hostnames: []string{"api.example.com"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{443}},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, transport)
+
+		// Request is cleartext HTTP
+		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
+		req.RemoteAddr = podIP + ":50000"
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+		if upstreamCalled.Load() != 0 {
+			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
+		}
+	})
+
+	t.Run("missing secret", func(t *testing.T) {
+		upstreamCalled.Store(0)
+		pm, store := newTestEnv(t)
+		podIP := "10.0.0.14"
+		podUID := "pod-missing-secret"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Http: &portalsv1.HttpRule{
+							Hostnames: []string{"api.example.com"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+							Effects: &portalsv1.HttpRuleEffects{
+								ReplaceHeaders: []*portalsv1.CredentialHeader{
+									{
+										Header:        "Authorization",
+										CredentialUri: "secret://unregistered-secret",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+		// No secret injected!
+
+		handler := NewEgressHandler(pm, store, transport)
+
+		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
+		req.RemoteAddr = podIP + ":50000"
+		req.Header.Set("Authorization", "placeholder")
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+		if upstreamCalled.Load() != 0 {
+			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
+		}
+	})
+
+	t.Run("reject CONNECT", func(t *testing.T) {
+		upstreamCalled.Store(0)
+		pm, store := newTestEnv(t)
+		handler := NewEgressHandler(pm, store, transport)
+
+		req := httptest.NewRequest(http.MethodConnect, "http://api.example.com:443", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("expected 405 Method Not Allowed, got %d", resp.StatusCode)
+		}
+		if upstreamCalled.Load() != 0 {
+			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
+		}
+	})
+}
+
+func TestEgressHandler_SecretsIsolatedBetweenPods(t *testing.T) {
+	var receivedAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	pm, store := newTestEnv(t)
+	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
+	handler := NewEgressHandler(pm, store, transport)
+
+	podAIP := "10.1.0.1"
+	podAUID := "pod-a"
+	podBIP := "10.1.0.2"
+	podBUID := "pod-b"
+
+	pm.AddOrUpdatePod(&PodInfo{UID: podAUID, IPs: []string{podAIP}})
+	pm.AddOrUpdatePod(&PodInfo{UID: podBUID, IPs: []string{podBIP}})
+
+	policy := &portalsv1.EgressPolicy{
+		Rules: []*portalsv1.EgressRule{
+			{
+				Http: &portalsv1.HttpRule{
+					Hostnames: []string{"api.example.com"},
+					Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+					Effects: &portalsv1.HttpRuleEffects{
+						ReplaceHeaders: []*portalsv1.CredentialHeader{
+							{
+								Header:        "Authorization",
+								Prefix:        "Bearer ",
+								CredentialUri: "secret://api-key",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podAUID, Policy: policy}); err != nil {
+		t.Fatalf("Bind pod A failed: %v", err)
+	}
+	if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podBUID, Policy: policy}); err != nil {
+		t.Fatalf("Bind pod B failed: %v", err)
+	}
+
+	if _, err := store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+		PodUid:  podAUID,
+		Secrets: map[string][]byte{"api-key": []byte("secret-token-A")},
+	}); err != nil {
+		t.Fatalf("InjectSecrets pod A failed: %v", err)
+	}
+	if _, err := store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+		PodUid:  podBUID,
+		Secrets: map[string][]byte{"api-key": []byte("secret-token-B")},
+	}); err != nil {
+		t.Fatalf("InjectSecrets pod B failed: %v", err)
+	}
+
+	// Pod A request
+	reqA := httptest.NewRequest("GET", "http://api.example.com/data", nil)
+	reqA.RemoteAddr = podAIP + ":12345"
+	reqA.Header.Set("Authorization", "placeholder")
+
+	wA := httptest.NewRecorder()
+	handler.ServeHTTP(wA, reqA)
+	if wA.Result().StatusCode != http.StatusOK {
+		t.Fatalf("pod A request failed with status %d", wA.Result().StatusCode)
+	}
+	if receivedAuth != "Bearer secret-token-A" {
+		t.Errorf("expected pod A to get 'Bearer secret-token-A', got %q", receivedAuth)
+	}
+
+	// Pod B request
+	reqB := httptest.NewRequest("GET", "http://api.example.com/data", nil)
+	reqB.RemoteAddr = podBIP + ":54321"
+	reqB.Header.Set("Authorization", "placeholder")
+
+	wB := httptest.NewRecorder()
+	handler.ServeHTTP(wB, reqB)
+	if wB.Result().StatusCode != http.StatusOK {
+		t.Fatalf("pod B request failed with status %d", wB.Result().StatusCode)
+	}
+	if receivedAuth != "Bearer secret-token-B" {
+		t.Errorf("expected pod B to get 'Bearer secret-token-B', got %q", receivedAuth)
+	}
+
+	// If pod A's secret is removed via empty inject, pod A must not receive pod B's secret
+	if _, err := store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+		PodUid:  podAUID,
+		Secrets: map[string][]byte{},
+	}); err != nil {
+		t.Fatalf("InjectSecrets pod A empty failed: %v", err)
+	}
+
+	wA2 := httptest.NewRecorder()
+	reqA2 := httptest.NewRequest("GET", "http://api.example.com/data", nil)
+	reqA2.RemoteAddr = podAIP + ":12345"
+	reqA2.Header.Set("Authorization", "placeholder")
+
+	handler.ServeHTTP(wA2, reqA2)
+	if wA2.Result().StatusCode != http.StatusForbidden {
+		t.Errorf("expected pod A with cleared secrets to be 403 Forbidden, got %d", wA2.Result().StatusCode)
+	}
+}
+
+func TestEgressHandler_HTTPSMatchingRequest(t *testing.T) {
+	var receivedAuth string
+	var upstreamCalled atomic.Int32
+
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled.Add(1)
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("tls ok"))
+	}))
+	defer upstream.Close()
+
+	pm, store := newTestEnv(t)
+	podIP := "10.244.2.10"
+	podUID := "pod-https-uid"
+
+	pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"api.secure.com"},
+						Ports:     &portalsv1.Ports{Numbers: []int32{443}},
+						Effects: &portalsv1.HttpRuleEffects{
+							ReplaceHeaders: []*portalsv1.CredentialHeader{
+								{
+									Header:        "Authorization",
+									Prefix:        "Bearer ",
+									CredentialUri: "secret://tls-token",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	_, err = store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+		PodUid: podUID,
+		Secrets: map[string][]byte{
+			"tls-token": []byte("secureTokenSecret"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("InjectSecrets failed: %v", err)
+	}
+
+	tlsConfig := upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	tlsConfig.InsecureSkipVerify = true
+	transport := dialRoutingTransport(upstream.Listener.Addr().String(), tlsConfig)
+
+	handler := NewEgressHandler(pm, store, transport)
+
+	req := httptest.NewRequest("GET", "https://api.secure.com/secure/endpoint", nil)
+	req.RemoteAddr = podIP + ":41234"
+	req.Header.Set("Authorization", "placeholder")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if upstreamCalled.Load() != 1 {
+		t.Fatalf("expected upstream to be called once, got %d", upstreamCalled.Load())
+	}
+	if receivedAuth != "Bearer secureTokenSecret" {
+		t.Errorf("expected 'Bearer secureTokenSecret', got %q", receivedAuth)
+	}
+}
+
+func TestEgressHandler_DefaultTransportDirectAddress(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("direct ok"))
+	}))
+	defer upstream.Close()
+
+	_, portStr, err := net.SplitHostPort(upstream.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort failed: %v", err)
+	}
+	port, _ := strconv.Atoi(portStr)
+
+	pm, store := newTestEnv(t)
+	podIP := "10.244.3.1"
+	podUID := "pod-direct"
+
+	pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+	_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"localhost"},
+						Ports:     &portalsv1.Ports{Numbers: []int32{int32(port)}},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	// NewEgressHandler with nil transport defaults to http.DefaultTransport
+	handler := NewEgressHandler(pm, store, nil)
+
+	req := httptest.NewRequest("GET", "http://localhost:"+portStr+"/direct", nil)
+	req.RemoteAddr = podIP + ":34567"
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "direct ok" {
+		t.Errorf("expected body 'direct ok', got %q", string(body))
+	}
+}
+
+func TestEgressHandler_ClearTextRequestWithHTTPSAbsoluteFormTargetMatchedAsHTTP(t *testing.T) {
+	var upstreamCalled atomic.Int32
+	var receivedHost string
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled.Add(1)
+		receivedHost = r.Host
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("cleartext ok"))
+	}))
+	defer upstream.Close()
+
+	pm, store := newTestEnv(t)
+	podIP := "10.244.4.1"
+	podUID := "pod-cleartext"
+	pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+	// Policy has an HTTP rule for api.example.com on port 80.
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"api.example.com"},
+						Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	transport := dialRoutingTransport(upstream.Listener.Addr().String(), nil)
+	handler := NewEgressHandler(pm, store, transport)
+
+	// Send a clear-text request (r.TLS == nil) where the client specifies an absolute-form https:// URI.
+	// httptest.NewRequest sets req.TLS when the URL starts with https://, so clear req.TLS to represent
+	// a request received on the clear-text HTTP listener.
+	// Because the connection is cleartext, the protocol must be evaluated strictly as http, matching
+	// the HTTP rule rather than allowing the client to select the https protocol.
+	req := httptest.NewRequest("GET", "https://api.example.com/endpoint", nil)
+	req.TLS = nil
+	req.RemoteAddr = podIP + ":45000"
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	if upstreamCalled.Load() != 1 {
+		t.Fatalf("expected upstream to be called once, got %d", upstreamCalled.Load())
+	}
+	if receivedHost != "api.example.com" {
+		t.Errorf("expected Host 'api.example.com', got %q", receivedHost)
+	}
+
+	// Verify that if the policy only allows HTTPS, the cleartext request with https:// URI is denied.
+	_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"api.example.com"},
+						Ports:     &portalsv1.Ports{Numbers: []int32{443}},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind HTTPS-only policy failed: %v", err)
+	}
+
+	upstreamCalled.Store(0)
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "https://api.example.com/endpoint", nil)
+	req2.TLS = nil
+	req2.RemoteAddr = podIP + ":45000"
+
+	handler.ServeHTTP(w2, req2)
+	resp2 := w2.Result()
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("expected status 403 Forbidden when cleartext request hits HTTPS-only policy, got %d", resp2.StatusCode)
+	}
+	if upstreamCalled.Load() != 0 {
+		t.Errorf("expected 0 calls reaching upstream for forbidden cleartext request, got %d", upstreamCalled.Load())
+	}
+}
+
+func TestRequestTarget(t *testing.T) {
+	tests := []struct {
+		name        string
+		host        string
+		tls         bool
+		wantHost    string
+		wantPort    int32
+		wantErrText string
+	}{
+		{
+			name:        "empty host",
+			host:        "",
+			wantErrText: "missing host",
+		},
+		{
+			name:     "cleartext default port 80",
+			host:     "api.example.com",
+			tls:      false,
+			wantHost: "api.example.com",
+			wantPort: 80,
+		},
+		{
+			name:     "tls default port 443",
+			host:     "api.example.com",
+			tls:      true,
+			wantHost: "api.example.com",
+			wantPort: 443,
+		},
+		{
+			name:     "explicit port overrides default",
+			host:     "api.example.com:8080",
+			tls:      false,
+			wantHost: "api.example.com",
+			wantPort: 8080,
+		},
+		{
+			name:     "trailing dot is stripped and normalized to lower",
+			host:     "API.EXAMPLE.COM.",
+			tls:      false,
+			wantHost: "api.example.com",
+			wantPort: 80,
+		},
+		{
+			name:        "invalid port string",
+			host:        "api.example.com:notaport",
+			wantErrText: "invalid port",
+		},
+		{
+			name:        "port zero",
+			host:        "api.example.com:0",
+			wantErrText: "invalid port",
+		},
+		{
+			name:     "ipv6 literal without port",
+			host:     "[::1]",
+			tls:      false,
+			wantHost: "::1",
+			wantPort: 80,
+		},
+		{
+			name:     "ipv6 literal with port",
+			host:     "[::1]:8443",
+			tls:      false,
+			wantHost: "::1",
+			wantPort: 8443,
+		},
+		{
+			name:        "invalid host multiple colons without brackets",
+			host:        "foo:bar:baz",
+			wantErrText: "invalid host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "http://placeholder/", nil)
+			req.Host = tt.host
+			if tt.tls {
+				req.TLS = &tls.ConnectionState{}
+			} else {
+				req.TLS = nil
+			}
+
+			gotHost, gotPort, err := requestTarget(req)
+			if tt.wantErrText != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.wantErrText)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("expected error containing %q, got %v", tt.wantErrText, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if gotHost != tt.wantHost {
+				t.Errorf("host = %q, want %q", gotHost, tt.wantHost)
+			}
+			if gotPort != tt.wantPort {
+				t.Errorf("port = %d, want %d", gotPort, tt.wantPort)
+			}
+		})
+	}
+}
