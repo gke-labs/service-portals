@@ -68,7 +68,10 @@ func (r *EgressRule) ApplyEffects(headers http.Header, resolve SecretResolver) e
 			return errors.New("actor_jwt credential source is not supported")
 		}
 
-		secretName, _ := strings.CutPrefix(rh.CredentialUri, "secret://")
+		secretName, err := parseCredentialURI(rh.CredentialUri)
+		if err != nil {
+			return err
+		}
 		if resolve == nil {
 			return fmt.Errorf("resolving secret %q: no secret resolver provided", secretName)
 		}
