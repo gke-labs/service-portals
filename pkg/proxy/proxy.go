@@ -136,11 +136,22 @@ func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Remove hop-by-hop headers in request
-	removeHopByHopHeaders(outReq.Header)
-	outReq.Header.Del("X-Forwarded-For")
+	Forward(w, outReq, p.Transport)
+}
 
-	resp, err := p.Transport.RoundTrip(outReq)
+// Forward sends req via transport and writes the upstream response to w.
+// It removes RFC 7230 hop-by-hop headers from both the request and response,
+// strips X-Forwarded-For, copies trailers, and streams the body.
+func Forward(w http.ResponseWriter, req *http.Request, transport http.RoundTripper) {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+
+	// Remove hop-by-hop headers in request
+	removeHopByHopHeaders(req.Header)
+	req.Header.Del("X-Forwarded-For")
+
+	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		log.Printf("Proxy error: %v", err)
 		w.WriteHeader(http.StatusBadGateway)
@@ -201,7 +212,7 @@ func (p *HTTPProxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("Proxied %s %s -> %s", r.Method, r.URL, resp.Status)
+	log.Printf("Proxied %s %s -> %s", req.Method, req.URL, resp.Status)
 }
 
 func removeHopByHopHeaders(h http.Header) {
