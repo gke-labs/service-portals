@@ -18,11 +18,18 @@ package portals.v1;
 
 option go_package = "github.com/gke-labs/service-portals/pkg/portals/v1;portalsv1";
 
-// PodBindService manages the dynamic binding of sandbox pods to user identities
-// and access policies. Called by sandbox claim controllers over authenticated gRPC.
+import "pkg/portals/v1/egress.proto";
+
+// PodBindService manages the dynamic binding of sandbox pods to user identities,
+// access policies, and credentials. Called by sandbox claim controllers over authenticated gRPC.
 service PodBindService {
-  // Bind associates a pod UID with an identity and policy.
-  rpc Bind(BindRequest) returns (BindResponse);
+  // Bind associates a pod UID with an identity and egress policy.
+  rpc Bind(PodPolicy) returns (BindResponse);
+
+  // InjectSecrets supplies named secrets for a pod UID. A call replaces the
+  // pod's whole set of secrets rather than merging into it, so rotation and
+  // removal overwrite previously supplied secrets.
+  rpc InjectSecrets(PodSecrets) returns (InjectSecretsResponse);
 
   // Unbind dissociates a pod UID, reverting it to fail-closed state.
   rpc Unbind(UnbindRequest) returns (UnbindResponse);
@@ -31,15 +38,29 @@ service PodBindService {
   rpc Get(GetRequest) returns (GetResponse);
 }
 
-message BindRequest {
+// PodPolicy defines the identity and egress policy for a sandbox pod, keyed by pod UID.
+message PodPolicy {
   string pod_uid = 1;
   string identity = 2;
-  string policy = 3;
+  EgressPolicy policy = 3;
+}
+
+// PodSecrets defines named secret token bytes for a sandbox pod, keyed by pod UID.
+// Note: protobuf-go does not honour debug_redact in String() or prototext, so this
+// message must never be logged or passed to a logger as a value; Format only
+// covers fmt verbs.
+message PodSecrets {
+  string pod_uid = 1;
+  map<string, bytes> secrets = 2 [debug_redact = true];
 }
 
 message BindResponse {
   string pod_uid = 1;
   bool bound = 2;
+}
+
+message InjectSecretsResponse {
+  string pod_uid = 1;
 }
 
 message UnbindRequest {
@@ -61,6 +82,6 @@ message GetResponse {
   string name = 3;
   repeated string ips = 4;
   string identity = 5;
-  string policy = 6;
+  EgressPolicy policy = 6;
   bool bound = 7;
 }
