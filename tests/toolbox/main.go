@@ -58,7 +58,7 @@ func runServer() {
 		port = "8080"
 	}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Received request: %s %s (Host: %s)", r.Method, r.URL.Path, r.Host)
 		w.Header().Set("Content-Type", "application/json")
 
@@ -86,8 +86,25 @@ func runServer() {
 		}
 	})
 
+	tlsCert := os.Getenv("TLS_CERT_FILE")
+	tlsKey := os.Getenv("TLS_KEY_FILE")
+	if tlsCert != "" && tlsKey != "" {
+		tlsPort := os.Getenv("TLS_PORT")
+		if tlsPort == "" {
+			tlsPort = "8443"
+		}
+		go func() {
+			log.Printf("Starting HTTPS echo server on :%s", tlsPort)
+			srv := &http.Server{Addr: ":" + tlsPort, Handler: handler}
+			if err := srv.ListenAndServeTLS(tlsCert, tlsKey); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTPS server failed: %v", err)
+			}
+		}()
+	}
+
 	log.Printf("Starting echo server on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	srv := &http.Server{Addr: ":" + port, Handler: handler}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

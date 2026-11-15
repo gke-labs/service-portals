@@ -15,7 +15,14 @@
 package e2e
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -839,7 +846,7 @@ spec:
 	h.WaitForPodReady("app=test-client-sidecar-deny", 2*time.Minute)
 
 	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "gemini.backend", "other.backend")
-	runPositiveControls(t, h, clientPodName, "gemini.backend", "gemini-sidecar-token")
+	runSidecarPositiveControls(t, h, clientPodName, "gemini.backend", "gemini-sidecar-token")
 	if h.IsDualStack() {
 		runSidecarDualStackAssertions(t, h, clientPodName, backendIPv6ClusterIP)
 	}
@@ -1030,7 +1037,7 @@ func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendI
 	})
 }
 
-func runPositiveControls(t *testing.T, h *Harness, clientPodName, targetHost, expectedToken string) {
+func runSidecarPositiveControls(t *testing.T, h *Harness, clientPodName, targetHost, expectedToken string) {
 	t.Run("PositiveControl_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
 			"wget", "-T", "5", "-qO-", "http://"+targetHost+"/positive-control-http")
@@ -1079,6 +1086,179 @@ func runPositiveControls(t *testing.T, h *Harness, clientPodName, targetHost, ex
 			t.Fatalf("backend access log missing /positive-control")
 		}
 	})
+}
+
+func runNRIPositiveControls(t *testing.T, h *Harness, clientPodName, targetHost, expectedToken string) {
+	t.Run("PositiveControl_HTTP_WithPlaceholder", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "http://"+targetHost+"/positive-control-http")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control HTTP request with placeholder failed: %v", err)
+		}
+		logs := string(out)
+
+		if !strings.Contains(logs, "Authorization") {
+			t.Errorf("positive control HTTP output missing Authorization header")
+		}
+		if !strings.Contains(logs, "Bearer "+expectedToken) {
+			t.Errorf("positive control HTTP output missing injected credential")
+		}
+		if strings.Contains(logs, "placeholder-token") {
+			t.Errorf("positive control HTTP output still contains placeholder token")
+		}
+		if strings.Contains(logs, "X-Consumer-Identity") || strings.Contains(logs, "X-Forwarded-Client-Pod") {
+			t.Errorf("attribution headers leaked to backend without opt-in")
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/positive-control-http") {
+			t.Fatalf("backend access log missing /positive-control-http")
+		}
+		t.Logf("positive control HTTP with placeholder succeeded: credential swapped")
+	})
+
+	t.Run("PositiveControl_HTTP_WithoutPlaceholder", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://"+targetHost+"/no-placeholder-http")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control HTTP request without placeholder failed: %v", err)
+		}
+		logs := string(out)
+
+		if strings.Contains(logs, "Authorization") {
+			t.Errorf("request without placeholder header unexpectedly received Authorization header")
+		}
+		if strings.Contains(logs, expectedToken) {
+			t.Errorf("request without placeholder header unexpectedly received credential")
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/no-placeholder-http") {
+			t.Fatalf("backend access log missing /no-placeholder-http")
+		}
+		t.Logf("positive control HTTP without placeholder succeeded: no credential added")
+	})
+
+	t.Run("PositiveControl_HTTPS_WithPlaceholder", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "https://"+targetHost+"/positive-control-https")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control HTTPS request with placeholder failed: %v", err)
+		}
+		logs := string(out)
+
+		if !strings.Contains(logs, "Authorization") {
+			t.Errorf("positive control HTTPS output missing Authorization header")
+		}
+		if !strings.Contains(logs, "Bearer "+expectedToken) {
+			t.Errorf("positive control HTTPS output missing injected credential")
+		}
+		if strings.Contains(logs, "placeholder-token") {
+			t.Errorf("positive control HTTPS output still contains placeholder token")
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/positive-control-https") {
+			t.Fatalf("backend access log missing /positive-control-https")
+		}
+		t.Logf("positive control HTTPS with placeholder succeeded: credential swapped")
+	})
+
+	t.Run("PositiveControl_HTTPS_WithoutPlaceholder", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-T", "5", "-qO-", "https://"+targetHost+"/no-placeholder-https")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("positive control HTTPS request without placeholder failed: %v", err)
+		}
+		logs := string(out)
+
+		if strings.Contains(logs, "Authorization") {
+			t.Errorf("HTTPS request without placeholder header unexpectedly received Authorization header")
+		}
+		if strings.Contains(logs, expectedToken) {
+			t.Errorf("HTTPS request without placeholder header unexpectedly received credential")
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/no-placeholder-https") {
+			t.Fatalf("backend access log missing /no-placeholder-https")
+		}
+		t.Logf("positive control HTTPS without placeholder succeeded: no credential added")
+	})
+}
+
+func generateTestCA() (caCertPEM, caKeyPEM []byte, err error) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "Test Backend CA"},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, nil, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	return certPEM, keyPEM, nil
+}
+
+func generateSignedCert(caCertPEM, caKeyPEM []byte, hosts []string) (certPEM, keyPEM []byte, err error) {
+	caBlock, _ := pem.Decode(caCertPEM)
+	caCert, err := x509.ParseCertificate(caBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyBlock, _ := pem.Decode(caKeyPEM)
+	caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: hosts[0]},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
+		} else {
+			tmpl.DNSNames = append(tmpl.DNSNames, h)
+		}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, caCert, &priv.PublicKey, caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	cOut := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	kOut := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	return cOut, kOut, nil
 }
 
 func runSidecarDualStackAssertions(t *testing.T, h *Harness, clientPodName, backendIPv6ClusterIP string) {
@@ -1353,6 +1533,41 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 	}
 
 	// Deploy Backend Service and Deployment
+	backendCACert, backendCAKey, err := generateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate backend CA: %v", err)
+	}
+	backendCert, backendKey, err := generateSignedCert(backendCACert, backendCAKey, []string{
+		"backend",
+		"backend.default",
+		"backend.default.svc",
+		"backend.default.svc.cluster.local",
+	})
+	if err != nil {
+		t.Fatalf("failed to generate backend serving cert: %v", err)
+	}
+
+	certManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-tls
+type: kubernetes.io/tls
+data:
+  tls.crt: %s
+  tls.key: %s
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-ca
+data:
+  tls.crt: %s
+`, base64.StdEncoding.EncodeToString(backendCert),
+		base64.StdEncoding.EncodeToString(backendKey),
+		base64.StdEncoding.EncodeToString(backendCACert))
+	h.KubectlApplyContent(certManifest)
+
 	backendManifest := `
 apiVersion: apps/v1
 kind: Deployment
@@ -1375,8 +1590,22 @@ spec:
         image: toolbox:e2e
         imagePullPolicy: Never
         args: ["server"]
+        env:
+        - name: TLS_CERT_FILE
+          value: "/etc/tls/tls.crt"
+        - name: TLS_KEY_FILE
+          value: "/etc/tls/tls.key"
         ports:
         - containerPort: 8080
+        - containerPort: 8443
+        volumeMounts:
+        - name: tls-cert
+          mountPath: /etc/tls
+          readOnly: true
+      volumes:
+      - name: tls-cert
+        secret:
+          secretName: backend-tls
 ---
 apiVersion: v1
 kind: Service
@@ -1389,6 +1618,9 @@ spec:` + serviceIPFamilies + `
   - name: http
     port: 80
     targetPort: 8080
+  - name: https
+    port: 443
+    targetPort: 8443
   - name: alt
     port: 8080
     targetPort: 8080
@@ -1438,21 +1670,6 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: portal-node-agent
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: nri-portal-deny-rules-secret
-stringData:
-  backend-rule.yaml: |
-    apiVersion: portals.gke.io/v1alpha1
-    kind: PortalRule
-    metadata:
-      name: backend
-    spec:
-      host: backend
-      rewriteUrl: http://backend
-      authToken: gemini-nri-token
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -1510,15 +1727,16 @@ spec:
           value: "/etc/service-portal/ca/tls.crt"
         - name: CA_KEY_PATH
           value: "/etc/service-portal/ca/tls.key"
+        - name: SSL_CERT_FILE
+          value: "/etc/service-portal/backend-ca/tls.crt"
         - name: SERVE_DNS
           value: "true"` + proxyHostV6Env + `
-        args: ["--rules-dir=/etc/portals"]
         volumeMounts:
-        - name: rules-volume
-          mountPath: /etc/portals
-          readOnly: true
         - name: ca-volume
           mountPath: /etc/service-portal/ca
+          readOnly: true
+        - name: backend-ca-volume
+          mountPath: /etc/service-portal/backend-ca
           readOnly: true
         - name: socket-volume
           mountPath: /run/service-portal
@@ -1554,9 +1772,9 @@ spec:
         - name: socket-volume
           mountPath: /run/service-portal
       volumes:
-      - name: rules-volume
+      - name: backend-ca-volume
         secret:
-          secretName: nri-portal-deny-rules-secret
+          secretName: backend-ca
       - name: ca-volume
         hostPath:
           path: /etc/service-portal/ca
@@ -1668,18 +1886,62 @@ spec:
 		t.Logf("unbound pod request denied as expected: %v (output: %s)", err, out)
 	})
 
-	// 8. Bind pod to user identity and policy via Node Agent Bind API using portal-nri-plugin CLI
+	// 8. Bind pod to user identity and egress policy via PodBindService using portal-nri-plugin CLI
+	policyJSON := `{
+  "rules": [
+    {
+      "http": {
+        "hostnames": ["backend", "backend.default", "backend.default.svc", "backend.default.svc.cluster.local"],
+        "effects": {
+          "replaceHeaders": [
+            {
+              "header": "Authorization",
+              "prefix": "Bearer ",
+              "credentialUri": "secret://backend-token"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "https": {
+        "hostnames": ["backend", "backend.default", "backend.default.svc", "backend.default.svc.cluster.local"],
+        "effects": {
+          "replaceHeaders": [
+            {
+              "header": "Authorization",
+              "prefix": "Bearer ",
+              "credentialUri": "secret://backend-token"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}`
 	bindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
-		"portal-nri-plugin", "bind", "--socket", "/run/service-portal/portal.sock", "--uid", clientUID, "--identity", "test-user-alice", "--policy", "backend")
+		"portal-nri-plugin", "bind-service", "bind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--identity", "test-user-alice", "--policy-file", "-")
+	bindCmd.Stdin = strings.NewReader(policyJSON)
 	bindOut, err := bindCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("failed to bind pod %s via portal-nri-plugin bind: %v (output: %s)", clientUID, err, bindOut)
+		t.Fatalf("failed to bind pod %s via portal-nri-plugin bind-service bind: %v (output: %s)", clientUID, err, bindOut)
 	}
-	t.Logf("Successfully bound pod %s via node agent unix socket: %s", clientUID, bindOut)
+	t.Logf("Successfully bound pod %s via node agent bind-service: %s", clientUID, bindOut)
 
-	// 9. Assert positive controls and standard egress deny suite succeed when bound
+	// Inject named secret over PodBindService. Secret value is passed via standard input and never as an argument or logged.
+	secretJSON := `{"backend-token": "gemini-nri-token"}`
+	injectCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
+		"portal-nri-plugin", "bind-service", "inject-secrets", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--secrets-file", "-")
+	injectCmd.Stdin = strings.NewReader(secretJSON)
+	injectOut, err := injectCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to inject secrets for pod %s via portal-nri-plugin bind-service inject-secrets: %v (output: %s)", clientUID, err, injectOut)
+	}
+	t.Logf("Successfully injected secrets for pod %s via node agent bind-service", clientUID)
+
+	// 9. Assert standard egress deny suite and positive controls succeed when bound
 	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "backend", "unlisted-backend")
-	runPositiveControls(t, h, clientPodName, "backend", "gemini-nri-token")
+	runNRIPositiveControls(t, h, clientPodName, "backend", "gemini-nri-token")
 
 	// Bounded DNS assertion: query for unlisted name via cluster DNS must fail (NXDOMAIN)
 	t.Run("ClusterDNS_UnlistedHost_Denied", func(t *testing.T) {
@@ -1763,20 +2025,28 @@ spec:
 	// 13. Unbind the pod and assert same request is then rejected
 	t.Run("Unbind_RevertsToDenied", func(t *testing.T) {
 		unbindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
-			"portal-nri-plugin", "unbind", "--socket", "/run/service-portal/portal.sock", "--uid", clientUID)
+			"portal-nri-plugin", "bind-service", "unbind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID)
 		unbindOut, err := unbindCmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("failed to unbind pod %s via portal-nri-plugin unbind: %v (output: %s)", clientUID, err, unbindOut)
+			t.Fatalf("failed to unbind pod %s via portal-nri-plugin bind-service unbind: %v (output: %s)", clientUID, err, unbindOut)
 		}
-		t.Logf("Successfully unbound pod %s via node agent unix socket: %s", clientUID, unbindOut)
+		t.Logf("Successfully unbound pod %s via node agent bind-service: %s", clientUID, unbindOut)
 
-		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "-qO-", "http://backend/positive-control-http")
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			t.Fatalf("expected request after unbind to be denied, but succeeded: %s", out)
+		cmdHTTP := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "http://backend/positive-control-http")
+		outHTTP, errHTTP := cmdHTTP.CombinedOutput()
+		if errHTTP == nil {
+			t.Fatalf("expected HTTP request after unbind to be denied, but succeeded: %s", outHTTP)
 		}
-		t.Logf("request after unbind denied as expected: %v (output: %s)", err, out)
+		t.Logf("HTTP request after unbind denied as expected: %v (output: %s)", errHTTP, outHTTP)
+
+		cmdHTTPS := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "https://backend/positive-control-https")
+		outHTTPS, errHTTPS := cmdHTTPS.CombinedOutput()
+		if errHTTPS == nil {
+			t.Fatalf("expected HTTPS request after unbind to be denied, but succeeded: %s", outHTTPS)
+		}
+		t.Logf("HTTPS request after unbind denied as expected: %v (output: %s)", errHTTPS, outHTTPS)
 	})
 }
 
