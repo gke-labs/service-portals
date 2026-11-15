@@ -80,6 +80,32 @@ func (p *EgressPolicy) Match(protocol Protocol, hostname string, port int32) *Eg
 	return bestRule
 }
 
+// CouldMatch reports whether any rule for the given protocol could match
+// the given hostname for some port.
+func (p *EgressPolicy) CouldMatch(protocol Protocol, hostname string) bool {
+	if p == nil {
+		return false
+	}
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	if hostname == "" {
+		return false
+	}
+
+	for _, rule := range p.Rules {
+		if rule == nil {
+			continue
+		}
+		ruleProto, hostnames, _, _, ok := ruleTarget(rule)
+		if !ok || ruleProto != protocol {
+			continue
+		}
+		if _, matches := matchHostnames(hostnames, hostname); matches {
+			return true
+		}
+	}
+	return false
+}
+
 func matchRule(rule *EgressRule, hostname string, port int32) (Protocol, int, int, bool) {
 	ruleProto, hostnames, ports, defaultPort, ok := ruleTarget(rule)
 	if !ok {

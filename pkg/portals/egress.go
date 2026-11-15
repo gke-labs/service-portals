@@ -15,6 +15,7 @@
 package portals
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -27,21 +28,63 @@ import (
 	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
+var _ CertificateProvider = (*EgressHandler)(nil)
+
 // EgressHandler decides intercepted requests against the caller pod's bound egress policy.
 type EgressHandler struct {
 	podMap    *PodMap
 	store     *portalsv1.BindingStore
 	transport http.RoundTripper
+	signer    *proxy.CertSigner
 }
 
 // NewEgressHandler creates an EgressHandler that resolves caller pods via podMap,
-// looks up egress policies and secrets in store, and forwards allowed traffic via transport.
-func NewEgressHandler(podMap *PodMap, store *portalsv1.BindingStore, transport http.RoundTripper) *EgressHandler {
+// looks up egress policies and secrets in store, signs TLS certificates via signer,
+// and forwards allowed traffic via transport.
+func NewEgressHandler(podMap *PodMap, store *portalsv1.BindingStore, transport http.RoundTripper, signer *proxy.CertSigner) *EgressHandler {
 	return &EgressHandler{
 		podMap:    podMap,
 		store:     store,
 		transport: transport,
+		signer:    signer,
 	}
+}
+
+// GetCertificate implements CertificateProvider to answer TLS handshakes with
+// certificates signed by the pod-local CA when allowed by the caller pod's egress policy.
+func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if info == nil {
+		return nil, errors.New("missing client hello info")
+	}
+	var remoteAddr string
+	if info.Conn != nil && info.Conn.RemoteAddr() != nil {
+		remoteAddr = info.Conn.RemoteAddr().String()
+	}
+
+	pod, policy, err := h.resolveCaller(remoteAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	host := strings.TrimSpace(info.ServerName)
+	if host == "" {
+		return nil, errors.New("missing server name in TLS handshake")
+	}
+	host = proxy.HostWithoutPort(host)
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "" {
+		return nil, errors.New("missing server name in TLS handshake")
+	}
+
+	if !policy.CouldMatch(portalsv1.ProtocolHTTPS, host) {
+		return nil, fmt.Errorf("access denied for caller %s: host %q not permitted by egress policy", podCaller(pod), host)
+	}
+
+	if h.signer == nil {
+		return nil, errors.New("no CA configured to sign certificate")
+	}
+
+	return h.signer.GetCertificate(info)
 }
 
 // ServeHTTP decides an intercepted request from the caller pod's bound policy.
@@ -51,25 +94,21 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	remoteIP := clientIP(r.RemoteAddr)
-	pod, err := h.lookupCaller(remoteIP)
+	pod, policy, err := h.resolveCaller(r.RemoteAddr)
 	if err != nil {
-		log.Printf("Request: %s %s | Caller: unknown (%s) | Action: denied", r.Method, r.Host, remoteIP)
-		http.Error(w, "Access Denied: unknown caller", http.StatusForbidden)
+		remoteIP := clientIP(r.RemoteAddr)
+		if pod == nil {
+			log.Printf("Request: %s %s | Caller: unknown (%s) | Action: denied", r.Method, r.Host, remoteIP)
+			http.Error(w, "Access Denied: unknown caller", http.StatusForbidden)
+		} else {
+			caller := podCaller(pod)
+			log.Printf("Request: %s %s | Caller: %s (%s) | State: unbound | Action: denied", r.Method, r.Host, caller, remoteIP)
+			http.Error(w, "Access Denied: unbound pod", http.StatusForbidden)
+		}
 		return
 	}
 
 	caller := podCaller(pod)
-
-	var policy *portalsv1.EgressPolicy
-	if h.store != nil {
-		policy = h.store.Policy(pod.UID)
-	}
-	if policy == nil {
-		log.Printf("Request: %s %s | Caller: %s (%s) | State: unbound | Action: denied", r.Method, r.Host, caller, remoteIP)
-		http.Error(w, "Access Denied: unbound pod", http.StatusForbidden)
-		return
-	}
 
 	targetHost, port, err := requestTarget(r)
 	if err != nil {
@@ -111,6 +150,23 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Request: %s %s:%d | Caller: %s | Action: proxy", r.Method, targetHost, port, caller)
 	proxy.Forward(w, outReq, h.transport)
+}
+
+func (h *EgressHandler) resolveCaller(remoteAddr string) (*PodInfo, *portalsv1.EgressPolicy, error) {
+	remoteIP := clientIP(remoteAddr)
+	pod, err := h.lookupCaller(remoteIP)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unknown caller (%s)", remoteIP)
+	}
+
+	var policy *portalsv1.EgressPolicy
+	if h.store != nil {
+		policy = h.store.Policy(pod.UID)
+	}
+	if policy == nil {
+		return pod, nil, fmt.Errorf("unbound pod (%s)", pod.UID)
+	}
+	return pod, policy, nil
 }
 
 func clientIP(remoteAddr string) string {
