@@ -27,9 +27,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/gke-labs/service-portals/pkg/dns"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"github.com/gke-labs/service-portals/pkg/proxy"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func newTestEnv(t *testing.T) (*PodMap, *portalsv1.BindingStore) {
@@ -1232,5 +1235,448 @@ func TestEgressHandler_TLSHandshakeEndToEnd(t *testing.T) {
 			conn.Close()
 			t.Fatal("expected TLS handshake to fail for disallowed host, but it succeeded")
 		}
+	})
+}
+
+func TestEgressHandler_MatchHost(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	podAIP := "10.244.1.10"
+	podAUID := "pod-a"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podAUID,
+		Namespace: "default",
+		Name:      "pod-a",
+		IPs:       []string{podAIP},
+	})
+
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podAUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"http-exact.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{8080},
+						},
+					},
+				},
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"*.http-wild.example.com"},
+						Ports: &portalsv1.Ports{
+							All: &portalsv1.AllPorts{},
+						},
+					},
+				},
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"https-exact.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{443},
+						},
+					},
+				},
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"*.https-wild.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{8443},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind pod A failed: %v", err)
+	}
+
+	podBIP := "10.244.1.20"
+	podBUID := "pod-b"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podBUID,
+		Namespace: "default",
+		Name:      "pod-b",
+		IPs:       []string{podBIP},
+	})
+
+	_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podBUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"pod-b-only.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{80},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind pod B failed: %v", err)
+	}
+
+	podCIP := "10.244.1.30"
+	podCUID := "pod-c"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podCUID,
+		Namespace: "default",
+		Name:      "pod-c",
+		IPs:       []string{podCIP},
+	})
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+
+	addrA := &net.UDPAddr{IP: net.ParseIP(podAIP), Port: 12345}
+	addrB := &net.UDPAddr{IP: net.ParseIP(podBIP), Port: 23456}
+	addrC := &net.UDPAddr{IP: net.ParseIP(podCIP), Port: 34567}
+	addrUnknown := &net.UDPAddr{IP: net.ParseIP("10.244.1.99"), Port: 45678}
+
+	tests := []struct {
+		name     string
+		addr     net.Addr
+		host     string
+		expected bool
+	}{
+		// Pod A queries
+		{"pod A http exact", addrA, "http-exact.example.com", true},
+		{"pod A http exact with dot", addrA, "http-exact.example.com.", true},
+		{"pod A http exact uppercase", addrA, "HTTP-EXACT.EXAMPLE.COM", true},
+		{"pod A http exact with port", addrA, "http-exact.example.com:8080", true},
+		{"pod A http wildcard", addrA, "foo.http-wild.example.com", true},
+		{"pod A https exact", addrA, "https-exact.example.com", true},
+		{"pod A https exact with port", addrA, "https-exact.example.com:443", true},
+		{"pod A https wildcard", addrA, "bar.https-wild.example.com", true},
+		{"pod A outside policy", addrA, "outside.example.com", false},
+		{"pod A pod B rule not matched", addrA, "pod-b-only.example.com", false},
+
+		// Pod B queries (isolation)
+		{"pod B pod B rule matched", addrB, "pod-b-only.example.com", true},
+		{"pod B pod A http exact not matched", addrB, "http-exact.example.com", false},
+		{"pod B pod A http wildcard not matched", addrB, "foo.http-wild.example.com", false},
+		{"pod B pod A https exact not matched", addrB, "https-exact.example.com", false},
+		{"pod B pod A https wildcard not matched", addrB, "bar.https-wild.example.com", false},
+
+		// Unbound pod C
+		{"unbound pod gets nothing", addrC, "http-exact.example.com", false},
+		{"unbound pod gets nothing for pod B rule", addrC, "pod-b-only.example.com", false},
+
+		// Unknown source address
+		{"unknown caller gets nothing", addrUnknown, "http-exact.example.com", false},
+
+		// Nil client address
+		{"nil client address gets nothing", nil, "http-exact.example.com", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := handler.MatchHost(tc.host, tc.addr)
+			if got != tc.expected {
+				t.Errorf("MatchHost(%q, %v) = %v; expected %v", tc.host, tc.addr, got, tc.expected)
+			}
+		})
+	}
+}
+
+func sendDNSQueryFromPacketConn(t *testing.T, conn net.PacketConn, serverAddr, qname string, qtype dnsmessage.Type) dnsmessage.Message {
+	t.Helper()
+	serverUDP, err := net.ResolveUDPAddr("udp", serverAddr)
+	if err != nil {
+		t.Fatalf("failed to resolve server UDP addr %s: %v", serverAddr, err)
+	}
+
+	req := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:               4321,
+			RecursionDesired: true,
+		},
+		Questions: []dnsmessage.Question{
+			{
+				Name:  dnsmessage.MustNewName(qname),
+				Type:  qtype,
+				Class: dnsmessage.ClassINET,
+			},
+		},
+	}
+	packed, err := req.Pack()
+	if err != nil {
+		t.Fatalf("failed to pack query: %v", err)
+	}
+	if _, err := conn.WriteTo(packed, serverUDP); err != nil {
+		t.Fatalf("failed to send query: %v", err)
+	}
+
+	buf := make([]byte, 4096)
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("failed to set read deadline: %v", err)
+	}
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("failed to read DNS response: %v", err)
+	}
+
+	var resp dnsmessage.Message
+	if err := resp.Unpack(buf[:n]); err != nil {
+		t.Fatalf("failed to unpack DNS response: %v", err)
+	}
+	return resp
+}
+
+func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	podAIP := "127.0.0.10"
+	podAUID := "pod-dns-a"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podAUID,
+		Namespace: "default",
+		Name:      "pod-dns-a",
+		IPs:       []string{podAIP},
+	})
+
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podAUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"http-exact.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{80},
+						},
+					},
+				},
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"*.http-wild.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{8080},
+						},
+					},
+				},
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"https-exact.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{443},
+						},
+					},
+				},
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"*.https-wild.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{8443},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind pod A failed: %v", err)
+	}
+
+	podBIP := "127.0.0.20"
+	podBUID := "pod-dns-b"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podBUID,
+		Namespace: "default",
+		Name:      "pod-dns-b",
+		IPs:       []string{podBIP},
+	})
+
+	_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: podBUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"pod-b-only.example.com"},
+						Ports: &portalsv1.Ports{
+							Numbers: []int32{80},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind pod B failed: %v", err)
+	}
+
+	podCIP := "127.0.0.30"
+	podCUID := "pod-dns-c"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podCUID,
+		Namespace: "default",
+		Name:      "pod-dns-c",
+		IPs:       []string{podCIP},
+	})
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+
+	proxyIPv4 := net.ParseIP("127.0.0.2")
+	proxyIPv6 := net.ParseIP("::1")
+	srv, err := dns.NewServer(dns.Config{
+		BindAddr:      "127.0.0.1:0",
+		ProxyIPv4:     proxyIPv4,
+		ProxyIPv6:     proxyIPv6,
+		Matcher:       handler,
+		DefaultAction: "Deny",
+	})
+	if err != nil {
+		t.Fatalf("failed to create DNS server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("failed to start DNS server: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(t.Context()) }()
+
+	dnsAddr := srv.UDPAddr().String()
+
+	connA, err := net.ListenPacket("udp", net.JoinHostPort(podAIP, "0"))
+	if err != nil {
+		t.Fatalf("failed to listen UDP for pod A (%s): %v", podAIP, err)
+	}
+	defer connA.Close()
+
+	connB, err := net.ListenPacket("udp", net.JoinHostPort(podBIP, "0"))
+	if err != nil {
+		t.Fatalf("failed to listen UDP for pod B (%s): %v", podBIP, err)
+	}
+	defer connB.Close()
+
+	connC, err := net.ListenPacket("udp", net.JoinHostPort(podCIP, "0"))
+	if err != nil {
+		t.Fatalf("failed to listen UDP for pod C (%s): %v", podCIP, err)
+	}
+	defer connC.Close()
+
+	unknownIP := "127.0.0.40"
+	connUnknown, err := net.ListenPacket("udp", net.JoinHostPort(unknownIP, "0"))
+	if err != nil {
+		t.Fatalf("failed to listen UDP for unknown caller (%s): %v", unknownIP, err)
+	}
+	defer connUnknown.Close()
+
+	expectedA := [4]byte{127, 0, 0, 2}
+	expectedAAAA := [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+
+	assertAnswerA := func(t *testing.T, resp dnsmessage.Message) {
+		t.Helper()
+		if resp.RCode != dnsmessage.RCodeSuccess {
+			t.Fatalf("expected RCodeSuccess, got %v", resp.RCode)
+		}
+		if len(resp.Answers) != 1 {
+			t.Fatalf("expected 1 answer, got %d", len(resp.Answers))
+		}
+		aRecord, ok := resp.Answers[0].Body.(*dnsmessage.AResource)
+		if !ok {
+			t.Fatalf("expected *dnsmessage.AResource, got %T", resp.Answers[0].Body)
+		}
+		if aRecord.A != expectedA {
+			t.Errorf("expected IP %v, got %v", expectedA, aRecord.A)
+		}
+	}
+
+	assertAnswerAAAA := func(t *testing.T, resp dnsmessage.Message) {
+		t.Helper()
+		if resp.RCode != dnsmessage.RCodeSuccess {
+			t.Fatalf("expected RCodeSuccess, got %v", resp.RCode)
+		}
+		if len(resp.Answers) != 1 {
+			t.Fatalf("expected 1 answer, got %d", len(resp.Answers))
+		}
+		aaaaRecord, ok := resp.Answers[0].Body.(*dnsmessage.AAAAResource)
+		if !ok {
+			t.Fatalf("expected *dnsmessage.AAAAResource, got %T", resp.Answers[0].Body)
+		}
+		if aaaaRecord.AAAA != expectedAAAA {
+			t.Errorf("expected IPv6 %v, got %v", expectedAAAA, aaaaRecord.AAAA)
+		}
+	}
+
+	assertNXDOMAIN := func(t *testing.T, resp dnsmessage.Message) {
+		t.Helper()
+		if resp.RCode != dnsmessage.RCodeNameError {
+			t.Fatalf("expected NXDOMAIN (RCodeNameError), got %v", resp.RCode)
+		}
+		if len(resp.Answers) != 0 {
+			t.Fatalf("expected 0 answers on NXDOMAIN, got %d", len(resp.Answers))
+		}
+	}
+
+	// 1. Pod A queries: exact http rule answered with proxy address
+	t.Run("pod A http exact A", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connA, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA)
+		assertAnswerA(t, resp)
+	})
+	t.Run("pod A http exact AAAA", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connA, dnsAddr, "http-exact.example.com.", dnsmessage.TypeAAAA)
+		assertAnswerAAAA(t, resp)
+	})
+
+	// 2. Pod A queries: wildcard http rule answered with proxy address
+	t.Run("pod A http wildcard", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connA, dnsAddr, "sub.http-wild.example.com.", dnsmessage.TypeA)
+		assertAnswerA(t, resp)
+	})
+
+	// 3. Pod A queries: exact https rule answered with proxy address
+	t.Run("pod A https exact", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connA, dnsAddr, "https-exact.example.com.", dnsmessage.TypeA)
+		assertAnswerA(t, resp)
+	})
+
+	// 4. Pod A queries: wildcard https rule answered with proxy address
+	t.Run("pod A https wildcard", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connA, dnsAddr, "sub.https-wild.example.com.", dnsmessage.TypeA)
+		assertAnswerA(t, resp)
+	})
+
+	// 5. Pod A queries: name outside its policy gets NXDOMAIN
+	t.Run("pod A unlisted host gets NXDOMAIN", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connA, dnsAddr, "outside.example.com.", dnsmessage.TypeA)
+		assertNXDOMAIN(t, resp)
+	})
+
+	// 6. Pod A queries: name in pod B's policy gets NXDOMAIN
+	t.Run("pod A cannot resolve pod B host", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connA, dnsAddr, "pod-b-only.example.com.", dnsmessage.TypeA)
+		assertNXDOMAIN(t, resp)
+	})
+
+	// 7. Pod B queries: pod A's host gets NXDOMAIN (isolation)
+	t.Run("pod B cannot resolve pod A host", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connB, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA)
+		assertNXDOMAIN(t, resp)
+	})
+
+	// 8. Pod B queries: own host answered with proxy address
+	t.Run("pod B resolves own host", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connB, dnsAddr, "pod-b-only.example.com.", dnsmessage.TypeA)
+		assertAnswerA(t, resp)
+	})
+
+	// 9. Unbound pod C queries: gets NXDOMAIN
+	t.Run("unbound pod gets NXDOMAIN", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connC, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA)
+		assertNXDOMAIN(t, resp)
+	})
+
+	// 10. Unknown source address: gets NXDOMAIN
+	t.Run("unknown caller gets NXDOMAIN", func(t *testing.T) {
+		resp := sendDNSQueryFromPacketConn(t, connUnknown, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA)
+		assertNXDOMAIN(t, resp)
 	})
 }
