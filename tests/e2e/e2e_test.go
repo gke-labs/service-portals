@@ -838,13 +838,14 @@ spec:
 	h.KubectlApplyContent(clientManifest)
 	h.WaitForPodReady("app=test-client-sidecar-deny", 2*time.Minute)
 
-	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "gemini.backend", "other.backend", "gemini-sidecar-token")
+	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "gemini.backend", "other.backend")
+	runPositiveControls(t, h, clientPodName, "gemini.backend", "gemini-sidecar-token")
 	if h.IsDualStack() {
 		runSidecarDualStackAssertions(t, h, clientPodName, backendIPv6ClusterIP)
 	}
 }
 
-func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendIPv4ClusterIP, targetHost, unlistedHost, expectedToken string) {
+func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendIPv4ClusterIP, targetHost, unlistedHost string) {
 	// Case 1: Direct IP, intercepted port (must fail and never reach backend)
 	t.Run("DirectIP_InterceptedPort_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
@@ -972,7 +973,64 @@ func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendI
 		t.Logf("cluster nslookup succeeded: %s", outNslookup)
 	})
 
-	// Case 5: Positive controls (HTTP and HTTPS)
+	// Case 5: Bypass attempt
+	t.Run("BypassAttempt_Disallowed", func(t *testing.T) {
+		cmdUID := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "id", "-u")
+		outUID, errUID := cmdUID.CombinedOutput()
+		if errUID != nil {
+			t.Fatalf("failed to get workload UID: %v (output: %s)", errUID, outUID)
+		}
+		uid := strings.TrimSpace(string(outUID))
+		if uid == "1337" {
+			t.Fatalf("workload container UID is unexpectedly 1337 (proxy UID)")
+		}
+		if uid != "1000" {
+			t.Errorf("expected workload UID to be 1000, got %s", uid)
+		}
+
+		cmdNoNewPrivs := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"grep", "NoNewPrivs", "/proc/self/status")
+		outNoNewPrivs, errNoNewPrivs := cmdNoNewPrivs.CombinedOutput()
+		if errNoNewPrivs != nil {
+			t.Fatalf("failed to read /proc/self/status for NoNewPrivs: %v (output: %s)", errNoNewPrivs, outNoNewPrivs)
+		}
+		status := strings.TrimSpace(string(outNoNewPrivs))
+		t.Logf("workload NoNewPrivs status: %s", status)
+		if !strings.Contains(status, "NoNewPrivs:\t1") && !strings.Contains(status, "NoNewPrivs: 1") {
+			t.Fatalf("expected NoNewPrivs to be 1 (allowPrivilegeEscalation: false), got: %q", status)
+		}
+
+		cmdSu := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"su", "-", "1337", "-c", "id")
+		outSu, errSu := cmdSu.CombinedOutput()
+		if errSu == nil {
+			t.Fatalf("expected su to UID 1337 to fail, but it succeeded: %s", outSu)
+		}
+		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
+	})
+
+	// Case 6: CONNECT method rejected with 405 Method Not Allowed
+	t.Run("Connect_MethodNotAllowed_405", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"/app/toolbox", "probe", "connect", targetHost+":80", targetHost+":443", "5s")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("expected CONNECT probe to succeed, got: %v (output: %s)", err, out)
+		}
+		outStr := strings.TrimSpace(string(out))
+		t.Logf("CONNECT probe output: %s", outStr)
+		if !strings.Contains(outStr, "STATUS 405") {
+			t.Fatalf("expected STATUS 405, got: %s", outStr)
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if strings.Contains(backendLogs, targetHost+":443") || strings.Contains(backendLogs, "CONNECT") {
+			t.Fatalf("backend access log contains CONNECT request, request unexpectedly reached backend")
+		}
+	})
+}
+
+func runPositiveControls(t *testing.T, h *Harness, clientPodName, targetHost, expectedToken string) {
 	t.Run("PositiveControl_HTTP", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
 			"wget", "-T", "5", "-qO-", "http://"+targetHost+"/positive-control-http")
@@ -1019,62 +1077,6 @@ func runEgressDeniedAssertions(t *testing.T, h *Harness, clientPodName, backendI
 		backendLogs := h.GetDeploymentLogs("backend")
 		if !strings.Contains(backendLogs, "/positive-control") {
 			t.Fatalf("backend access log missing /positive-control")
-		}
-	})
-
-	// Case 6: Bypass attempt
-	t.Run("BypassAttempt_Disallowed", func(t *testing.T) {
-		cmdUID := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "id", "-u")
-		outUID, errUID := cmdUID.CombinedOutput()
-		if errUID != nil {
-			t.Fatalf("failed to get workload UID: %v (output: %s)", errUID, outUID)
-		}
-		uid := strings.TrimSpace(string(outUID))
-		if uid == "1337" {
-			t.Fatalf("workload container UID is unexpectedly 1337 (proxy UID)")
-		}
-		if uid != "1000" {
-			t.Errorf("expected workload UID to be 1000, got %s", uid)
-		}
-
-		cmdNoNewPrivs := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"grep", "NoNewPrivs", "/proc/self/status")
-		outNoNewPrivs, errNoNewPrivs := cmdNoNewPrivs.CombinedOutput()
-		if errNoNewPrivs != nil {
-			t.Fatalf("failed to read /proc/self/status for NoNewPrivs: %v (output: %s)", errNoNewPrivs, outNoNewPrivs)
-		}
-		status := strings.TrimSpace(string(outNoNewPrivs))
-		t.Logf("workload NoNewPrivs status: %s", status)
-		if !strings.Contains(status, "NoNewPrivs:\t1") && !strings.Contains(status, "NoNewPrivs: 1") {
-			t.Fatalf("expected NoNewPrivs to be 1 (allowPrivilegeEscalation: false), got: %q", status)
-		}
-
-		cmdSu := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"su", "-", "1337", "-c", "id")
-		outSu, errSu := cmdSu.CombinedOutput()
-		if errSu == nil {
-			t.Fatalf("expected su to UID 1337 to fail, but it succeeded: %s", outSu)
-		}
-		t.Logf("su to UID 1337 failed as expected: %v (output: %s)", errSu, outSu)
-	})
-
-	// Case 7: CONNECT method rejected with 405 Method Not Allowed
-	t.Run("Connect_MethodNotAllowed_405", func(t *testing.T) {
-		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"/app/toolbox", "probe", "connect", targetHost+":80", targetHost+":443", "5s")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("expected CONNECT probe to succeed, got: %v (output: %s)", err, out)
-		}
-		outStr := strings.TrimSpace(string(out))
-		t.Logf("CONNECT probe output: %s", outStr)
-		if !strings.Contains(outStr, "STATUS 405") {
-			t.Fatalf("expected STATUS 405, got: %s", outStr)
-		}
-
-		backendLogs := h.GetDeploymentLogs("backend")
-		if strings.Contains(backendLogs, targetHost+":443") || strings.Contains(backendLogs, "CONNECT") {
-			t.Fatalf("backend access log contains CONNECT request, request unexpectedly reached backend")
 		}
 	})
 }
@@ -1676,7 +1678,8 @@ spec:
 	t.Logf("Successfully bound pod %s via node agent unix socket: %s", clientUID, bindOut)
 
 	// 9. Assert positive controls and standard egress deny suite succeed when bound
-	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "backend", "unlisted-backend", "gemini-nri-token")
+	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "backend", "unlisted-backend")
+	runPositiveControls(t, h, clientPodName, "backend", "gemini-nri-token")
 
 	// Bounded DNS assertion: query for unlisted name via cluster DNS must fail (NXDOMAIN)
 	t.Run("ClusterDNS_UnlistedHost_Denied", func(t *testing.T) {
