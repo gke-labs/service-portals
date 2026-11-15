@@ -877,7 +877,7 @@ spec:
 
 	for _, tc := range tests {
 		t.Run(tc.host, func(t *testing.T) {
-			got := rr.MatchHost(tc.host)
+			got := rr.MatchHost(tc.host, nil)
 			if got != tc.expected {
 				t.Errorf("MatchHost(%q) = %v; expected %v", tc.host, got, tc.expected)
 			}

@@ -141,7 +141,7 @@ func sendDNSQueryTCP(t *testing.T, serverAddr, qname string, qtype dnsmessage.Ty
 }
 
 func TestDNSServer_Match_A(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string) bool {
+	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
 		return host == "api.github.com" || host == "gemini.backend"
 	})
 
@@ -183,7 +183,7 @@ func TestDNSServer_Match_A(t *testing.T) {
 }
 
 func TestDNSServer_Match_AAAA(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string) bool {
+	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
 		return host == "api.github.com"
 	})
 
@@ -226,7 +226,7 @@ func TestDNSServer_Match_AAAA(t *testing.T) {
 }
 
 func TestDNSServer_Match_OtherTypes_NoData(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string) bool {
+	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
 		return host == "api.github.com"
 	})
 
@@ -258,7 +258,7 @@ func TestDNSServer_Match_OtherTypes_NoData(t *testing.T) {
 }
 
 func TestDNSServer_Deny_NXDOMAIN(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string) bool {
+	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
 		return host == "api.github.com"
 	})
 
@@ -343,7 +343,7 @@ func TestDNSServer_Forward_Allow(t *testing.T) {
 	upstreamAddr := upstreamConn.LocalAddr().String()
 
 	// 2. Setup sidecar DNS server configured with DefaultAction: Allow
-	matcher := RuleMatcherFunc(func(host string) bool {
+	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
 		return host == "api.github.com"
 	})
 
@@ -384,7 +384,7 @@ func TestDNSServer_Forward_Allow(t *testing.T) {
 }
 
 func TestDNSServer_TCP(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string) bool {
+	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
 		return host == "api.github.com"
 	})
 

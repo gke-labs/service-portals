@@ -417,7 +417,7 @@ func Run(ctx context.Context, config Config) error {
 		if rr, ok := handler.(dns.RuleMatcher); ok {
 			matcher = rr
 		} else if fallback != nil && fallback.TargetURL != nil {
-			matcher = dns.RuleMatcherFunc(func(h string) bool {
+			matcher = dns.RuleMatcherFunc(func(h string, _ net.Addr) bool {
 				targetHost := strings.ToLower(proxy.HostWithoutPort(fallback.TargetURL.Host))
 				return targetHost != "" && (targetHost == h || strings.HasPrefix(h, targetHost+"."))
 			})
