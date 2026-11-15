@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -94,7 +95,7 @@ func (rr *RuleRouter) SetPodMap(pm *PodMap) {
 }
 
 // MatchHost reports whether host matches a configured rule or fallback target.
-func (rr *RuleRouter) MatchHost(host string) bool {
+func (rr *RuleRouter) MatchHost(host string, _ net.Addr) bool {
 	host = proxy.HostWithoutPort(host)
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 

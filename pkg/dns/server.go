@@ -29,17 +29,17 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// RuleMatcher checks if a given query hostname matches a configured rule host.
+// RuleMatcher checks if a given query hostname matches a configured rule host for the caller.
 type RuleMatcher interface {
-	MatchHost(host string) bool
+	MatchHost(host string, clientAddr net.Addr) bool
 }
 
 // RuleMatcherFunc is an adapter function implementing RuleMatcher.
-type RuleMatcherFunc func(host string) bool
+type RuleMatcherFunc func(host string, clientAddr net.Addr) bool
 
 // MatchHost calls the underlying function.
-func (f RuleMatcherFunc) MatchHost(host string) bool {
-	return f(host)
+func (f RuleMatcherFunc) MatchHost(host string, clientAddr net.Addr) bool {
+	return f(host, clientAddr)
 }
 
 // Config specifies the configuration for the sidecar DNS server.
@@ -116,7 +116,7 @@ func (s *Server) handleQuery(reqBytes []byte, clientAddr net.Addr, isTCP bool) (
 
 	matched := false
 	if s.config.Matcher != nil {
-		matched = s.config.Matcher.MatchHost(qname)
+		matched = s.config.Matcher.MatchHost(qname, clientAddr)
 	}
 
 	if matched {

@@ -24,11 +24,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gke-labs/service-portals/pkg/dns"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 )
 
 var _ CertificateProvider = (*EgressHandler)(nil)
+var _ dns.RuleMatcher = (*EgressHandler)(nil)
 
 // EgressHandler decides intercepted requests against the caller pod's bound egress policy.
 type EgressHandler struct {
@@ -85,6 +87,23 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 	}
 
 	return h.signer.GetCertificate(info)
+}
+
+// MatchHost reports whether host matches an http or https rule in the caller pod's egress policy,
+// implementing dns.RuleMatcher.
+func (h *EgressHandler) MatchHost(host string, clientAddr net.Addr) bool {
+	var remoteAddr string
+	if clientAddr != nil {
+		remoteAddr = clientAddr.String()
+	}
+
+	_, policy, err := h.resolveCaller(remoteAddr)
+	if err != nil {
+		return false
+	}
+
+	host = proxy.HostWithoutPort(host)
+	return policy.CouldMatch(portalsv1.ProtocolHTTP, host) || policy.CouldMatch(portalsv1.ProtocolHTTPS, host)
 }
 
 // ServeHTTP decides an intercepted request from the caller pod's bound policy.
