@@ -48,7 +48,7 @@ import (
 )
 
 const (
-	testAudience            = "https://relay.service-portals"
+	testAudience            = "https://controller.service-portals"
 	testNodeAgentAccount    = "system:serviceaccount:service-portals:portal-node-agent"
 	testClientAccount       = "system:serviceaccount:default:sandbox-controller"
 	testUnauthorizedAccount = "system:serviceaccount:default:unauthorized-client"

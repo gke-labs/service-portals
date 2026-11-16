@@ -68,7 +68,7 @@ func fakeIdentity(ctx context.Context) (string, time.Time, error) {
 	return nodes[0], expiry, nil
 }
 
-func startTestRelay(t *testing.T, lookup PodLookup, pushTimeout time.Duration) (*Server, portalsv1.NodeStreamServiceClient) {
+func startTestServer(t *testing.T, lookup PodLookup, pushTimeout time.Duration) (*Server, portalsv1.NodeStreamServiceClient) {
 	t.Helper()
 	s := NewServer(ServerConfig{
 		Lookup:      lookup,
@@ -95,7 +95,7 @@ func startTestRelay(t *testing.T, lookup PodLookup, pushTimeout time.Duration) (
 
 	conn, err := grpc.Dial(l.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		t.Fatalf("failed to dial relay: %v", err)
+		t.Fatalf("failed to dial controller: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -121,7 +121,7 @@ func openStream(t *testing.T, client portalsv1.NodeStreamServiceClient, nodeName
 func TestPush_DeliveredAndAnswerLearned(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-1", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -179,7 +179,7 @@ func TestPush_DeliveredAndAnswerLearned(t *testing.T) {
 // 2. A push for a pod not yet scheduled is held and delivered when the lookup changes and the node declares the pod.
 func TestPush_HeldUntilScheduledAndDeclared(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -207,7 +207,7 @@ func TestPush_HeldUntilScheduledAndDeclared(t *testing.T) {
 	default:
 	}
 
-	// Lookup changes: pod-held is now scheduled on node-1, notify relay.
+	// Lookup changes: pod-held is now scheduled on node-1, notify controller.
 	lookup.set("pod-held", "node-1")
 
 	// Node declares pod-held.
@@ -252,7 +252,7 @@ func TestPush_HeldUntilScheduledAndDeclared(t *testing.T) {
 // 3. A held push is dropped at the time limit and the waiting caller is told.
 func TestPush_DroppedAtTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, _ := startTestRelay(t, lookup, 50*time.Millisecond)
+	s, _ := startTestServer(t, lookup, 50*time.Millisecond)
 
 	push := &portalsv1.RelayPush{
 		PushId: "push-timeout",
@@ -278,7 +278,7 @@ func TestPush_DroppedAtTimeout(t *testing.T) {
 func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-secure", "node-honest")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	streamRogue, cancelRogue := openStream(t, client, "node-rogue", "")
 	defer cancelRogue()
@@ -344,7 +344,7 @@ func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 func TestPush_NodeRefusalWithReasonReachesCaller(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-refused", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -397,7 +397,7 @@ func TestPush_NodeRefusalWithReasonReachesCaller(t *testing.T) {
 func TestStreamEnd_LosesRegistrationAndUndeliveredStayPending(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-undelivered", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 
@@ -460,7 +460,7 @@ func TestStreamEnd_LosesRegistrationAndUndeliveredStayPending(t *testing.T) {
 func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-rep", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream1, cancel1 := openStream(t, client, "node-1", "")
 	defer cancel1()
@@ -542,7 +542,7 @@ func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-sec-answer", "node-1")
-	s, client := startTestRelay(t, lookup, 50*time.Millisecond)
+	s, client := startTestServer(t, lookup, 50*time.Millisecond)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -635,7 +635,7 @@ func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 // 9. If identity has an expiry, stream ends at that time.
 func TestIdentityExpiry_EndsStream(t *testing.T) {
 	lookup := &fakeLookup{}
-	_, client := startTestRelay(t, lookup, time.Minute)
+	_, client := startTestServer(t, lookup, time.Minute)
 
 	expiryTime := time.Now().Add(60 * time.Millisecond).Format(time.RFC3339Nano)
 	stream, cancel := openStream(t, client, "node-expiring", expiryTime)
@@ -662,7 +662,7 @@ func TestIdentityExpiry_EndsStream(t *testing.T) {
 func TestPush_AnswerIgnoredFromDifferentNode(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-auth", "node-1")
-	s, client := startTestRelay(t, lookup, 150*time.Millisecond)
+	s, client := startTestServer(t, lookup, 150*time.Millisecond)
 
 	stream1, cancel1 := openStream(t, client, "node-1", "")
 	defer cancel1()
@@ -736,7 +736,7 @@ func TestPush_AnswerIgnoredFromDifferentNode(t *testing.T) {
 // 11. PodUpdate removal does not cancel pending push (Point 2 from review).
 func TestPodUpdate_RemovalDoesNotCancelPendingPush(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream1, cancel1 := openStream(t, client, "node-1", "")
 	defer cancel1()
@@ -782,7 +782,7 @@ func TestPodUpdate_RemovalDoesNotCancelPendingPush(t *testing.T) {
 func TestPush_MultiplePushesArriveInOrder(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-order", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	p1 := &portalsv1.RelayPush{
 		PushId: "order-1-policy",
@@ -839,7 +839,7 @@ func TestPush_MultiplePushesArriveInOrder(t *testing.T) {
 // 13. Dropped push is never written to stream (Point 4 from review).
 func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -904,7 +904,7 @@ func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 // 14. Non-waiting push lives for the full time limit (Point 6 from review).
 func TestPush_NonWaitingPushLivesForFullTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, _ := startTestRelay(t, lookup, 200*time.Millisecond)
+	s, _ := startTestServer(t, lookup, 200*time.Millisecond)
 
 	push := &portalsv1.RelayPush{
 		PushId: "push-short-ctx",
@@ -985,7 +985,7 @@ func TestIdentity_ErrorReturnedAsIs(t *testing.T) {
 func TestPush_MorePushesThanQueueHolds_AllArriveInOrder(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-large-queue", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	const count = 100
 	for i := 0; i < count; i++ {

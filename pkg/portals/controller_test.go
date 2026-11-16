@@ -37,7 +37,7 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-type fakeRelayServer struct {
+type fakeControllerServer struct {
 	portalsv1.UnimplementedNodeStreamServiceServer
 	mu         sync.Mutex
 	tokens     []string
@@ -47,8 +47,8 @@ type fakeRelayServer struct {
 	dropStream chan struct{}
 }
 
-func newFakeRelayServer() *fakeRelayServer {
-	return &fakeRelayServer{
+func newFakeControllerServer() *fakeControllerServer {
+	return &fakeControllerServer{
 		declCh:     make(chan []string, 10),
 		answerCh:   make(chan *portalsv1.PushAnswer, 10),
 		pushCh:     make(chan *portalsv1.RelayPush, 10),
@@ -56,7 +56,7 @@ func newFakeRelayServer() *fakeRelayServer {
 	}
 }
 
-func (s *fakeRelayServer) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
+func (s *fakeControllerServer) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 	md, ok := metadata.FromIncomingContext(stream.Context())
 	if ok {
 		auth := md.Get("authorization")
@@ -112,7 +112,7 @@ func generateTestCertificates(t *testing.T) (caCertPath, serverCertPath, serverK
 
 	caTemplate := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Relay Test CA"},
+		Subject:               pkix.Name{CommonName: "Controller Test CA"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * time.Hour),
 		IsCA:                  true,
@@ -165,7 +165,7 @@ func generateTestCertificates(t *testing.T) (caCertPath, serverCertPath, serverK
 	return caCertPath, serverCertPath, serverKeyPath
 }
 
-func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
+func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 	caCertPath, serverCertPath, serverKeyPath := generateTestCertificates(t)
 
 	serverCert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
@@ -179,9 +179,9 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 	defer l.Close()
 
-	fakeRelay := newFakeRelayServer()
+	fakeController := newFakeControllerServer()
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewServerTLSFromCert(&serverCert)))
-	portalsv1.RegisterNodeStreamServiceServer(grpcServer, fakeRelay)
+	portalsv1.RegisterNodeStreamServiceServer(grpcServer, fakeController)
 	go func() {
 		_ = grpcServer.Serve(l)
 	}()
@@ -204,7 +204,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	go runRelayClient(ctx, relayClientConfig{
+	go runControllerClient(ctx, controllerClientConfig{
 		addr:       l.Addr().String(),
 		tokenPath:  tokenPath,
 		caCertPath: caCertPath,
@@ -214,7 +214,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 
 	// 1. On connect the node declares its pods
 	select {
-	case decl := <-fakeRelay.declCh:
+	case decl := <-fakeController.declCh:
 		if len(decl) != 1 || decl[0] != "pod-1" {
 			t.Fatalf("expected pod declaration [pod-1], got %v", decl)
 		}
@@ -222,16 +222,16 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 		t.Fatal("timed out waiting for pod declaration on connect")
 	}
 
-	fakeRelay.mu.Lock()
-	if len(fakeRelay.tokens) == 0 || fakeRelay.tokens[0] != "token-initial-v1" {
-		t.Fatalf("expected token-initial-v1, got %v", fakeRelay.tokens)
+	fakeController.mu.Lock()
+	if len(fakeController.tokens) == 0 || fakeController.tokens[0] != "token-initial-v1" {
+		t.Fatalf("expected token-initial-v1, got %v", fakeController.tokens)
 	}
-	fakeRelay.mu.Unlock()
+	fakeController.mu.Unlock()
 
 	// 2. Pod added and removed restates full pod list
 	pm.AddOrUpdatePod(&PodInfo{UID: "pod-2", IPs: []string{"10.0.0.2"}})
 	select {
-	case decl := <-fakeRelay.declCh:
+	case decl := <-fakeController.declCh:
 		if len(decl) != 2 || decl[0] != "pod-1" || decl[1] != "pod-2" {
 			t.Fatalf("expected restated pods [pod-1 pod-2], got %v", decl)
 		}
@@ -241,7 +241,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 
 	pm.RemovePod("pod-2")
 	select {
-	case decl := <-fakeRelay.declCh:
+	case decl := <-fakeController.declCh:
 		if len(decl) != 1 || decl[0] != "pod-1" {
 			t.Fatalf("expected restated pods [pod-1], got %v", decl)
 		}
@@ -265,7 +265,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 			},
 		},
 	}
-	fakeRelay.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.RelayPush{
 		PushId: "push-1",
 		Action: &portalsv1.RelayPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Policy: policyWithSecrets},
@@ -273,7 +273,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	select {
-	case ans := <-fakeRelay.answerCh:
+	case ans := <-fakeController.answerCh:
 		if ans.PushId != "push-1" || ans.PodUid != "pod-1" {
 			t.Fatalf("unexpected answer: %+v", ans)
 		}
@@ -293,7 +293,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// Push first secret -> still pending
-	fakeRelay.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.RelayPush{
 		PushId: "push-2",
 		Action: &portalsv1.RelayPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
@@ -303,7 +303,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 		},
 	}
 	select {
-	case ans := <-fakeRelay.answerCh:
+	case ans := <-fakeController.answerCh:
 		if ans.Status != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
 			t.Fatalf("expected PENDING, got %v", ans.Status)
 		}
@@ -315,7 +315,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// Push full set of secrets -> accepted once last named secret arrives
-	fakeRelay.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.RelayPush{
 		PushId: "push-3",
 		Action: &portalsv1.RelayPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
@@ -325,7 +325,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 		},
 	}
 	select {
-	case ans := <-fakeRelay.answerCh:
+	case ans := <-fakeController.answerCh:
 		if ans.Status != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
 			t.Fatalf("expected ACCEPTED, got %v", ans.Status)
 		}
@@ -346,7 +346,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	// 4. Policy that names no secrets is accepted on its own
 	pm.AddOrUpdatePod(&PodInfo{UID: "pod-no-sec", IPs: []string{"10.0.0.3"}})
 	select {
-	case <-fakeRelay.declCh:
+	case <-fakeController.declCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pod-no-sec update")
 	}
@@ -356,14 +356,14 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 			{Https: &portalsv1.HttpsRule{Hostnames: []string{"example.com"}}},
 		},
 	}
-	fakeRelay.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.RelayPush{
 		PushId: "push-4",
 		Action: &portalsv1.RelayPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-no-sec", Policy: noSecPolicy},
 		},
 	}
 	select {
-	case ans := <-fakeRelay.answerCh:
+	case ans := <-fakeController.answerCh:
 		if ans.Status != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
 			t.Fatalf("expected ACCEPTED for policy naming no secrets, got %v", ans.Status)
 		}
@@ -386,14 +386,14 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 			},
 		},
 	}
-	fakeRelay.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.RelayPush{
 		PushId: "push-5",
 		Action: &portalsv1.RelayPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Policy: invalidPolicy},
 		},
 	}
 	select {
-	case ans := <-fakeRelay.answerCh:
+	case ans := <-fakeController.answerCh:
 		if ans.Status != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED {
 			t.Fatalf("expected REFUSED for invalid policy, got %v", ans.Status)
 		}
@@ -405,14 +405,14 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// 6. Push for pod not on node is refused
-	fakeRelay.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.RelayPush{
 		PushId: "push-6",
 		Action: &portalsv1.RelayPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-not-on-node", Policy: noSecPolicy},
 		},
 	}
 	select {
-	case ans := <-fakeRelay.answerCh:
+	case ans := <-fakeController.answerCh:
 		if ans.Status != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED {
 			t.Fatalf("expected REFUSED for pod not on node, got %v", ans.Status)
 		}
@@ -427,14 +427,14 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// 7. Unbind removes the binding
-	fakeRelay.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.RelayPush{
 		PushId: "push-7",
 		Action: &portalsv1.RelayPush_Unbind{
 			Unbind: &portalsv1.UnbindRequest{PodUid: "pod-1"},
 		},
 	}
 	select {
-	case ans := <-fakeRelay.answerCh:
+	case ans := <-fakeController.answerCh:
 		if ans.Status != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
 			t.Fatalf("expected ACCEPTED for unbind, got %v", ans.Status)
 		}
@@ -452,7 +452,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// Trigger drop stream
-	fakeRelay.dropStream <- struct{}{}
+	fakeController.dropStream <- struct{}{}
 
 	// Verify while reconnecting, existing bindings still enforce (pod-no-sec still in store)
 	if pol := store.Policy("pod-no-sec"); pol == nil {
@@ -461,7 +461,7 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 
 	// Wait for reconnected stream declaration
 	select {
-	case decl := <-fakeRelay.declCh:
+	case decl := <-fakeController.declCh:
 		// Should restate current pods (pod-1 and pod-no-sec)
 		if len(decl) != 2 || decl[0] != "pod-1" || decl[1] != "pod-no-sec" {
 			t.Fatalf("expected restated pods [pod-1 pod-no-sec], got %v", decl)
@@ -471,9 +471,9 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// Verify token was re-read on reconnect
-	fakeRelay.mu.Lock()
-	lastToken := fakeRelay.tokens[len(fakeRelay.tokens)-1]
-	fakeRelay.mu.Unlock()
+	fakeController.mu.Lock()
+	lastToken := fakeController.tokens[len(fakeController.tokens)-1]
+	fakeController.mu.Unlock()
 	if lastToken != "token-rotated-v2" {
 		t.Fatalf("expected re-read token 'token-rotated-v2', got %q", lastToken)
 	}
@@ -494,9 +494,9 @@ func TestRelayClient_TLSVerificationFailure(t *testing.T) {
 	}
 	defer l.Close()
 
-	fakeRelay := newFakeRelayServer()
+	fakeController := newFakeControllerServer()
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewServerTLSFromCert(&serverCert)))
-	portalsv1.RegisterNodeStreamServiceServer(grpcServer, fakeRelay)
+	portalsv1.RegisterNodeStreamServiceServer(grpcServer, fakeController)
 	go func() {
 		_ = grpcServer.Serve(l)
 	}()
@@ -518,7 +518,7 @@ func TestRelayClient_TLSVerificationFailure(t *testing.T) {
 	defer cancel()
 
 	// Dial with untrusted CA -> must not successfully declare pods
-	go runRelayClient(ctx, relayClientConfig{
+	go runControllerClient(ctx, controllerClientConfig{
 		addr:       l.Addr().String(),
 		tokenPath:  tokenPath,
 		caCertPath: untrustedCACertPath,
@@ -527,14 +527,14 @@ func TestRelayClient_TLSVerificationFailure(t *testing.T) {
 	})
 
 	select {
-	case <-fakeRelay.declCh:
-		t.Fatal("relay client should have failed TLS verification against untrusted CA")
+	case <-fakeController.declCh:
+		t.Fatal("controller client should have failed TLS verification against untrusted CA")
 	case <-ctx.Done():
 		// Expected: failed to verify TLS against untrusted CA
 	}
 }
 
-func TestRelayClient_ServerRunWiring(t *testing.T) {
+func TestControllerClient_ServerRunWiring(t *testing.T) {
 	caCertPath, serverCertPath, serverKeyPath := generateTestCertificates(t)
 
 	serverCert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
@@ -548,9 +548,9 @@ func TestRelayClient_ServerRunWiring(t *testing.T) {
 	}
 	defer l.Close()
 
-	fakeRelay := newFakeRelayServer()
+	fakeController := newFakeControllerServer()
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewServerTLSFromCert(&serverCert)))
-	portalsv1.RegisterNodeStreamServiceServer(grpcServer, fakeRelay)
+	portalsv1.RegisterNodeStreamServiceServer(grpcServer, fakeController)
 	go func() {
 		_ = grpcServer.Serve(l)
 	}()
@@ -569,9 +569,9 @@ func TestRelayClient_ServerRunWiring(t *testing.T) {
 	defer cancel()
 
 	t.Setenv("ADMIN_ADDR", filepath.Join(tmpDir, "admin.sock"))
-	t.Setenv("RELAY_ADDR", l.Addr().String())
-	t.Setenv("RELAY_TOKEN_PATH", tokenPath)
-	t.Setenv("RELAY_CA_CERT_PATH", caCertPath)
+	t.Setenv("CONTROLLER_ADDR", l.Addr().String())
+	t.Setenv("CONTROLLER_TOKEN_PATH", tokenPath)
+	t.Setenv("CONTROLLER_CA_CERT_PATH", caCertPath)
 
 	config := Config{
 		PodMap:         pm,
@@ -584,21 +584,21 @@ func TestRelayClient_ServerRunWiring(t *testing.T) {
 	}()
 
 	select {
-	case decl := <-fakeRelay.declCh:
+	case decl := <-fakeController.declCh:
 		if len(decl) != 1 || decl[0] != "pod-wired" {
 			t.Fatalf("expected [pod-wired], got %v", decl)
 		}
 	case err := <-runErr:
 		t.Fatalf("Run exited unexpectedly: %v", err)
 	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for relay declaration from Run")
+		t.Fatal("timed out waiting for controller declaration from Run")
 	}
 
 	cancel()
 	<-runErr
 }
 
-func TestRun_RelayConfigValidation(t *testing.T) {
+func TestRun_ControllerConfigValidation(t *testing.T) {
 	caCertPath, _, _ := generateTestCertificates(t)
 	tmpDir := t.TempDir()
 	tokenPath := filepath.Join(tmpDir, "token")
@@ -607,48 +607,48 @@ func TestRun_RelayConfigValidation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		relayAddr  string
-		caCertPath string
-		tokenPath  string
-		wantErrSub string
+		name           string
+		controllerAddr string
+		caCertPath     string
+		tokenPath      string
+		wantErrSub     string
 	}{
 		{
-			name:       "missing CA cert path",
-			relayAddr:  "127.0.0.1:9999",
-			caCertPath: "",
-			tokenPath:  tokenPath,
-			wantErrSub: "RELAY_CA_CERT_PATH is required",
+			name:           "missing CA cert path",
+			controllerAddr: "127.0.0.1:9999",
+			caCertPath:     "",
+			tokenPath:      tokenPath,
+			wantErrSub:     "CONTROLLER_CA_CERT_PATH is required",
 		},
 		{
-			name:       "unreadable CA cert",
-			relayAddr:  "127.0.0.1:9999",
-			caCertPath: filepath.Join(tmpDir, "nonexistent-ca.crt"),
-			tokenPath:  tokenPath,
-			wantErrSub: "failed to load relay CA cert",
+			name:           "unreadable CA cert",
+			controllerAddr: "127.0.0.1:9999",
+			caCertPath:     filepath.Join(tmpDir, "nonexistent-ca.crt"),
+			tokenPath:      tokenPath,
+			wantErrSub:     "failed to load controller CA cert",
 		},
 		{
-			name:       "missing token path",
-			relayAddr:  "127.0.0.1:9999",
-			caCertPath: caCertPath,
-			tokenPath:  "",
-			wantErrSub: "RELAY_TOKEN_PATH is required",
+			name:           "missing token path",
+			controllerAddr: "127.0.0.1:9999",
+			caCertPath:     caCertPath,
+			tokenPath:      "",
+			wantErrSub:     "CONTROLLER_TOKEN_PATH is required",
 		},
 		{
-			name:       "unreadable token path",
-			relayAddr:  "127.0.0.1:9999",
-			caCertPath: caCertPath,
-			tokenPath:  filepath.Join(tmpDir, "nonexistent-token"),
-			wantErrSub: "failed to read relay token file",
+			name:           "unreadable token path",
+			controllerAddr: "127.0.0.1:9999",
+			caCertPath:     caCertPath,
+			tokenPath:      filepath.Join(tmpDir, "nonexistent-token"),
+			wantErrSub:     "failed to read controller token file",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ADMIN_ADDR", filepath.Join(t.TempDir(), "admin.sock"))
-			t.Setenv("RELAY_ADDR", tc.relayAddr)
-			t.Setenv("RELAY_CA_CERT_PATH", tc.caCertPath)
-			t.Setenv("RELAY_TOKEN_PATH", tc.tokenPath)
+			t.Setenv("CONTROLLER_ADDR", tc.controllerAddr)
+			t.Setenv("CONTROLLER_CA_CERT_PATH", tc.caCertPath)
+			t.Setenv("CONTROLLER_TOKEN_PATH", tc.tokenPath)
 
 			config := Config{
 				PodMap:         NewPodMap(),

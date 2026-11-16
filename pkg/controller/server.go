@@ -42,7 +42,7 @@ type PodLookup interface {
 // IdentityFunc resolves the authenticated node and credential expiry for a stream.
 type IdentityFunc func(ctx context.Context) (node string, expiry time.Time, err error)
 
-// ServerConfig configures the bind relay server.
+// ServerConfig configures the Server.
 type ServerConfig struct {
 	Lookup      PodLookup
 	Identity    IdentityFunc
@@ -80,7 +80,7 @@ type Server struct {
 	nextID  uint64
 }
 
-// NewServer creates a new relay Server.
+// NewServer creates a new Server.
 func NewServer(cfg ServerConfig) *Server {
 	timeout := cfg.PushTimeout
 	if timeout <= 0 {
@@ -221,7 +221,7 @@ func (s *Server) handleMessage(ns *nodeStream, msg *portalsv1.NodeMessage) {
 			case cur.answerCh <- ans:
 			default:
 			}
-			log.Printf("relay: pod %s node %s: outcome %s", ans.GetPodUid(), ns.node, ans.GetStatus())
+			log.Printf("controller: pod %s node %s: outcome %s", ans.GetPodUid(), ns.node, ans.GetStatus())
 		}
 	}
 	s.mu.Unlock()
@@ -230,7 +230,7 @@ func (s *Server) handleMessage(ns *nodeStream, msg *portalsv1.NodeMessage) {
 	}
 }
 
-// PodChanged notifies the relay that a pod's lookup information changed.
+// PodChanged notifies the server that a pod's lookup information changed.
 func (s *Server) PodChanged(podUID string) {
 	s.deliverPod(podUID)
 }
@@ -252,7 +252,7 @@ func (s *Server) Push(ctx context.Context, push *portalsv1.RelayPush, wait bool)
 			case p.answerCh <- nil:
 			default:
 			}
-			log.Printf("relay: pod %s node %s: outcome timed out", p.podUID, p.sentNode)
+			log.Printf("controller: pod %s node %s: outcome timed out", p.podUID, p.sentNode)
 		}
 		s.mu.Unlock()
 	})

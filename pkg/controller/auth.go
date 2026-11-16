@@ -48,7 +48,7 @@ type Caller struct {
 
 // AuthenticatorConfig configures an Authenticator.
 type AuthenticatorConfig struct {
-	// Audience is the required TokenReview audience for the relay.
+	// Audience is the required TokenReview audience for the controller.
 	Audience string
 
 	// NodeAgentAccount is the service account allowed for node agents.
@@ -85,7 +85,7 @@ type Authenticator struct {
 // NewAuthenticator constructs an Authenticator with the given configuration.
 func NewAuthenticator(cfg AuthenticatorConfig) (*Authenticator, error) {
 	if cfg.Audience == "" {
-		return nil, errors.New("relay audience is required")
+		return nil, errors.New("controller audience is required")
 	}
 	if cfg.TokenReviews == nil {
 		return nil, errors.New("TokenReviews client is required")
@@ -225,7 +225,7 @@ func (a *Authenticator) Authenticate(ctx context.Context) (*Caller, error) {
 //     "serviceaccounts/token" resource) for that service account, who could request
 //     a token bound to a node agent pod on any node and be routed that node's pushes.
 //
-// Therefore, the relay treats the node claim as identifying the node agent's node
+// Therefore, the controller treats the node claim as identifying the node agent's node
 // only in combination with the service account check, and cluster operators must
 // strictly guard "create" permission on "serviceaccounts/token" for the node agent's
 // service account.

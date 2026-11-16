@@ -283,26 +283,26 @@ func Run(ctx context.Context, config Config) error {
 		}
 		defer stopBind()
 
-		relayAddr := os.Getenv("RELAY_ADDR")
-		if relayAddr != "" {
-			relayCACertPath := os.Getenv("RELAY_CA_CERT_PATH")
-			if relayCACertPath == "" {
-				return errors.New("RELAY_CA_CERT_PATH is required when RELAY_ADDR is set")
+		controllerAddr := os.Getenv("CONTROLLER_ADDR")
+		if controllerAddr != "" {
+			controllerCACertPath := os.Getenv("CONTROLLER_CA_CERT_PATH")
+			if controllerCACertPath == "" {
+				return errors.New("CONTROLLER_CA_CERT_PATH is required when CONTROLLER_ADDR is set")
 			}
-			if _, err := credentials.NewClientTLSFromFile(relayCACertPath, ""); err != nil {
-				return fmt.Errorf("failed to load relay CA cert from %s: %w", relayCACertPath, err)
+			if _, err := credentials.NewClientTLSFromFile(controllerCACertPath, ""); err != nil {
+				return fmt.Errorf("failed to load controller CA cert from %s: %w", controllerCACertPath, err)
 			}
-			relayTokenPath := os.Getenv("RELAY_TOKEN_PATH")
-			if relayTokenPath == "" {
-				return errors.New("RELAY_TOKEN_PATH is required when RELAY_ADDR is set")
+			controllerTokenPath := os.Getenv("CONTROLLER_TOKEN_PATH")
+			if controllerTokenPath == "" {
+				return errors.New("CONTROLLER_TOKEN_PATH is required when CONTROLLER_ADDR is set")
 			}
-			if _, err := os.ReadFile(relayTokenPath); err != nil {
-				return fmt.Errorf("failed to read relay token file %s: %w", relayTokenPath, err)
+			if _, err := os.ReadFile(controllerTokenPath); err != nil {
+				return fmt.Errorf("failed to read controller token file %s: %w", controllerTokenPath, err)
 			}
-			go runRelayClient(ctx, relayClientConfig{
-				addr:       relayAddr,
-				tokenPath:  relayTokenPath,
-				caCertPath: relayCACertPath,
+			go runControllerClient(ctx, controllerClientConfig{
+				addr:       controllerAddr,
+				tokenPath:  controllerTokenPath,
+				caCertPath: controllerCACertPath,
 				pm:         pm,
 				store:      store,
 			})

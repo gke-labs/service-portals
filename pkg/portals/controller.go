@@ -29,7 +29,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type relayClientConfig struct {
+type controllerClientConfig struct {
 	addr       string
 	tokenPath  string
 	caCertPath string
@@ -37,21 +37,21 @@ type relayClientConfig struct {
 	store      *portalsv1.BindingStore
 }
 
-func runRelayClient(ctx context.Context, cfg relayClientConfig) {
+func runControllerClient(ctx context.Context, cfg controllerClientConfig) {
 	creds, err := credentials.NewClientTLSFromFile(cfg.caCertPath, "")
 	if err != nil {
-		log.Printf("relay: failed to load CA cert from %s: %v", cfg.caCertPath, err)
+		log.Printf("controller: failed to load CA cert from %s: %v", cfg.caCertPath, err)
 		return
 	}
 
 	conn, err := grpc.NewClient(cfg.addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
-		log.Printf("relay: failed to create gRPC client: %v", err)
+		log.Printf("controller: failed to create gRPC client: %v", err)
 		return
 	}
 	defer func() {
 		if cErr := conn.Close(); cErr != nil {
-			log.Printf("warning: closing relay connection: %v", cErr)
+			log.Printf("warning: closing controller connection: %v", cErr)
 		}
 	}()
 
@@ -72,7 +72,7 @@ func runRelayClient(ctx context.Context, cfg relayClientConfig) {
 
 		tokenBytes, err := os.ReadFile(cfg.tokenPath)
 		if err != nil {
-			log.Printf("relay: failed to read token file: %v", err)
+			log.Printf("controller: failed to read token file: %v", err)
 			sleepBackoff(ctx, &backoff, maxBackoff)
 			continue
 		}
@@ -82,7 +82,7 @@ func runRelayClient(ctx context.Context, cfg relayClientConfig) {
 		stream, err := client.Stream(streamCtx)
 		if err != nil {
 			cancel()
-			log.Printf("relay: failed to open stream: %v", err)
+			log.Printf("controller: failed to open stream: %v", err)
 			sleepBackoff(ctx, &backoff, maxBackoff)
 			continue
 		}
@@ -98,7 +98,7 @@ func runRelayClient(ctx context.Context, cfg relayClientConfig) {
 
 		if err := sendDeclaration(stream, cfg.pm); err != nil {
 			cancel()
-			log.Printf("relay: failed to send declaration: %v", err)
+			log.Printf("controller: failed to send declaration: %v", err)
 			sleepBackoff(ctx, &backoff, maxBackoff)
 			continue
 		}
@@ -107,7 +107,7 @@ func runRelayClient(ctx context.Context, cfg relayClientConfig) {
 		err = handleStream(streamCtx, stream, cfg, changeCh)
 		cancel()
 		if err != nil && ctx.Err() == nil {
-			log.Printf("relay: stream ended: %v", err)
+			log.Printf("controller: stream ended: %v", err)
 			sleepBackoff(ctx, &backoff, maxBackoff)
 		}
 	}
@@ -131,7 +131,7 @@ func sleepBackoff(ctx context.Context, backoff *time.Duration, max time.Duration
 	}
 }
 
-func handleStream(ctx context.Context, stream portalsv1.NodeStreamService_StreamClient, cfg relayClientConfig, changeCh <-chan struct{}) error {
+func handleStream(ctx context.Context, stream portalsv1.NodeStreamService_StreamClient, cfg controllerClientConfig, changeCh <-chan struct{}) error {
 	ansCh := make(chan *portalsv1.PushAnswer, 64)
 	errCh := make(chan error, 1)
 
@@ -211,7 +211,7 @@ func handlePush(pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.Relay
 		_, err = store.InjectSecrets(ctx, act.Secrets)
 	case *portalsv1.RelayPush_Unbind:
 		if _, err = store.Unbind(ctx, act.Unbind); err == nil {
-			log.Printf("relay push %s for pod %s: accepted unbind", push.GetPushId(), podUID)
+			log.Printf("controller push %s for pod %s: accepted unbind", push.GetPushId(), podUID)
 			return &portalsv1.PushAnswer{PushId: push.GetPushId(), PodUid: podUID, Status: portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED}
 		}
 	}
@@ -219,11 +219,11 @@ func handlePush(pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.Relay
 		return pushRefused(push.GetPushId(), podUID, status.Convert(err).Message())
 	}
 	accStatus, missing := store.Acceptance(podUID)
-	log.Printf("relay push %s for pod %s: %s", push.GetPushId(), podUID, accStatus)
+	log.Printf("controller push %s for pod %s: %s", push.GetPushId(), podUID, accStatus)
 	return &portalsv1.PushAnswer{PushId: push.GetPushId(), PodUid: podUID, Status: accStatus, MissingSecrets: missing}
 }
 
 func pushRefused(pushID, podUID, reason string) *portalsv1.PushAnswer {
-	log.Printf("relay push %s for pod %s: refused (%s)", pushID, podUID, reason)
+	log.Printf("controller push %s for pod %s: refused (%s)", pushID, podUID, reason)
 	return &portalsv1.PushAnswer{PushId: pushID, PodUid: podUID, Status: portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED, RefusalReason: reason}
 }
