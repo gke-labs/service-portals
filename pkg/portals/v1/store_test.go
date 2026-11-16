@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -26,7 +28,17 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
+
+func mustNewStore(t *testing.T, dir string) *BindingStore {
+	t.Helper()
+	s, err := NewBindingStore(dir)
+	if err != nil {
+		t.Fatalf("NewBindingStore(%q) failed: %v", dir, err)
+	}
+	return s
+}
 
 func validTestPolicy() *EgressPolicy {
 	return &EgressPolicy{
@@ -123,7 +135,7 @@ func TestSecret_Redaction(t *testing.T) {
 
 func TestBindingStore_BindValidation(t *testing.T) {
 	ctx := t.Context()
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 
 	// Empty pod_uid rejected with InvalidArgument
 	if _, err := store.Bind(ctx, &PodPolicy{PodUid: "", Policy: validTestPolicy()}); status.Code(err) != codes.InvalidArgument {
@@ -207,7 +219,7 @@ func TestBindingStore_BindValidation(t *testing.T) {
 
 func TestBindingStore_InjectSecretsReplacement(t *testing.T) {
 	ctx := t.Context()
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 
 	// Empty pod_uid rejected with InvalidArgument
 	if _, err := store.InjectSecrets(ctx, &PodSecrets{PodUid: ""}); status.Code(err) != codes.InvalidArgument {
@@ -279,7 +291,7 @@ func TestBindingStore_InjectSecretsReplacement(t *testing.T) {
 
 func TestBindingStore_UnbindRemovesBoth(t *testing.T) {
 	ctx := t.Context()
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 
 	// Empty pod_uid rejected with InvalidArgument
 	if _, err := store.Unbind(ctx, &UnbindRequest{PodUid: ""}); status.Code(err) != codes.InvalidArgument {
@@ -343,7 +355,7 @@ func TestBindingStore_UnbindRemovesBoth(t *testing.T) {
 
 func TestBindingStore_UnboundPodDeny(t *testing.T) {
 	ctx := t.Context()
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 
 	// Pod with no binding has no policy (nil)
 	if pol := store.Policy("non-existent"); pol != nil {
@@ -366,7 +378,7 @@ func TestBindingStore_OrderOfOperations(t *testing.T) {
 	ctx := t.Context()
 
 	// Case 1: Secrets injected before Bind
-	s1 := NewBindingStore()
+	s1 := mustNewStore(t, "")
 	if _, err := s1.InjectSecrets(ctx, &PodSecrets{
 		PodUid:  "pod-1",
 		Secrets: map[string][]byte{"tok": []byte("sec")},
@@ -396,7 +408,7 @@ func TestBindingStore_OrderOfOperations(t *testing.T) {
 	}
 
 	// Case 2: Bind before InjectSecrets
-	s2 := NewBindingStore()
+	s2 := mustNewStore(t, "")
 	if _, err := s2.Bind(ctx, &PodPolicy{
 		PodUid:   "pod-2",
 		Identity: "id@test",
@@ -420,7 +432,7 @@ func TestBindingStore_OrderOfOperations(t *testing.T) {
 
 func TestBindingStore_SelfContainedPerPod(t *testing.T) {
 	ctx := t.Context()
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 
 	// Bind Pod A and Pod B
 	if _, err := store.Bind(ctx, &PodPolicy{
@@ -476,7 +488,7 @@ func TestBindingStore_SelfContainedPerPod(t *testing.T) {
 
 func TestBindingStore_ConcurrentUse(t *testing.T) {
 	ctx := t.Context()
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 	validPol := validTestPolicy()
 
 	const numWorkers = 16
@@ -521,7 +533,7 @@ func TestBindingStore_ConcurrentUse(t *testing.T) {
 }
 
 func TestBindingStore_gRPCRegistration(t *testing.T) {
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 	grpcServer := grpc.NewServer()
 	// Must not panic when registering (verifies testEmbeddedByValue)
 	RegisterPodBindServiceServer(grpcServer, store)
@@ -529,7 +541,7 @@ func TestBindingStore_gRPCRegistration(t *testing.T) {
 
 func TestBindingStore_Acceptance(t *testing.T) {
 	ctx := t.Context()
-	store := NewBindingStore()
+	store := mustNewStore(t, "")
 
 	// 1. Pod not bound
 	status, missing := store.Acceptance("pod-1")
@@ -613,5 +625,332 @@ func TestBindingStore_Acceptance(t *testing.T) {
 	status, missing = store.Acceptance("pod-1")
 	if status != AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
 		t.Fatalf("expected PENDING after unbind, got %v", status)
+	}
+}
+
+func TestBindingStore_DurabilityAcrossRestart(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "bindings")
+
+	s1 := mustNewStore(t, storeDir)
+	pol := validTestPolicy()
+	if _, err := s1.Bind(ctx, &PodPolicy{PodUid: "pod-1", Identity: "user@example.com", Policy: pol}); err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+	if _, err := s1.InjectSecrets(ctx, &PodSecrets{
+		PodUid: "pod-1",
+		Secrets: map[string][]byte{
+			"github-token": []byte("ghp_secret123"),
+		},
+	}); err != nil {
+		t.Fatalf("InjectSecrets failed: %v", err)
+	}
+
+	// Create a new store on the same directory (simulating restart)
+	s2 := mustNewStore(t, storeDir)
+
+	// Pod must still be bound with the same policy
+	retPol := s2.Policy("pod-1")
+	if retPol == nil || len(retPol.Rules) != 1 {
+		t.Fatalf("expected 1 rule in restored policy, got %v", retPol)
+	}
+	if retPol.Rules[0].Https.Hostnames[0] != "api.github.com" {
+		t.Errorf("expected hostname api.github.com, got %s", retPol.Rules[0].Https.Hostnames[0])
+	}
+
+	// Secret must be resolvable
+	sec, ok := s2.ResolveSecret("pod-1", "github-token")
+	if !ok || string(sec.Bytes()) != "ghp_secret123" {
+		t.Errorf("expected secret resolved, got %q (ok=%v)", sec.Bytes(), ok)
+	}
+
+	// Get should report bound
+	getResp, err := s2.Get(ctx, &GetRequest{PodUid: "pod-1"})
+	if err != nil || !getResp.GetBound() || getResp.GetIdentity() != "user@example.com" {
+		t.Errorf("expected Get bound=true with identity user@example.com, got %v (err=%v)", getResp, err)
+	}
+}
+
+func TestBindingStore_UnbindRemovesStoredState(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "bindings")
+	s := mustNewStore(t, storeDir)
+
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(storeDir, "pod-1.json")
+	if _, err := os.Stat(filePath); err != nil {
+		t.Fatalf("expected stored file %s to exist: %v", filePath, err)
+	}
+
+	if _, err := s.Unbind(ctx, &UnbindRequest{PodUid: "pod-1"}); err != nil {
+		t.Fatalf("Unbind failed: %v", err)
+	}
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Errorf("expected stored file %s to be removed, got err: %v", filePath, err)
+	}
+
+	// Restarting store sees pod-1 as unbound
+	s2 := mustNewStore(t, storeDir)
+	if pol := s2.Policy("pod-1"); pol != nil {
+		t.Errorf("expected nil policy in new store, got %v", pol)
+	}
+}
+
+func TestBindingStore_RemovePod(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "bindings")
+	s := mustNewStore(t, storeDir)
+
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-2", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.RemovePod("pod-1")
+
+	if s.Policy("pod-1") != nil {
+		t.Error("expected pod-1 to be removed from memory")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.json")); !os.IsNotExist(err) {
+		t.Error("expected pod-1 file to be removed from directory")
+	}
+
+	// pod-2 must remain
+	if s.Policy("pod-2") == nil {
+		t.Error("expected pod-2 to remain in memory")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.json")); err != nil {
+		t.Errorf("expected pod-2 file to remain on disk: %v", err)
+	}
+
+	// After restart, pod-1 is absent and pod-2 is present
+	s2 := mustNewStore(t, storeDir)
+	if s2.Policy("pod-1") != nil {
+		t.Error("expected pod-1 absent in new store")
+	}
+	if s2.Policy("pod-2") == nil {
+		t.Error("expected pod-2 present in new store")
+	}
+}
+
+func TestBindingStore_DropAbsent(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "bindings")
+	s := mustNewStore(t, storeDir)
+
+	for _, id := range []string{"pod-1", "pod-2", "pod-3"} {
+		if _, err := s.Bind(ctx, &PodPolicy{PodUid: id, Policy: validTestPolicy()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Only pod-2 is active on the node
+	s.DropAbsent([]string{"pod-2"})
+
+	if s.Policy("pod-1") != nil || s.Policy("pod-3") != nil {
+		t.Error("expected pod-1 and pod-3 to be dropped from memory")
+	}
+	if s.Policy("pod-2") == nil {
+		t.Error("expected pod-2 to remain in memory")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.json")); !os.IsNotExist(err) {
+		t.Error("expected pod-1.json removed")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-3.json")); !os.IsNotExist(err) {
+		t.Error("expected pod-3.json removed")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.json")); err != nil {
+		t.Errorf("expected pod-2.json preserved: %v", err)
+	}
+
+	// After restart, only pod-2 is loaded
+	s2 := mustNewStore(t, storeDir)
+	if s2.Policy("pod-1") != nil || s2.Policy("pod-3") != nil {
+		t.Error("absent pods resurrected after restart")
+	}
+	if s2.Policy("pod-2") == nil {
+		t.Error("active pod missing after restart")
+	}
+}
+
+func TestBindingStore_CorruptOrTruncatedEntry(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "bindings")
+	s := mustNewStore(t, storeDir)
+
+	// Bind valid pod-1 and pod-3
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-3", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write corrupt/truncated entries
+	// 1. Truncated JSON
+	if err := os.WriteFile(filepath.Join(storeDir, "pod-corrupt-json.json"), []byte(`{"pod_uid": "pod-corrupt-json", "pol`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// 2. Invalid policy protobuf bytes
+	invalidPBEntry, _ := json.Marshal(storedEntry{PodUID: "pod-invalid-pb", Policy: []byte("not-a-proto"), Bound: true})
+	if err := os.WriteFile(filepath.Join(storeDir, "pod-invalid-pb.json"), invalidPBEntry, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// 3. Policy that fails validation (duplicate hostnames)
+	invPolicyBytes, _ := proto.Marshal(invalidTestPolicy())
+	invalidValEntry, _ := json.Marshal(storedEntry{PodUID: "pod-invalid-val", Policy: invPolicyBytes, Bound: true})
+	if err := os.WriteFile(filepath.Join(storeDir, "pod-invalid-val.json"), invalidValEntry, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// New store should drop corrupt entries and leave valid pods intact
+	s2 := mustNewStore(t, storeDir)
+	if s2.Policy("pod-1") == nil || s2.Policy("pod-3") == nil {
+		t.Error("expected valid pods pod-1 and pod-3 to remain bound")
+	}
+	if s2.Policy("pod-corrupt-json") != nil {
+		t.Error("expected corrupt JSON pod to be unbound")
+	}
+	if s2.Policy("pod-invalid-pb") != nil {
+		t.Error("expected invalid proto pod to be unbound")
+	}
+	if s2.Policy("pod-invalid-val") != nil {
+		t.Error("expected invalid policy validation pod to be unbound")
+	}
+}
+
+func TestBindingStore_PermissionsAndModes(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+
+	// 1. New directory created with 0700
+	storeDir := filepath.Join(dir, "new-store")
+	s := mustNewStore(t, storeDir)
+	fi, err := os.Stat(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0700 {
+		t.Errorf("expected directory mode 0700, got %04o", fi.Mode().Perm())
+	}
+
+	// 2. Stored files created with 0600
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+	fileFi, err := os.Stat(filepath.Join(storeDir, "pod-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileFi.Mode().Perm() != 0600 {
+		t.Errorf("expected file mode 0600, got %04o", fileFi.Mode().Perm())
+	}
+
+	// 3. Existing directory readable by others fails startup
+	insecureDir := filepath.Join(dir, "insecure-store")
+	if err := os.Mkdir(insecureDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewBindingStore(insecureDir); err == nil {
+		t.Error("expected NewBindingStore to fail on directory readable by others (0755)")
+	}
+
+	// 4. Stored file readable by others is dropped
+	validStoreDir := filepath.Join(dir, "valid-store")
+	sValid := mustNewStore(t, validStoreDir)
+	if _, err := sValid.Bind(ctx, &PodPolicy{PodUid: "pod-safe", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+	insecureFilePath := filepath.Join(validStoreDir, "pod-insecure.json")
+	validPolicyBytes, _ := proto.Marshal(validTestPolicy())
+	insecureEntry, _ := json.Marshal(storedEntry{PodUID: "pod-insecure", Policy: validPolicyBytes, Bound: true})
+	if err := os.WriteFile(insecureFilePath, insecureEntry, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sRestarted := mustNewStore(t, validStoreDir)
+	if sRestarted.Policy("pod-safe") == nil {
+		t.Error("expected pod-safe to be bound")
+	}
+	if sRestarted.Policy("pod-insecure") != nil {
+		t.Error("expected pod with 0644 file mode to be dropped and unbound")
+	}
+}
+
+func TestBindingStore_FailedWriteFailsCall(t *testing.T) {
+	ctx := t.Context()
+	// Point store to a path where creating files fails even as root (a regular file path)
+	nonDir := filepath.Join(t.TempDir(), "file-blocking-dir")
+	if err := os.WriteFile(nonDir, []byte("blocker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &BindingStore{
+		pods: make(map[string]*podEntry),
+		dir:  nonDir,
+	}
+
+	// Bind must fail and leave pod unbound
+	_, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()})
+	if err == nil {
+		t.Error("expected Bind to fail when write fails")
+	}
+	if status.Code(err) != codes.Internal {
+		t.Errorf("expected Internal code, got %v", status.Code(err))
+	}
+	if s.Policy("pod-1") != nil {
+		t.Error("pod must not be bound after failed write")
+	}
+
+	// InjectSecrets must fail and leave secrets unset
+	_, err = s.InjectSecrets(ctx, &PodSecrets{
+		PodUid:  "pod-1",
+		Secrets: map[string][]byte{"k": []byte("v")},
+	})
+	if err == nil {
+		t.Error("expected InjectSecrets to fail when write fails")
+	}
+	if status.Code(err) != codes.Internal {
+		t.Errorf("expected Internal code, got %v", status.Code(err))
+	}
+	if _, ok := s.ResolveSecret("pod-1", "k"); ok {
+		t.Error("secret must not be resolved after failed write")
+	}
+}
+
+func TestBindingStore_FailedUnbindFailsCall(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "unbind-fail-store")
+	s := mustNewStore(t, storeDir)
+
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the stored file impossible to remove by replacing it with a non-empty directory.
+	filePath := filepath.Join(storeDir, "pod-1.json")
+	if err := os.Remove(filePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filePath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filePath, "blocker"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unbind must fail and leave pod bound in memory
+	_, err := s.Unbind(ctx, &UnbindRequest{PodUid: "pod-1"})
+	if err == nil {
+		t.Fatal("expected Unbind to fail when stored file removal fails")
+	}
+	if status.Code(err) != codes.Internal {
+		t.Errorf("expected Internal code, got %v", status.Code(err))
+	}
+	if s.Policy("pod-1") == nil {
+		t.Error("pod policy must not be cleared from memory when unbind fails to remove stored file")
 	}
 }

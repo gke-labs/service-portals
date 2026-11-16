@@ -17,10 +17,16 @@ package portalsv1
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc/codes"
@@ -60,21 +66,173 @@ type podEntry struct {
 	bound    bool
 }
 
-// BindingStore is an in-memory store keyed by pod UID that holds egress policy
+type storedEntry struct {
+	PodUID   string            `json:"pod_uid"`
+	Identity string            `json:"identity,omitempty"`
+	Policy   []byte            `json:"policy,omitempty"`
+	Secrets  map[string][]byte `json:"secrets,omitempty"`
+	Bound    bool              `json:"bound,omitempty"`
+}
+
+// BindingStore is a store keyed by pod UID that holds egress policy
 // and secrets and implements PodBindServiceServer.
 type BindingStore struct {
 	UnimplementedPodBindServiceServer
 	mu   sync.RWMutex
 	pods map[string]*podEntry
+	dir  string
 }
 
 var _ PodBindServiceServer = (*BindingStore)(nil)
 
-// NewBindingStore creates a new empty BindingStore.
-func NewBindingStore() *BindingStore {
-	return &BindingStore{
-		pods: make(map[string]*podEntry),
+// NewBindingStore creates a new BindingStore. If dir is non-empty,
+// bindings are persisted to disk and restored across restarts.
+func NewBindingStore(dir string) (*BindingStore, error) {
+	if dir != "" {
+		if err := checkDir(dir); err != nil {
+			return nil, err
+		}
 	}
+	s := &BindingStore{pods: make(map[string]*podEntry), dir: dir}
+	if dir != "" {
+		return s, s.loadFromDisk()
+	}
+	return s, nil
+}
+
+func checkDir(dir string) error {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		if err = os.MkdirAll(dir, 0700); err == nil {
+			err = os.Chmod(dir, 0700)
+		}
+		if err != nil {
+			return fmt.Errorf("creating directory %q: %w", dir, err)
+		}
+		info, err = os.Stat(dir)
+	}
+	if err != nil {
+		return fmt.Errorf("stat directory %q: %w", dir, err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0700 {
+		return fmt.Errorf("directory %q must be mode 0700 (got %04o)", dir, info.Mode().Perm())
+	}
+	return nil
+}
+
+func (s *BindingStore) loadFromDisk() error {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return fmt.Errorf("reading directory %q: %w", s.dir, err)
+	}
+	for _, d := range entries {
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+			if strings.HasPrefix(d.Name(), ".tmp-") {
+				if err := os.Remove(filepath.Join(s.dir, d.Name())); err != nil && !os.IsNotExist(err) {
+					log.Printf("failed to remove temp file %s: %v", d.Name(), err)
+				}
+			}
+			continue
+		}
+		podUID, err := url.PathUnescape(strings.TrimSuffix(d.Name(), ".json"))
+		if err != nil {
+			podUID = d.Name()
+		}
+		fi, err := d.Info()
+		if err != nil || fi.Mode().Perm()&0077 != 0 {
+			log.Printf("dropping binding entry for pod %s: insecure file mode", podUID)
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(s.dir, d.Name()))
+		if err != nil {
+			log.Printf("dropping binding entry for pod %s: read error", podUID)
+			continue
+		}
+		var stored storedEntry
+		if err := json.Unmarshal(data, &stored); err != nil {
+			log.Printf("dropping corrupt binding entry for pod %s: malformed content", podUID)
+			continue
+		}
+		if stored.PodUID != "" {
+			podUID = stored.PodUID
+		}
+		var pol *EgressPolicy
+		if len(stored.Policy) > 0 {
+			pol = &EgressPolicy{}
+			if err := proto.Unmarshal(stored.Policy, pol); err != nil || pol.Validate() != nil {
+				log.Printf("dropping corrupt binding entry for pod %s: invalid policy", podUID)
+				continue
+			}
+		}
+		if stored.Bound && pol == nil {
+			log.Printf("dropping corrupt binding entry for pod %s: missing policy", podUID)
+			continue
+		}
+		entry := &podEntry{identity: stored.Identity, policy: pol, bound: stored.Bound, secrets: make(map[string]Secret, len(stored.Secrets))}
+		for k, v := range stored.Secrets {
+			entry.secrets[k] = Secret{value: bytes.Clone(v)}
+		}
+		s.pods[podUID] = entry
+	}
+	return nil
+}
+
+func (s *BindingStore) filePath(podUID string) string {
+	return filepath.Join(s.dir, url.PathEscape(podUID)+".json")
+}
+
+func (s *BindingStore) saveLocked(podUID string, entry *podEntry) error {
+	if s.dir == "" {
+		return nil
+	}
+	stored := storedEntry{PodUID: podUID, Identity: entry.identity, Bound: entry.bound}
+	if entry.policy != nil {
+		pb, err := proto.Marshal(entry.policy)
+		if err != nil {
+			return fmt.Errorf("marshaling policy for pod %s: %w", podUID, err)
+		}
+		stored.Policy = pb
+	}
+	if len(entry.secrets) > 0 {
+		stored.Secrets = make(map[string][]byte, len(entry.secrets))
+		for k, v := range entry.secrets {
+			stored.Secrets[k] = v.Bytes()
+		}
+	}
+	data, err := json.Marshal(stored)
+	if err != nil {
+		return fmt.Errorf("marshaling entry for pod %s: %w", podUID, err)
+	}
+	f, err := os.CreateTemp(s.dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating temp file for pod %s: %w", podUID, err)
+	}
+	tmp := f.Name()
+	defer func() {
+		if tmp != "" {
+			if err := os.Remove(tmp); err != nil && !os.IsNotExist(err) {
+				log.Printf("failed to remove temp file %s: %v", tmp, err)
+			}
+		}
+	}()
+	err = os.Chmod(tmp, 0600)
+	if err == nil {
+		_, err = f.Write(data)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cErr := f.Close(); err == nil {
+		err = cErr
+	}
+	if err != nil {
+		return fmt.Errorf("writing temp file for pod %s: %w", podUID, err)
+	}
+	if err := os.Rename(tmp, s.filePath(podUID)); err != nil {
+		return fmt.Errorf("committing entry for pod %s: %w", podUID, err)
+	}
+	tmp = ""
+	return nil
 }
 
 // Bind validates the egress policy and associates it with the pod UID.
@@ -91,14 +249,17 @@ func (s *BindingStore) Bind(ctx context.Context, req *PodPolicy) (*BindResponse,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.pods[req.GetPodUid()]
-	if !ok {
-		entry = &podEntry{secrets: make(map[string]Secret)}
-		s.pods[req.GetPodUid()] = entry
+	entry := s.pods[req.GetPodUid()]
+	newEntry := &podEntry{identity: req.GetIdentity(), policy: proto.Clone(policy).(*EgressPolicy), bound: true}
+	if entry != nil {
+		newEntry.secrets = entry.secrets
+	} else {
+		newEntry.secrets = make(map[string]Secret)
 	}
-	entry.identity = req.GetIdentity()
-	entry.policy = proto.Clone(policy).(*EgressPolicy)
-	entry.bound = true
+	if err := s.saveLocked(req.GetPodUid(), newEntry); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to persist binding: %v", err)
+	}
+	s.pods[req.GetPodUid()] = newEntry
 
 	return &BindResponse{PodUid: req.GetPodUid(), Bound: true}, nil
 }
@@ -111,26 +272,32 @@ func (s *BindingStore) InjectSecrets(ctx context.Context, req *PodSecrets) (*Inj
 		return nil, status.Error(codes.InvalidArgument, "pod_uid cannot be empty")
 	}
 
-	reqSecrets := req.GetSecrets()
-	newSecrets := make(map[string]Secret, len(reqSecrets))
-	for k, v := range reqSecrets {
+	newSecrets := make(map[string]Secret, len(req.GetSecrets()))
+	for k, v := range req.GetSecrets() {
 		newSecrets[k] = Secret{value: bytes.Clone(v)}
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, ok := s.pods[req.GetPodUid()]
-	if !ok {
-		entry = &podEntry{}
-		s.pods[req.GetPodUid()] = entry
+	entry := s.pods[req.GetPodUid()]
+	newEntry := &podEntry{secrets: newSecrets}
+	if entry != nil {
+		newEntry.identity = entry.identity
+		newEntry.policy = entry.policy
+		newEntry.bound = entry.bound
 	}
-	entry.secrets = newSecrets
+	if err := s.saveLocked(req.GetPodUid(), newEntry); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to persist secrets: %v", err)
+	}
+	s.pods[req.GetPodUid()] = newEntry
 
 	return &InjectSecretsResponse{PodUid: req.GetPodUid()}, nil
 }
 
 // Unbind dissociates a pod UID, removing policy and secrets together.
+// If the store is durable, removing the stored entry from disk must succeed
+// before memory is cleared, so a failed write fails the call fail-closed.
 func (s *BindingStore) Unbind(ctx context.Context, req *UnbindRequest) (*UnbindResponse, error) {
 	if req == nil || req.GetPodUid() == "" {
 		return nil, status.Error(codes.InvalidArgument, "pod_uid cannot be empty")
@@ -139,8 +306,61 @@ func (s *BindingStore) Unbind(ctx context.Context, req *UnbindRequest) (*UnbindR
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.dir != "" {
+		if err := os.Remove(s.filePath(req.GetPodUid())); err != nil && !os.IsNotExist(err) {
+			return nil, status.Errorf(codes.Internal, "failed to remove stored binding for pod %s: %v", req.GetPodUid(), err)
+		}
+	}
 	delete(s.pods, req.GetPodUid())
 	return &UnbindResponse{PodUid: req.GetPodUid(), Bound: false}, nil
+}
+
+// RemovePod removes a pod's policy and secrets from memory and from disk.
+func (s *BindingStore) RemovePod(podUID string) {
+	if podUID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.pods, podUID)
+	if s.dir != "" {
+		if err := os.Remove(s.filePath(podUID)); err != nil && !os.IsNotExist(err) {
+			log.Printf("failed to remove stored binding for pod %s: %v", podUID, err)
+		}
+	}
+}
+
+// DropAbsent removes stored bindings for any pods not present in activeUIDs.
+func (s *BindingStore) DropAbsent(activeUIDs []string) {
+	active := make(map[string]bool, len(activeUIDs))
+	for _, uid := range activeUIDs {
+		active[uid] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for uid := range s.pods {
+		if !active[uid] {
+			delete(s.pods, uid)
+		}
+	}
+	if s.dir != "" {
+		entries, err := os.ReadDir(s.dir)
+		if err != nil {
+			log.Printf("failed to read binding store directory: %v", err)
+			return
+		}
+		for _, d := range entries {
+			if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+				continue
+			}
+			uid, err := url.PathUnescape(strings.TrimSuffix(d.Name(), ".json"))
+			if err == nil && !active[uid] {
+				if err := os.Remove(filepath.Join(s.dir, d.Name())); err != nil && !os.IsNotExist(err) {
+					log.Printf("failed to remove stored binding file %s: %v", d.Name(), err)
+				}
+			}
+		}
+	}
 }
 
 // Get retrieves the current binding and status of a pod.

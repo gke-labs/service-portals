@@ -196,7 +196,10 @@ func TestRelayClient_LifecycleAndAcceptance(t *testing.T) {
 	pm := NewPodMap()
 	pm.AddOrUpdatePod(&PodInfo{UID: "pod-1", IPs: []string{"10.0.0.1"}})
 
-	store := portalsv1.NewBindingStore()
+	store, err := portalsv1.NewBindingStore("")
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -506,7 +509,10 @@ func TestRelayClient_TLSVerificationFailure(t *testing.T) {
 	}
 
 	pm := NewPodMap()
-	store := portalsv1.NewBindingStore()
+	store, err := portalsv1.NewBindingStore("")
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()

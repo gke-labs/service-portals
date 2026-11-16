@@ -31,7 +31,10 @@ func startTestBindService(t *testing.T) (string, *portalsv1.BindingStore) {
 	t.Helper()
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "bind.sock")
-	store := portalsv1.NewBindingStore()
+	store, err := portalsv1.NewBindingStore("")
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
 
 	l, err := net.Listen("unix", sockPath)
 	if err != nil {

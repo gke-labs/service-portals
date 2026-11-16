@@ -33,7 +33,10 @@ import (
 func TestServePodBindService_Lifecycle(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "bind.sock")
-	store := portalsv1.NewBindingStore()
+	store, err := portalsv1.NewBindingStore("")
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
 
 	stop, err := servePodBindService(sockPath, store)
 	if err != nil {
@@ -184,7 +187,10 @@ func TestServePodBindService_Lifecycle(t *testing.T) {
 }
 
 func TestServePodBindService_RejectsNonAbsolutePath(t *testing.T) {
-	store := portalsv1.NewBindingStore()
+	store, err := portalsv1.NewBindingStore("")
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
 
 	tests := []struct {
 		name string
@@ -219,7 +225,10 @@ func TestRun_PodMapEnabledStartsBindService(t *testing.T) {
 	adminSock := filepath.Join(dir, "admin.sock")
 
 	pm := NewPodMap()
-	store := portalsv1.NewBindingStore()
+	store, err := portalsv1.NewBindingStore("")
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

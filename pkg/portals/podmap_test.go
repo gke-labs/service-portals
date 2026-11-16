@@ -19,7 +19,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+
+	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 )
 
 func TestPodMapAddAndLookup(t *testing.T) {
@@ -224,5 +228,66 @@ func TestValidateAdminAddr(t *testing.T) {
 		if err := validateAdminAddr(addr); err == nil {
 			t.Errorf("expected validateAdminAddr(%q) to fail, but it succeeded", addr)
 		}
+	}
+}
+
+func TestPodMap_BindingStoreIntegration(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "store")
+	store, err := portalsv1.NewBindingStore(storeDir)
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
+
+	pm := NewPodMap()
+	pm.SetBindingStore(store)
+
+	// Bind policy for pod-1 and pod-2
+	validPolicy := &portalsv1.EgressPolicy{
+		Rules: []*portalsv1.EgressRule{
+			{
+				Https: &portalsv1.HttpsRule{
+					Hostnames: []string{"api.example.com"},
+				},
+			},
+		},
+	}
+	if _, err := store.Bind(ctx, &portalsv1.PodPolicy{PodUid: "pod-1", Policy: validPolicy}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Bind(ctx, &portalsv1.PodPolicy{PodUid: "pod-2", Policy: validPolicy}); err != nil {
+		t.Fatal(err)
+	}
+
+	pm.AddOrUpdatePod(&PodInfo{UID: "pod-1", IPs: []string{"10.0.0.1"}})
+	pm.AddOrUpdatePod(&PodInfo{UID: "pod-2", IPs: []string{"10.0.0.2"}})
+
+	// 1. pm.RemovePod("pod-1") removes pod-1 from both PodMap and BindingStore
+	pm.RemovePod("pod-1")
+	if _, ok := pm.GetPodByIP("10.0.0.1"); ok {
+		t.Error("pod-1 IP still present in PodMap after RemovePod")
+	}
+	if pol := store.Policy("pod-1"); pol != nil {
+		t.Error("pod-1 policy still present in BindingStore after RemovePod")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.json")); !os.IsNotExist(err) {
+		t.Error("pod-1.json still present on disk after RemovePod")
+	}
+
+	// pod-2 must still be intact
+	if pol := store.Policy("pod-2"); pol == nil {
+		t.Error("pod-2 policy missing from BindingStore")
+	}
+
+	// 2. pm.SynchronizePods drops absent pods from both PodMap and BindingStore
+	pm.SynchronizePods([]PodInfo{{UID: "pod-3", IPs: []string{"10.0.0.3"}}})
+	if _, ok := pm.GetPodByIP("10.0.0.2"); ok {
+		t.Error("pod-2 IP still present in PodMap after SynchronizePods")
+	}
+	if pol := store.Policy("pod-2"); pol != nil {
+		t.Error("pod-2 policy still present in BindingStore after SynchronizePods")
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.json")); !os.IsNotExist(err) {
+		t.Error("pod-2.json still present on disk after SynchronizePods")
 	}
 }
