@@ -118,6 +118,43 @@ func TestRelayPush_FmtRedaction(t *testing.T) {
 	}
 }
 
+func TestStoredBinding_FmtRedaction(t *testing.T) {
+	const secretToken = "ghp_stored_binding_secret_token_88888"
+	stored := &StoredBinding{
+		PodUid:   "pod-stored-1",
+		Identity: "user@example.com",
+		Secrets: map[string][]byte{
+			"gh-token": []byte(secretToken),
+		},
+		Bound: true,
+	}
+
+	// Verify that the proto descriptor marks the secrets field with debug_redact = true.
+	fd := stored.ProtoReflect().Descriptor().Fields().ByName("secrets")
+	if fd == nil {
+		t.Fatal("secrets field not found in StoredBinding descriptor")
+	}
+	opts, ok := fd.Options().(*descriptorpb.FieldOptions)
+	if !ok || !opts.GetDebugRedact() {
+		t.Errorf("expected secrets field to have debug_redact = true, got %v", opts.GetDebugRedact())
+	}
+
+	// Verify formatting with fmt verbs does not leak secret token bytes.
+	for _, text := range []string{
+		fmt.Sprint(stored),
+		fmt.Sprintf("%v", stored),
+		fmt.Sprintf("%+v", stored),
+		fmt.Sprintf("%s", stored),
+	} {
+		if strings.Contains(text, secretToken) {
+			t.Errorf("fmt verb output of StoredBinding (%q) leaked secret token", text)
+		}
+		if !strings.Contains(text, "[REDACTED]") {
+			t.Errorf("fmt verb output of StoredBinding (%q) expected [REDACTED]", text)
+		}
+	}
+}
+
 func TestMessages_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -322,6 +359,26 @@ func TestMessages_RoundTrip(t *testing.T) {
 				Bound:         true,
 				Status:        AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED,
 				RefusalReason: "node rejected binding",
+			},
+		},
+		{
+			name: "StoredBinding",
+			msg: &StoredBinding{
+				PodUid:   "pod-5",
+				Identity: "user@test.org",
+				Policy: &EgressPolicy{
+					Rules: []*EgressRule{
+						{
+							Https: &HttpsRule{
+								Hostnames: []string{"api.github.com"},
+							},
+						},
+					},
+				},
+				Secrets: map[string][]byte{
+					"key": []byte("val"),
+				},
+				Bound: true,
 			},
 		},
 	}

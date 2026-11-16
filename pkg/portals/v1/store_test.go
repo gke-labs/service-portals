@@ -679,7 +679,7 @@ func TestBindingStore_UnbindRemovesStoredState(t *testing.T) {
 	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()}); err != nil {
 		t.Fatal(err)
 	}
-	filePath := filepath.Join(storeDir, "pod-1.json")
+	filePath := filepath.Join(storeDir, "pod-1.pb")
 	if _, err := os.Stat(filePath); err != nil {
 		t.Fatalf("expected stored file %s to exist: %v", filePath, err)
 	}
@@ -715,7 +715,7 @@ func TestBindingStore_RemovePod(t *testing.T) {
 	if s.Policy("pod-1") != nil {
 		t.Error("expected pod-1 to be removed from memory")
 	}
-	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.pb")); !os.IsNotExist(err) {
 		t.Error("expected pod-1 file to be removed from directory")
 	}
 
@@ -723,7 +723,7 @@ func TestBindingStore_RemovePod(t *testing.T) {
 	if s.Policy("pod-2") == nil {
 		t.Error("expected pod-2 to remain in memory")
 	}
-	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.pb")); err != nil {
 		t.Errorf("expected pod-2 file to remain on disk: %v", err)
 	}
 
@@ -757,14 +757,14 @@ func TestBindingStore_DropAbsent(t *testing.T) {
 	if s.Policy("pod-2") == nil {
 		t.Error("expected pod-2 to remain in memory")
 	}
-	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.json")); !os.IsNotExist(err) {
-		t.Error("expected pod-1.json removed")
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.pb")); !os.IsNotExist(err) {
+		t.Error("expected pod-1.pb removed")
 	}
-	if _, err := os.Stat(filepath.Join(storeDir, "pod-3.json")); !os.IsNotExist(err) {
-		t.Error("expected pod-3.json removed")
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-3.pb")); !os.IsNotExist(err) {
+		t.Error("expected pod-3.pb removed")
 	}
-	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.json")); err != nil {
-		t.Errorf("expected pod-2.json preserved: %v", err)
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.pb")); err != nil {
+		t.Errorf("expected pod-2.pb preserved: %v", err)
 	}
 
 	// After restart, only pod-2 is loaded
@@ -791,19 +791,21 @@ func TestBindingStore_CorruptOrTruncatedEntry(t *testing.T) {
 	}
 
 	// Write corrupt/truncated entries
-	// 1. Truncated JSON
-	if err := os.WriteFile(filepath.Join(storeDir, "pod-corrupt-json.json"), []byte(`{"pod_uid": "pod-corrupt-json", "pol`), 0600); err != nil {
+	// 1. Truncated protobuf bytes
+	corruptPath := filepath.Join(storeDir, "pod-corrupt-pb.pb")
+	if err := os.WriteFile(corruptPath, []byte{0x0a, 0x10, 0x01}, 0600); err != nil {
 		t.Fatal(err)
 	}
-	// 2. Invalid policy protobuf bytes
-	invalidPBEntry, _ := json.Marshal(storedEntry{PodUID: "pod-invalid-pb", Policy: []byte("not-a-proto"), Bound: true})
-	if err := os.WriteFile(filepath.Join(storeDir, "pod-invalid-pb.json"), invalidPBEntry, 0600); err != nil {
+	// 2. Bound entry missing policy
+	missingPolPath := filepath.Join(storeDir, "pod-missing-pol.pb")
+	missingPolEntry, _ := proto.Marshal(&StoredBinding{PodUid: "pod-missing-pol", Bound: true})
+	if err := os.WriteFile(missingPolPath, missingPolEntry, 0600); err != nil {
 		t.Fatal(err)
 	}
 	// 3. Policy that fails validation (duplicate hostnames)
-	invPolicyBytes, _ := proto.Marshal(invalidTestPolicy())
-	invalidValEntry, _ := json.Marshal(storedEntry{PodUID: "pod-invalid-val", Policy: invPolicyBytes, Bound: true})
-	if err := os.WriteFile(filepath.Join(storeDir, "pod-invalid-val.json"), invalidValEntry, 0600); err != nil {
+	invalidValPath := filepath.Join(storeDir, "pod-invalid-val.pb")
+	invalidValEntry, _ := proto.Marshal(&StoredBinding{PodUid: "pod-invalid-val", Policy: invalidTestPolicy(), Bound: true})
+	if err := os.WriteFile(invalidValPath, invalidValEntry, 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -812,14 +814,67 @@ func TestBindingStore_CorruptOrTruncatedEntry(t *testing.T) {
 	if s2.Policy("pod-1") == nil || s2.Policy("pod-3") == nil {
 		t.Error("expected valid pods pod-1 and pod-3 to remain bound")
 	}
-	if s2.Policy("pod-corrupt-json") != nil {
-		t.Error("expected corrupt JSON pod to be unbound")
+	if s2.Policy("pod-corrupt-pb") != nil {
+		t.Error("expected corrupt proto pod to be unbound")
 	}
-	if s2.Policy("pod-invalid-pb") != nil {
-		t.Error("expected invalid proto pod to be unbound")
+	if s2.Policy("pod-missing-pol") != nil {
+		t.Error("expected missing policy pod to be unbound")
 	}
 	if s2.Policy("pod-invalid-val") != nil {
 		t.Error("expected invalid policy validation pod to be unbound")
+	}
+
+	// Dropped corrupt files must be removed from disk
+	if _, err := os.Stat(corruptPath); !os.IsNotExist(err) {
+		t.Errorf("expected corrupt file %s to be removed from disk, got err: %v", corruptPath, err)
+	}
+	if _, err := os.Stat(missingPolPath); !os.IsNotExist(err) {
+		t.Errorf("expected missing policy file %s to be removed from disk, got err: %v", missingPolPath, err)
+	}
+	if _, err := os.Stat(invalidValPath); !os.IsNotExist(err) {
+		t.Errorf("expected invalid policy file %s to be removed from disk, got err: %v", invalidValPath, err)
+	}
+}
+
+func TestBindingStore_OldJSONFormatDropped(t *testing.T) {
+	ctx := t.Context()
+	storeDir := filepath.Join(t.TempDir(), "bindings")
+	s := mustNewStore(t, storeDir)
+
+	// Bind valid pod-1 and pod-2
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-valid-1", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-valid-2", Policy: validTestPolicy()}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write an entry in the old JSON format (where policy was bytes inside JSON record)
+	oldJSONPath := filepath.Join(storeDir, "pod-old-json.json")
+	oldJSON := []byte(`{"pod_uid":"pod-old-json","identity":"user@example.com","policy":"Cg8KDGFwaS5naXRodWIuY29t","bound":true}`)
+	if err := os.WriteFile(oldJSONPath, oldJSON, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// New store should drop the old JSON format entry and leave valid entries intact
+	s2 := mustNewStore(t, storeDir)
+	if s2.Policy("pod-valid-1") == nil || s2.Policy("pod-valid-2") == nil {
+		t.Error("expected valid pods pod-valid-1 and pod-valid-2 to remain bound")
+	}
+	if s2.Policy("pod-old-json") != nil {
+		t.Error("expected old JSON format pod to be unbound")
+	}
+	getResp, err := s2.Get(ctx, &GetRequest{PodUid: "pod-old-json"})
+	if err != nil {
+		t.Fatalf("unexpected Get error: %v", err)
+	}
+	if getResp.GetBound() {
+		t.Error("expected old JSON format pod Get bound=false")
+	}
+
+	// The old-format JSON file must be removed from disk
+	if _, err := os.Stat(oldJSONPath); !os.IsNotExist(err) {
+		t.Errorf("expected old JSON format file %s to be removed from disk, got err: %v", oldJSONPath, err)
 	}
 }
 
@@ -842,7 +897,7 @@ func TestBindingStore_PermissionsAndModes(t *testing.T) {
 	if _, err := s.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: validTestPolicy()}); err != nil {
 		t.Fatal(err)
 	}
-	fileFi, err := os.Stat(filepath.Join(storeDir, "pod-1.json"))
+	fileFi, err := os.Stat(filepath.Join(storeDir, "pod-1.pb"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,15 +914,17 @@ func TestBindingStore_PermissionsAndModes(t *testing.T) {
 		t.Error("expected NewBindingStore to fail on directory readable by others (0755)")
 	}
 
-	// 4. Stored file readable by others is dropped
+	// 4. Stored file readable by others is dropped and removed from disk
 	validStoreDir := filepath.Join(dir, "valid-store")
 	sValid := mustNewStore(t, validStoreDir)
 	if _, err := sValid.Bind(ctx, &PodPolicy{PodUid: "pod-safe", Policy: validTestPolicy()}); err != nil {
 		t.Fatal(err)
 	}
-	insecureFilePath := filepath.Join(validStoreDir, "pod-insecure.json")
-	validPolicyBytes, _ := proto.Marshal(validTestPolicy())
-	insecureEntry, _ := json.Marshal(storedEntry{PodUID: "pod-insecure", Policy: validPolicyBytes, Bound: true})
+	insecureFilePath := filepath.Join(validStoreDir, "pod-insecure.pb")
+	insecureEntry, err := proto.Marshal(&StoredBinding{PodUid: "pod-insecure", Policy: validTestPolicy(), Bound: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(insecureFilePath, insecureEntry, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -878,6 +935,9 @@ func TestBindingStore_PermissionsAndModes(t *testing.T) {
 	}
 	if sRestarted.Policy("pod-insecure") != nil {
 		t.Error("expected pod with 0644 file mode to be dropped and unbound")
+	}
+	if _, err := os.Stat(insecureFilePath); !os.IsNotExist(err) {
+		t.Errorf("expected insecure file %s to be removed from disk, got err: %v", insecureFilePath, err)
 	}
 }
 
@@ -931,7 +991,7 @@ func TestBindingStore_FailedUnbindFailsCall(t *testing.T) {
 	}
 
 	// Make the stored file impossible to remove by replacing it with a non-empty directory.
-	filePath := filepath.Join(storeDir, "pod-1.json")
+	filePath := filepath.Join(storeDir, "pod-1.pb")
 	if err := os.Remove(filePath); err != nil {
 		t.Fatal(err)
 	}

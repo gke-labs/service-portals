@@ -92,3 +92,36 @@ func (x *RelayMessage) Format(f fmt.State, c rune) {
 		return
 	}
 }
+
+// Format implements fmt.Formatter so secret token bytes are redacted when
+// formatted with fmt verbs (e.g. %v, %+v, %s).
+//
+// Note: protobuf-go does not honour debug_redact in String() or prototext, so
+// StoredBinding must never be logged or passed to a logger as a value; Format only
+// covers fmt verbs.
+func (x *StoredBinding) Format(f fmt.State, c rune) {
+	var b strings.Builder
+	if x == nil {
+		b.WriteString("<nil>")
+	} else {
+		fmt.Fprintf(&b, "pod_uid:%q identity:%q policy:<%v> bound:%v", x.GetPodUid(), x.GetIdentity(), x.GetPolicy(), x.GetBound())
+		if len(x.GetSecrets()) > 0 {
+			keys := make([]string, 0, len(x.GetSecrets()))
+			for k := range x.GetSecrets() {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			b.WriteString(" secrets:{")
+			for i, k := range keys {
+				if i > 0 {
+					b.WriteString(" ")
+				}
+				fmt.Fprintf(&b, "%s:[REDACTED]", k)
+			}
+			b.WriteString("}")
+		}
+	}
+	if _, err := io.WriteString(f, b.String()); err != nil {
+		return
+	}
+}

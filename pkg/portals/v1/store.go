@@ -17,7 +17,6 @@ package portalsv1
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -66,14 +65,6 @@ type podEntry struct {
 	bound    bool
 }
 
-type storedEntry struct {
-	PodUID   string            `json:"pod_uid"`
-	Identity string            `json:"identity,omitempty"`
-	Policy   []byte            `json:"policy,omitempty"`
-	Secrets  map[string][]byte `json:"secrets,omitempty"`
-	Bound    bool              `json:"bound,omitempty"`
-}
-
 // BindingStore is a store keyed by pod UID that holds egress policy
 // and secrets and implements PodBindServiceServer.
 type BindingStore struct {
@@ -120,56 +111,80 @@ func checkDir(dir string) error {
 	return nil
 }
 
+const (
+	bindingFileSuffix    = ".pb"
+	oldBindingFileSuffix = ".json"
+)
+
+func (s *BindingStore) dropEntry(podUID, path, reason string) {
+	log.Printf("dropping binding entry for pod %s: %s", podUID, reason)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("failed to remove %s: %v", path, err)
+	}
+}
+
 func (s *BindingStore) loadFromDisk() error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return fmt.Errorf("reading directory %q: %w", s.dir, err)
 	}
 	for _, d := range entries {
-		if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
-			if strings.HasPrefix(d.Name(), ".tmp-") {
-				if err := os.Remove(filepath.Join(s.dir, d.Name())); err != nil && !os.IsNotExist(err) {
-					log.Printf("failed to remove temp file %s: %v", d.Name(), err)
-				}
+		if d.IsDir() {
+			continue
+		}
+		path := filepath.Join(s.dir, d.Name())
+		if strings.HasPrefix(d.Name(), ".tmp-") {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				log.Printf("failed to remove temp file %s: %v", d.Name(), err)
 			}
 			continue
 		}
-		podUID, err := url.PathUnescape(strings.TrimSuffix(d.Name(), ".json"))
+		if strings.HasSuffix(d.Name(), oldBindingFileSuffix) {
+			podUID, err := url.PathUnescape(strings.TrimSuffix(d.Name(), oldBindingFileSuffix))
+			if err != nil {
+				podUID = d.Name()
+			}
+			s.dropEntry(podUID, path, "old format")
+			continue
+		}
+		if !strings.HasSuffix(d.Name(), bindingFileSuffix) {
+			continue
+		}
+		podUID, err := url.PathUnescape(strings.TrimSuffix(d.Name(), bindingFileSuffix))
 		if err != nil {
 			podUID = d.Name()
 		}
 		fi, err := d.Info()
 		if err != nil || fi.Mode().Perm()&0077 != 0 {
-			log.Printf("dropping binding entry for pod %s: insecure file mode", podUID)
+			s.dropEntry(podUID, path, "insecure file mode")
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(s.dir, d.Name()))
+		data, err := os.ReadFile(path)
 		if err != nil {
-			log.Printf("dropping binding entry for pod %s: read error", podUID)
+			s.dropEntry(podUID, path, "read error")
 			continue
 		}
-		var stored storedEntry
-		if err := json.Unmarshal(data, &stored); err != nil {
-			log.Printf("dropping corrupt binding entry for pod %s: malformed content", podUID)
+		var stored StoredBinding
+		if err := proto.Unmarshal(data, &stored); err != nil {
+			s.dropEntry(podUID, path, "malformed content")
 			continue
 		}
-		if stored.PodUID != "" {
-			podUID = stored.PodUID
+		if stored.GetPodUid() != "" {
+			podUID = stored.GetPodUid()
 		}
-		var pol *EgressPolicy
-		if len(stored.Policy) > 0 {
-			pol = &EgressPolicy{}
-			if err := proto.Unmarshal(stored.Policy, pol); err != nil || pol.Validate() != nil {
-				log.Printf("dropping corrupt binding entry for pod %s: invalid policy", podUID)
+		pol := stored.GetPolicy()
+		if pol != nil {
+			if err := pol.Validate(); err != nil {
+				s.dropEntry(podUID, path, "invalid policy")
 				continue
 			}
 		}
-		if stored.Bound && pol == nil {
-			log.Printf("dropping corrupt binding entry for pod %s: missing policy", podUID)
+		if stored.GetBound() && pol == nil {
+			s.dropEntry(podUID, path, "missing policy")
 			continue
 		}
-		entry := &podEntry{identity: stored.Identity, policy: pol, bound: stored.Bound, secrets: make(map[string]Secret, len(stored.Secrets))}
-		for k, v := range stored.Secrets {
+		entry := &podEntry{identity: stored.GetIdentity(), policy: pol, bound: stored.GetBound(), secrets: make(map[string]Secret, len(stored.GetSecrets()))}
+		for k, v := range stored.GetSecrets() {
 			entry.secrets[k] = Secret{value: bytes.Clone(v)}
 		}
 		s.pods[podUID] = entry
@@ -178,20 +193,18 @@ func (s *BindingStore) loadFromDisk() error {
 }
 
 func (s *BindingStore) filePath(podUID string) string {
-	return filepath.Join(s.dir, url.PathEscape(podUID)+".json")
+	return filepath.Join(s.dir, url.PathEscape(podUID)+bindingFileSuffix)
 }
 
 func (s *BindingStore) saveLocked(podUID string, entry *podEntry) error {
 	if s.dir == "" {
 		return nil
 	}
-	stored := storedEntry{PodUID: podUID, Identity: entry.identity, Bound: entry.bound}
-	if entry.policy != nil {
-		pb, err := proto.Marshal(entry.policy)
-		if err != nil {
-			return fmt.Errorf("marshaling policy for pod %s: %w", podUID, err)
-		}
-		stored.Policy = pb
+	stored := &StoredBinding{
+		PodUid:   podUID,
+		Identity: entry.identity,
+		Policy:   entry.policy,
+		Bound:    entry.bound,
 	}
 	if len(entry.secrets) > 0 {
 		stored.Secrets = make(map[string][]byte, len(entry.secrets))
@@ -199,7 +212,7 @@ func (s *BindingStore) saveLocked(podUID string, entry *podEntry) error {
 			stored.Secrets[k] = v.Bytes()
 		}
 	}
-	data, err := json.Marshal(stored)
+	data, err := proto.Marshal(stored)
 	if err != nil {
 		return fmt.Errorf("marshaling entry for pod %s: %w", podUID, err)
 	}
@@ -350,10 +363,10 @@ func (s *BindingStore) DropAbsent(activeUIDs []string) {
 			return
 		}
 		for _, d := range entries {
-			if d.IsDir() || !strings.HasSuffix(d.Name(), ".json") {
+			if d.IsDir() || !strings.HasSuffix(d.Name(), bindingFileSuffix) {
 				continue
 			}
-			uid, err := url.PathUnescape(strings.TrimSuffix(d.Name(), ".json"))
+			uid, err := url.PathUnescape(strings.TrimSuffix(d.Name(), bindingFileSuffix))
 			if err == nil && !active[uid] {
 				if err := os.Remove(filepath.Join(s.dir, d.Name())); err != nil && !os.IsNotExist(err) {
 					log.Printf("failed to remove stored binding file %s: %v", d.Name(), err)
