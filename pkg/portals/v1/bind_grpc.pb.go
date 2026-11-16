@@ -265,3 +265,111 @@ var PodBindService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "pkg/portals/v1/bind.proto",
 }
+
+const (
+	NodeStreamService_Stream_FullMethodName = "/portals.v1.NodeStreamService/Stream"
+)
+
+// NodeStreamServiceClient is the client API for NodeStreamService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// NodeStreamService is served by the bind relay and dialed by node agents.
+// A node agent opens one long-lived bidirectional stream over which it declares
+// which pods it has (and updates that as pods come and go), receives pushes from
+// the relay, and answers each push with accepted or refused and why.
+type NodeStreamServiceClient interface {
+	// Stream is the long-lived bidirectional stream between the node agent and relay.
+	Stream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[NodeMessage, RelayMessage], error)
+}
+
+type nodeStreamServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewNodeStreamServiceClient(cc grpc.ClientConnInterface) NodeStreamServiceClient {
+	return &nodeStreamServiceClient{cc}
+}
+
+func (c *nodeStreamServiceClient) Stream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[NodeMessage, RelayMessage], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &NodeStreamService_ServiceDesc.Streams[0], NodeStreamService_Stream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[NodeMessage, RelayMessage]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type NodeStreamService_StreamClient = grpc.BidiStreamingClient[NodeMessage, RelayMessage]
+
+// NodeStreamServiceServer is the server API for NodeStreamService service.
+// All implementations must embed UnimplementedNodeStreamServiceServer
+// for forward compatibility.
+//
+// NodeStreamService is served by the bind relay and dialed by node agents.
+// A node agent opens one long-lived bidirectional stream over which it declares
+// which pods it has (and updates that as pods come and go), receives pushes from
+// the relay, and answers each push with accepted or refused and why.
+type NodeStreamServiceServer interface {
+	// Stream is the long-lived bidirectional stream between the node agent and relay.
+	Stream(grpc.BidiStreamingServer[NodeMessage, RelayMessage]) error
+	mustEmbedUnimplementedNodeStreamServiceServer()
+}
+
+// UnimplementedNodeStreamServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedNodeStreamServiceServer struct{}
+
+func (UnimplementedNodeStreamServiceServer) Stream(grpc.BidiStreamingServer[NodeMessage, RelayMessage]) error {
+	return status.Error(codes.Unimplemented, "method Stream not implemented")
+}
+func (UnimplementedNodeStreamServiceServer) mustEmbedUnimplementedNodeStreamServiceServer() {}
+func (UnimplementedNodeStreamServiceServer) testEmbeddedByValue()                           {}
+
+// UnsafeNodeStreamServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to NodeStreamServiceServer will
+// result in compilation errors.
+type UnsafeNodeStreamServiceServer interface {
+	mustEmbedUnimplementedNodeStreamServiceServer()
+}
+
+func RegisterNodeStreamServiceServer(s grpc.ServiceRegistrar, srv NodeStreamServiceServer) {
+	// If the following call panics, it indicates UnimplementedNodeStreamServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&NodeStreamService_ServiceDesc, srv)
+}
+
+func _NodeStreamService_Stream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(NodeStreamServiceServer).Stream(&grpc.GenericServerStream[NodeMessage, RelayMessage]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type NodeStreamService_StreamServer = grpc.BidiStreamingServer[NodeMessage, RelayMessage]
+
+// NodeStreamService_ServiceDesc is the grpc.ServiceDesc for NodeStreamService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var NodeStreamService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "portals.v1.NodeStreamService",
+	HandlerType: (*NodeStreamServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Stream",
+			Handler:       _NodeStreamService_Stream_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
+	Metadata: "pkg/portals/v1/bind.proto",
+}
