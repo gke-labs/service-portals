@@ -270,8 +270,8 @@ func TestPodMap_BindingStoreIntegration(t *testing.T) {
 	if pol := store.Policy("pod-1"); pol != nil {
 		t.Error("pod-1 policy still present in BindingStore after RemovePod")
 	}
-	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.json")); !os.IsNotExist(err) {
-		t.Error("pod-1.json still present on disk after RemovePod")
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-1.pb")); !os.IsNotExist(err) {
+		t.Error("pod-1.pb still present on disk after RemovePod")
 	}
 
 	// pod-2 must still be intact
@@ -287,7 +287,7 @@ func TestPodMap_BindingStoreIntegration(t *testing.T) {
 	if pol := store.Policy("pod-2"); pol != nil {
 		t.Error("pod-2 policy still present in BindingStore after SynchronizePods")
 	}
-	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.json")); !os.IsNotExist(err) {
-		t.Error("pod-2.json still present on disk after SynchronizePods")
+	if _, err := os.Stat(filepath.Join(storeDir, "pod-2.pb")); !os.IsNotExist(err) {
+		t.Error("pod-2.pb still present on disk after SynchronizePods")
 	}
 }
