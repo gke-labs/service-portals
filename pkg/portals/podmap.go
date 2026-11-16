@@ -17,6 +17,7 @@ package portals
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -33,9 +34,10 @@ type PodInfo struct {
 
 // PodMap tracks pod network identities on the node.
 type PodMap struct {
-	mu    sync.RWMutex
-	byUID map[string]*PodInfo
-	byIP  map[string]*PodInfo
+	mu       sync.RWMutex
+	byUID    map[string]*PodInfo
+	byIP     map[string]*PodInfo
+	watchers []chan struct{}
 }
 
 // NewPodMap creates a new PodMap.
@@ -66,11 +68,27 @@ func (pm *PodMap) addOrUpdateLocked(info *PodInfo) {
 	}
 }
 
+func (pm *PodMap) notifyWatchersLocked() {
+	for _, ch := range pm.watchers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // AddOrUpdatePod registers or updates a pod in the pod map.
 func (pm *PodMap) AddOrUpdatePod(info *PodInfo) {
+	if info == nil || info.UID == "" {
+		return
+	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	_, exists := pm.byUID[info.UID]
 	pm.addOrUpdateLocked(info)
+	if !exists {
+		pm.notifyWatchersLocked()
+	}
 }
 
 // RemovePod unregisters a pod by UID.
@@ -82,6 +100,7 @@ func (pm *PodMap) RemovePod(uid string) {
 			delete(pm.byIP, ip)
 		}
 		delete(pm.byUID, uid)
+		pm.notifyWatchersLocked()
 	}
 }
 
@@ -90,8 +109,12 @@ func (pm *PodMap) SynchronizePods(pods []PodInfo) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	active := make(map[string]bool, len(pods))
+	changed := false
 	for i := range pods {
 		active[pods[i].UID] = true
+		if _, exists := pm.byUID[pods[i].UID]; !exists && pods[i].UID != "" {
+			changed = true
+		}
 		pm.addOrUpdateLocked(&pods[i])
 	}
 	for uid, pod := range pm.byUID {
@@ -100,6 +123,48 @@ func (pm *PodMap) SynchronizePods(pods []PodInfo) {
 				delete(pm.byIP, ip)
 			}
 			delete(pm.byUID, uid)
+			changed = true
+		}
+	}
+	if changed {
+		pm.notifyWatchersLocked()
+	}
+}
+
+// PodUIDs returns a sorted slice of all pod UIDs currently present on the node.
+func (pm *PodMap) PodUIDs() []string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	uids := make([]string, 0, len(pm.byUID))
+	for uid := range pm.byUID {
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	return uids
+}
+
+// HasPod reports whether a pod UID is currently present on the node.
+func (pm *PodMap) HasPod(uid string) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	_, ok := pm.byUID[uid]
+	return ok
+}
+
+// Watch registers a channel to receive notifications when pods change on the node.
+// Non-blocking send ensures a 1-slot channel coalesces rapid changes.
+func (pm *PodMap) Watch(ch chan struct{}) func() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.watchers = append(pm.watchers, ch)
+	return func() {
+		pm.mu.Lock()
+		defer pm.mu.Unlock()
+		for i, w := range pm.watchers {
+			if w == ch {
+				pm.watchers = append(pm.watchers[:i], pm.watchers[i+1:]...)
+				break
+			}
 		}
 	}
 }

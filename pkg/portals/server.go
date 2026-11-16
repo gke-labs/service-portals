@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 // DefaultAdminSocketPath is the default Unix domain socket path for the local node agent admin API.
@@ -276,6 +277,31 @@ func Run(ctx context.Context, config Config) error {
 			return fmt.Errorf("failed to start PodBindService: %w", err)
 		}
 		defer stopBind()
+
+		relayAddr := os.Getenv("RELAY_ADDR")
+		if relayAddr != "" {
+			relayCACertPath := os.Getenv("RELAY_CA_CERT_PATH")
+			if relayCACertPath == "" {
+				return errors.New("RELAY_CA_CERT_PATH is required when RELAY_ADDR is set")
+			}
+			if _, err := credentials.NewClientTLSFromFile(relayCACertPath, ""); err != nil {
+				return fmt.Errorf("failed to load relay CA cert from %s: %w", relayCACertPath, err)
+			}
+			relayTokenPath := os.Getenv("RELAY_TOKEN_PATH")
+			if relayTokenPath == "" {
+				return errors.New("RELAY_TOKEN_PATH is required when RELAY_ADDR is set")
+			}
+			if _, err := os.ReadFile(relayTokenPath); err != nil {
+				return fmt.Errorf("failed to read relay token file %s: %w", relayTokenPath, err)
+			}
+			go runRelayClient(ctx, relayClientConfig{
+				addr:       relayAddr,
+				tokenPath:  relayTokenPath,
+				caCertPath: relayCACertPath,
+				pm:         pm,
+				store:      store,
+			})
+		}
 
 		// Security: The admin API must bind exclusively to a private Unix domain socket
 		// or loopback (127.0.0.1 or ::1). Because the node proxy runs with hostNetwork: true,
