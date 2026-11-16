@@ -30,10 +30,6 @@ func TestPodMapAddAndLookup(t *testing.T) {
 		Namespace: "default",
 		Name:      "test-pod-1",
 		IPs:       []string{"10.244.0.10", "2001:db8::10"},
-		Annotations: map[string]string{
-			"service-portal.gke.io/policy":   "backend",
-			"service-portal.gke.io/identity": "user-bob",
-		},
 	}
 
 	pm.AddOrUpdatePod(info)
@@ -44,12 +40,6 @@ func TestPodMapAddAndLookup(t *testing.T) {
 	}
 	if pod.UID != "pod-uid-1" || pod.Name != "test-pod-1" {
 		t.Errorf("unexpected pod info: %+v", pod)
-	}
-	if !pod.Bound {
-		t.Errorf("expected pod with policy annotation to be initialized as bound")
-	}
-	if pod.Identity != "user-bob" || pod.Policy != "backend" {
-		t.Errorf("unexpected identity (%s) or policy (%s)", pod.Identity, pod.Policy)
 	}
 
 	// Lookup via IPv6
@@ -75,14 +65,9 @@ func TestPodMapLifecycle_RestartWithNewIP(t *testing.T) {
 	}
 	pm.AddOrUpdatePod(initial)
 
-	// Bind via Bind API
-	if err := pm.Bind("pod-uid-restart", "user-alice", "github,backend"); err != nil {
-		t.Fatalf("bind failed: %v", err)
-	}
-
 	pod, ok := pm.GetPodByIP("10.244.0.50")
-	if !ok || !pod.Bound || pod.Identity != "user-alice" {
-		t.Fatalf("unexpected state after bind: %+v", pod)
+	if !ok || pod == nil {
+		t.Fatalf("unexpected state after add: %+v", pod)
 	}
 
 	// Pod restarts with a new IP: 10.244.0.60
@@ -99,64 +84,13 @@ func TestPodMapLifecycle_RestartWithNewIP(t *testing.T) {
 		t.Errorf("old IP 10.244.0.50 should not resolve after restart, got: %+v", oldPod)
 	}
 
-	// New IP must resolve with preserved binding and policy
+	// New IP must resolve
 	newPod, ok := pm.GetPodByIP("10.244.0.60")
 	if !ok || newPod == nil {
 		t.Fatalf("expected new IP 10.244.0.60 to resolve")
 	}
-	if !newPod.Bound {
-		t.Errorf("expected bound state to be preserved across restart with new IP")
-	}
-	if newPod.Identity != "user-alice" || newPod.Policy != "github,backend" {
-		t.Errorf("expected identity user-alice and policy github,backend, got: %+v", newPod)
-	}
-}
-
-func TestPodMapBindAndUnbind(t *testing.T) {
-	pm := NewPodMap()
-
-	pod := &PodInfo{
-		UID:       "unbound-pod",
-		Namespace: "default",
-		Name:      "unbound-client",
-		IPs:       []string{"10.244.0.20"},
-	}
-	pm.AddOrUpdatePod(pod)
-
-	retrieved, ok := pm.GetPodByIP("10.244.0.20")
-	if !ok || retrieved == nil {
-		t.Fatalf("pod not found")
-	}
-	if retrieved.Bound {
-		t.Errorf("unannotated pod must start unbound by default")
-	}
-	if pm.IsRuleAllowed(retrieved, "backend", "backend") {
-		t.Errorf("unbound pod must not be allowed access to any rule")
-	}
-
-	// Bind
-	if err := pm.Bind("unbound-pod", "claim-controller-user", "backend"); err != nil {
-		t.Fatalf("bind failed: %v", err)
-	}
-	if !retrieved.Bound || retrieved.Identity != "claim-controller-user" || retrieved.Policy != "backend" {
-		t.Errorf("unexpected pod state after bind: %+v", retrieved)
-	}
-	if !pm.IsRuleAllowed(retrieved, "backend", "backend") {
-		t.Errorf("expected backend rule to be allowed after bind")
-	}
-	if pm.IsRuleAllowed(retrieved, "other", "other.example.com") {
-		t.Errorf("expected other rule to be denied under policy backend")
-	}
-
-	// Unbind (fail closed)
-	if err := pm.Unbind("unbound-pod"); err != nil {
-		t.Fatalf("unbind failed: %v", err)
-	}
-	if retrieved.Bound {
-		t.Errorf("pod must not be bound after unbind")
-	}
-	if pm.IsRuleAllowed(retrieved, "backend", "backend") {
-		t.Errorf("unbound pod must be denied all rules")
+	if newPod.UID != "pod-uid-restart" {
+		t.Errorf("expected UID pod-uid-restart, got: %+v", newPod)
 	}
 }
 
@@ -182,7 +116,6 @@ func TestPodMapSynchronizePods(t *testing.T) {
 		UID: "existing-pod-1",
 		IPs: []string{"10.244.0.1"},
 	})
-	_ = pm.Bind("existing-pod-1", "user-1", "backend")
 
 	pm.AddOrUpdatePod(&PodInfo{
 		UID: "deleted-pod",
@@ -197,17 +130,14 @@ func TestPodMapSynchronizePods(t *testing.T) {
 		{
 			UID: "new-synced-pod",
 			IPs: []string{"10.244.0.3"},
-			Annotations: map[string]string{
-				"service-portal.gke.io/policy": "synced-policy",
-			},
 		},
 	}
 	pm.SynchronizePods(syncList)
 
-	// existing-pod-1 retained binding
+	// existing-pod-1 retained
 	p1, ok := pm.GetPodByIP("10.244.0.1")
-	if !ok || !p1.Bound || p1.Identity != "user-1" {
-		t.Errorf("expected existing pod to retain binding after sync: %+v", p1)
+	if !ok || p1.UID != "existing-pod-1" {
+		t.Errorf("expected existing pod to be retained after sync: %+v", p1)
 	}
 
 	// deleted-pod removed
@@ -217,7 +147,7 @@ func TestPodMapSynchronizePods(t *testing.T) {
 
 	// new-synced-pod added
 	p3, ok := pm.GetPodByIP("10.244.0.3")
-	if !ok || !p3.Bound || p3.Policy != "synced-policy" {
+	if !ok || p3.UID != "new-synced-pod" {
 		t.Errorf("expected new synced pod to be present: %+v", p3)
 	}
 }
@@ -240,24 +170,12 @@ func TestPodMapHTTPHandler(t *testing.T) {
 		t.Fatalf("POST /api/v1/pods failed: err=%v, status=%d", err, res.StatusCode)
 	}
 
-	// 2. Call /bind
-	bindReq := BindRequest{
-		PodUID:   "http-test-pod",
-		Identity: "api-caller",
-		Policy:   "api-rule",
-	}
-	bindBody, _ := json.Marshal(bindReq)
-	res, err = http.Post(server.URL+"/bind", "application/json", bytes.NewReader(bindBody))
-	if err != nil || res.StatusCode != http.StatusOK {
-		t.Fatalf("POST /bind failed: err=%v, status=%d", err, res.StatusCode)
-	}
-
 	p, ok := pm.GetPodByIP("10.244.0.77")
-	if !ok || !p.Bound || p.Identity != "api-caller" {
-		t.Fatalf("pod not bound properly via HTTP: %+v", p)
+	if !ok || p.UID != "http-test-pod" {
+		t.Fatalf("pod not stored properly via HTTP: %+v", p)
 	}
 
-	// 3. GET /api/v1/pods
+	// 2. GET /api/v1/pods
 	res, err = http.Get(server.URL + "/api/v1/pods")
 	if err != nil || res.StatusCode != http.StatusOK {
 		t.Fatalf("GET /api/v1/pods failed: %v", err)
@@ -268,18 +186,7 @@ func TestPodMapHTTPHandler(t *testing.T) {
 		t.Errorf("unexpected GET /api/v1/pods output: %+v", pods)
 	}
 
-	// 4. Call /unbind
-	unbindReq := UnbindRequest{PodUID: "http-test-pod"}
-	unbindBody, _ := json.Marshal(unbindReq)
-	res, err = http.Post(server.URL+"/unbind", "application/json", bytes.NewReader(unbindBody))
-	if err != nil || res.StatusCode != http.StatusOK {
-		t.Fatalf("POST /unbind failed: %v", err)
-	}
-	if p.Bound {
-		t.Errorf("pod should be unbound after /unbind call")
-	}
-
-	// 5. DELETE /api/v1/pods/{uid}
+	// 3. DELETE /api/v1/pods/{uid}
 	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/pods/http-test-pod", nil)
 	res, err = http.DefaultClient.Do(req)
 	if err != nil || res.StatusCode != http.StatusOK {

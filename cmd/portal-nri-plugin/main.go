@@ -744,113 +744,11 @@ func (p *portalPlugin) CreateContainer(ctx context.Context, pod *api.PodSandbox,
 	return adjustment, nil, nil
 }
 
-func runBindCommand(args []string) {
-	fs := flag.NewFlagSet("bind", flag.ExitOnError)
-	socket := fs.String("socket", portals.DefaultAdminSocketPath, "Path to admin unix domain socket or HTTP URL")
-	uid := fs.String("uid", "", "Pod UID to bind")
-	identity := fs.String("identity", "", "User identity")
-	policy := fs.String("policy", "", "Allowed policy rules")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "error parsing flags: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *uid == "" {
-		fmt.Fprintf(os.Stderr, "error: --uid is required\n")
-		os.Exit(1)
-	}
-
-	client, baseURL, err := newAdminHTTPClient(*socket)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating client: %v\n", err)
-		os.Exit(1)
-	}
-
-	payload, err := json.Marshal(portals.BindRequest{
-		PodUID:   *uid,
-		Identity: *identity,
-		Policy:   *policy,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error marshaling bind payload: %v\n", err)
-		os.Exit(1)
-	}
-	resp, err := client.Post(baseURL+"/bind", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bind request failed: %v\n", err)
-		os.Exit(1)
-	}
-	body, rErr := io.ReadAll(resp.Body)
-	if rErr != nil {
-		body = nil
-	}
-	if err := resp.Body.Close(); err != nil {
-		klog.V(4).Infof("error closing response body: %v", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Fprintf(os.Stderr, "bind failed (status %d): %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
-	fmt.Printf("%s\n", string(body))
-}
-
-func runUnbindCommand(args []string) {
-	fs := flag.NewFlagSet("unbind", flag.ExitOnError)
-	socket := fs.String("socket", portals.DefaultAdminSocketPath, "Path to admin unix domain socket or HTTP URL")
-	uid := fs.String("uid", "", "Pod UID to unbind")
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintf(os.Stderr, "error parsing flags: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *uid == "" {
-		fmt.Fprintf(os.Stderr, "error: --uid is required\n")
-		os.Exit(1)
-	}
-
-	client, baseURL, err := newAdminHTTPClient(*socket)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating client: %v\n", err)
-		os.Exit(1)
-	}
-
-	payload, err := json.Marshal(portals.UnbindRequest{
-		PodUID: *uid,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error marshaling unbind payload: %v\n", err)
-		os.Exit(1)
-	}
-	resp, err := client.Post(baseURL+"/unbind", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "unbind request failed: %v\n", err)
-		os.Exit(1)
-	}
-	body, rErr := io.ReadAll(resp.Body)
-	if rErr != nil {
-		body = nil
-	}
-	if err := resp.Body.Close(); err != nil {
-		klog.V(4).Infof("error closing response body: %v", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		fmt.Fprintf(os.Stderr, "unbind failed (status %d): %s\n", resp.StatusCode, string(body))
-		os.Exit(1)
-	}
-	fmt.Printf("%s\n", string(body))
-}
-
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "init":
 			runInitCommand(os.Args[2:])
-			return
-		case "bind":
-			runBindCommand(os.Args[2:])
-			return
-		case "unbind":
-			runUnbindCommand(os.Args[2:])
 			return
 		case "bind-service":
 			if err := runBindServiceCommand(context.Background(), os.Args[2:], os.Stdout, os.Stdin); err != nil {
