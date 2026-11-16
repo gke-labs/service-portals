@@ -165,81 +165,89 @@ func Run(ctx context.Context, config Config) error {
 		rulesDir = os.Getenv("RULES_DIR")
 	}
 
-	target := os.Getenv("TARGET_URL")
-	if target == "" && rulesDir == "" {
-		target = config.DefaultTargetURL
-		if target == "" {
-			target = "https://generativelanguage.googleapis.com"
-		}
-	}
-
-	upstreamAuthToken := os.Getenv("UPSTREAM_AUTH_TOKEN")
-	if upstreamAuthToken == "" {
-		log.Println("Warning: UPSTREAM_AUTH_TOKEN is not set. No Authorization header will be injected.")
-	}
-
-	upstreamAuthHeader := os.Getenv("UPSTREAM_AUTH_HEADER")
-	if upstreamAuthHeader == "" {
-		if config.DefaultAuthHeader != "" {
-			upstreamAuthHeader = config.DefaultAuthHeader
-		} else {
-			upstreamAuthHeader = "Authorization"
-		}
-	}
-
-	caCertPath := os.Getenv("CA_CERT_PATH")
-	caKeyPath := os.Getenv("CA_KEY_PATH")
-
-	var fallback *proxy.HTTPProxy
-	if target != "" {
-		targetURL, err := url.Parse(target)
-		if err != nil {
-			return fmt.Errorf("invalid TARGET_URL: %w", err)
-		}
-
-		p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
-		if err != nil {
-			return fmt.Errorf("failed to create proxy: %w", err)
-		}
-		fallback = p
-	}
-
-	var c *cache.InMemoryCache
-	cacheTTL := config.CacheTTL
-	if cacheTTLEnv := os.Getenv("CACHE_TTL"); cacheTTLEnv != "" {
-		d, err := time.ParseDuration(cacheTTLEnv)
-		if err != nil {
-			return fmt.Errorf("invalid CACHE_TTL %q: %w", cacheTTLEnv, err)
-		}
-		cacheTTL = d
-	}
-
-	if cacheTTL > 0 {
-		cleanupInterval := 1 * time.Minute
-		if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
-			d, err := time.ParseDuration(cleanupEnv)
-			if err != nil {
-				return fmt.Errorf("invalid CACHE_CLEANUP_INTERVAL %q: %w", cleanupEnv, err)
-			}
-			cleanupInterval = d
-		}
-
-		c = cache.NewInMemoryCache(cleanupInterval)
-		if fallback != nil {
-			fallback.Transport = proxy.NewCachingTransport(c, fallback.Transport, cacheTTL)
-		}
-		log.Printf("Enabled caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
-	}
-
-	if config.SetupProxy != nil && fallback != nil {
-		config.SetupProxy(fallback)
-	}
-
 	var pm *PodMap
 	if config.PodMap != nil {
 		pm = config.PodMap
 	} else if os.Getenv("ENABLE_POD_MAP") == "true" {
 		pm = NewPodMap()
+	}
+
+	if pm != nil && rulesDir != "" {
+		return fmt.Errorf("rules directory %q cannot be configured with pod map enabled: NRI mode uses bound egress policies", rulesDir)
+	}
+
+	caCertPath := os.Getenv("CA_CERT_PATH")
+	caKeyPath := os.Getenv("CA_KEY_PATH")
+
+	var target string
+	var fallback *proxy.HTTPProxy
+	var c *cache.InMemoryCache
+	var cacheTTL time.Duration
+	if pm == nil {
+		target = os.Getenv("TARGET_URL")
+		if target == "" && rulesDir == "" {
+			target = config.DefaultTargetURL
+			if target == "" {
+				target = "https://generativelanguage.googleapis.com"
+			}
+		}
+
+		upstreamAuthToken := os.Getenv("UPSTREAM_AUTH_TOKEN")
+		if upstreamAuthToken == "" {
+			log.Println("Warning: UPSTREAM_AUTH_TOKEN is not set. No Authorization header will be injected.")
+		}
+
+		upstreamAuthHeader := os.Getenv("UPSTREAM_AUTH_HEADER")
+		if upstreamAuthHeader == "" {
+			if config.DefaultAuthHeader != "" {
+				upstreamAuthHeader = config.DefaultAuthHeader
+			} else {
+				upstreamAuthHeader = "Authorization"
+			}
+		}
+
+		if target != "" {
+			targetURL, err := url.Parse(target)
+			if err != nil {
+				return fmt.Errorf("invalid TARGET_URL: %w", err)
+			}
+
+			p, err := proxy.NewHTTPProxy(targetURL, upstreamAuthToken, upstreamAuthHeader, caCertPath, caKeyPath)
+			if err != nil {
+				return fmt.Errorf("failed to create proxy: %w", err)
+			}
+			fallback = p
+		}
+
+		cacheTTL = config.CacheTTL
+		if cacheTTLEnv := os.Getenv("CACHE_TTL"); cacheTTLEnv != "" {
+			d, err := time.ParseDuration(cacheTTLEnv)
+			if err != nil {
+				return fmt.Errorf("invalid CACHE_TTL %q: %w", cacheTTLEnv, err)
+			}
+			cacheTTL = d
+		}
+
+		if cacheTTL > 0 {
+			cleanupInterval := 1 * time.Minute
+			if cleanupEnv := os.Getenv("CACHE_CLEANUP_INTERVAL"); cleanupEnv != "" {
+				d, err := time.ParseDuration(cleanupEnv)
+				if err != nil {
+					return fmt.Errorf("invalid CACHE_CLEANUP_INTERVAL %q: %w", cleanupEnv, err)
+				}
+				cleanupInterval = d
+			}
+
+			c = cache.NewInMemoryCache(cleanupInterval)
+			if fallback != nil {
+				fallback.Transport = proxy.NewCachingTransport(c, fallback.Transport, cacheTTL)
+			}
+			log.Printf("Enabled caching with TTL %v (cleanup interval %v)", cacheTTL, cleanupInterval)
+		}
+
+		if config.SetupProxy != nil && fallback != nil {
+			config.SetupProxy(fallback)
+		}
 	}
 
 	var store *portalsv1.BindingStore
@@ -331,19 +339,29 @@ func Run(ctx context.Context, config Config) error {
 		}
 	}
 
-	// store holds the BindingStore served by PodBindService, ready for EgressHandler in the next issue.
-	_ = store
-
 	var handler http.Handler
-	if rulesDir != "" {
+	if pm != nil {
+		var transport http.RoundTripper = http.DefaultTransport
+		if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
+			transport = otelhttp.NewTransport(transport)
+		}
+
+		var signer *proxy.CertSigner
+		if caCertPath != "" && caKeyPath != "" {
+			s, err := proxy.NewCertSigner(caCertPath, caKeyPath)
+			if err != nil {
+				return fmt.Errorf("failed to create cert signer: %w", err)
+			}
+			signer = s
+		}
+
+		handler = NewEgressHandler(pm, store, transport, signer)
+	} else if rulesDir != "" {
 		var fallbackHandler http.Handler
 		if fallback != nil {
 			fallbackHandler = fallback
 		}
 		rr := NewRuleRouter(rulesDir, fallbackHandler, caCertPath, caKeyPath, cacheTTL, c)
-		if pm != nil {
-			rr.SetPodMap(pm)
-		}
 		if err := rr.loadRules(); err != nil {
 			return fmt.Errorf("failed to load configuration rules: %w", err)
 		}
@@ -508,7 +526,9 @@ func Run(ctx context.Context, config Config) error {
 	}
 
 	targetDesc := target
-	if rulesDir != "" {
+	if pm != nil {
+		targetDesc = "egress policy"
+	} else if rulesDir != "" {
 		if target != "" {
 			targetDesc = fmt.Sprintf("rules from %s (fallback: %s)", rulesDir, target)
 		} else {

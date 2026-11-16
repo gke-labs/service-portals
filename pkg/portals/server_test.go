@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -308,5 +309,62 @@ func TestRun_PodMapEnabledStartsBindService(t *testing.T) {
 	// Socket should be cleaned up
 	if _, err := os.Stat(bindSock); !os.IsNotExist(err) {
 		t.Errorf("expected bind socket %q to be removed on shutdown, err: %v", bindSock, err)
+	}
+}
+
+func TestRun_PodMapWithRulesDir_FailsStartup(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      Config
+		setupEnv func(t *testing.T)
+	}{
+		{
+			name: "Config.RulesDir with Config.PodMap",
+			cfg: Config{
+				PodMap:   NewPodMap(),
+				RulesDir: "/etc/portals",
+			},
+		},
+		{
+			name: "RULES_DIR env with Config.PodMap",
+			cfg: Config{
+				PodMap: NewPodMap(),
+			},
+			setupEnv: func(t *testing.T) {
+				t.Setenv("RULES_DIR", "/etc/portals")
+			},
+		},
+		{
+			name: "Config.RulesDir with ENABLE_POD_MAP env",
+			cfg: Config{
+				RulesDir: "/etc/portals",
+			},
+			setupEnv: func(t *testing.T) {
+				t.Setenv("ENABLE_POD_MAP", "true")
+			},
+		},
+		{
+			name: "RULES_DIR env with ENABLE_POD_MAP env",
+			cfg:  Config{},
+			setupEnv: func(t *testing.T) {
+				t.Setenv("ENABLE_POD_MAP", "true")
+				t.Setenv("RULES_DIR", "/etc/portals")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setupEnv != nil {
+				tt.setupEnv(t)
+			}
+			err := Run(t.Context(), tt.cfg)
+			if err == nil {
+				t.Fatalf("expected error running with pod map and rules directory, got nil")
+			}
+			if !strings.Contains(err.Error(), "cannot be configured with pod map enabled: NRI mode uses bound egress policies") {
+				t.Errorf("expected error message explaining NRI mode uses bound egress policies, got: %v", err)
+			}
+		})
 	}
 }
