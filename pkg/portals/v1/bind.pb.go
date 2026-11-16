@@ -1193,6 +1193,92 @@ func (*RelayPush_Secrets) isRelayPush_Action() {}
 
 func (*RelayPush_Unbind) isRelayPush_Action() {}
 
+// StoredBinding describes what is stored on the node for a pod binding across proxy restarts.
+// This message represents persisted node-local state, not something clients or relay send.
+// Note: protobuf-go does not honour debug_redact in String() or prototext, so this
+// message must never be logged or passed to a logger as a value; Format only
+// covers fmt verbs.
+type StoredBinding struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the sandbox pod.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Identity associated with the pod for credential resolution.
+	Identity string `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Egress policy defining permitted outbound network destinations and credential swaps.
+	Policy *EgressPolicy `protobuf:"bytes,3,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Map of secret name to raw secret bytes.
+	Secrets map[string][]byte `protobuf:"bytes,4,rep,name=secrets,proto3" json:"secrets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Indicates whether a binding entry exists for the pod.
+	Bound         bool `protobuf:"varint,5,opt,name=bound,proto3" json:"bound,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoredBinding) Reset() {
+	*x = StoredBinding{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredBinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredBinding) ProtoMessage() {}
+
+func (x *StoredBinding) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredBinding.ProtoReflect.Descriptor instead.
+func (*StoredBinding) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *StoredBinding) GetPodUid() string {
+	if x != nil {
+		return x.PodUid
+	}
+	return ""
+}
+
+func (x *StoredBinding) GetIdentity() string {
+	if x != nil {
+		return x.Identity
+	}
+	return ""
+}
+
+func (x *StoredBinding) GetPolicy() *EgressPolicy {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
+}
+
+func (x *StoredBinding) GetSecrets() map[string][]byte {
+	if x != nil {
+		return x.Secrets
+	}
+	return nil
+}
+
+func (x *StoredBinding) GetBound() bool {
+	if x != nil {
+		return x.Bound
+	}
+	return false
+}
+
 var File_pkg_portals_v1_bind_proto protoreflect.FileDescriptor
 
 const file_pkg_portals_v1_bind_proto_rawDesc = "" +
@@ -1267,7 +1353,16 @@ const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\x06policy\x18\x02 \x01(\v2\x15.portals.v1.PodPolicyH\x00R\x06policy\x127\n" +
 	"\asecrets\x18\x03 \x01(\v2\x16.portals.v1.PodSecretsB\x03\x80\x01\x01H\x00R\asecrets\x123\n" +
 	"\x06unbind\x18\x04 \x01(\v2\x19.portals.v1.UnbindRequestH\x00R\x06unbindB\b\n" +
-	"\x06action*\x93\x01\n" +
+	"\x06action\"\x8f\x02\n" +
+	"\rStoredBinding\x12\x17\n" +
+	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x1a\n" +
+	"\bidentity\x18\x02 \x01(\tR\bidentity\x120\n" +
+	"\x06policy\x18\x03 \x01(\v2\x18.portals.v1.EgressPolicyR\x06policy\x12E\n" +
+	"\asecrets\x18\x04 \x03(\v2&.portals.v1.StoredBinding.SecretsEntryB\x03\x80\x01\x01R\asecrets\x12\x14\n" +
+	"\x05bound\x18\x05 \x01(\bR\x05bound\x1a:\n" +
+	"\fSecretsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01*\x93\x01\n" +
 	"\x10AcceptanceStatus\x12!\n" +
 	"\x1dACCEPTANCE_STATUS_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aACCEPTANCE_STATUS_ACCEPTED\x10\x01\x12\x1d\n" +
@@ -1294,7 +1389,7 @@ func file_pkg_portals_v1_bind_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_portals_v1_bind_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_pkg_portals_v1_bind_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_pkg_portals_v1_bind_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_pkg_portals_v1_bind_proto_goTypes = []any{
 	(AcceptanceStatus)(0),         // 0: portals.v1.AcceptanceStatus
 	(*PodPolicy)(nil),             // 1: portals.v1.PodPolicy
@@ -1311,16 +1406,18 @@ var file_pkg_portals_v1_bind_proto_goTypes = []any{
 	(*PushAnswer)(nil),            // 12: portals.v1.PushAnswer
 	(*RelayMessage)(nil),          // 13: portals.v1.RelayMessage
 	(*RelayPush)(nil),             // 14: portals.v1.RelayPush
-	nil,                           // 15: portals.v1.PodSecrets.SecretsEntry
-	(*EgressPolicy)(nil),          // 16: portals.v1.EgressPolicy
+	(*StoredBinding)(nil),         // 15: portals.v1.StoredBinding
+	nil,                           // 16: portals.v1.PodSecrets.SecretsEntry
+	nil,                           // 17: portals.v1.StoredBinding.SecretsEntry
+	(*EgressPolicy)(nil),          // 18: portals.v1.EgressPolicy
 }
 var file_pkg_portals_v1_bind_proto_depIdxs = []int32{
-	16, // 0: portals.v1.PodPolicy.policy:type_name -> portals.v1.EgressPolicy
-	15, // 1: portals.v1.PodSecrets.secrets:type_name -> portals.v1.PodSecrets.SecretsEntry
+	18, // 0: portals.v1.PodPolicy.policy:type_name -> portals.v1.EgressPolicy
+	16, // 1: portals.v1.PodSecrets.secrets:type_name -> portals.v1.PodSecrets.SecretsEntry
 	0,  // 2: portals.v1.BindResponse.status:type_name -> portals.v1.AcceptanceStatus
 	0,  // 3: portals.v1.InjectSecretsResponse.status:type_name -> portals.v1.AcceptanceStatus
 	0,  // 4: portals.v1.UnbindResponse.status:type_name -> portals.v1.AcceptanceStatus
-	16, // 5: portals.v1.GetResponse.policy:type_name -> portals.v1.EgressPolicy
+	18, // 5: portals.v1.GetResponse.policy:type_name -> portals.v1.EgressPolicy
 	0,  // 6: portals.v1.GetResponse.status:type_name -> portals.v1.AcceptanceStatus
 	10, // 7: portals.v1.NodeMessage.declaration:type_name -> portals.v1.PodDeclaration
 	11, // 8: portals.v1.NodeMessage.update:type_name -> portals.v1.PodUpdate
@@ -1330,21 +1427,23 @@ var file_pkg_portals_v1_bind_proto_depIdxs = []int32{
 	1,  // 12: portals.v1.RelayPush.policy:type_name -> portals.v1.PodPolicy
 	2,  // 13: portals.v1.RelayPush.secrets:type_name -> portals.v1.PodSecrets
 	5,  // 14: portals.v1.RelayPush.unbind:type_name -> portals.v1.UnbindRequest
-	1,  // 15: portals.v1.PodBindService.Bind:input_type -> portals.v1.PodPolicy
-	2,  // 16: portals.v1.PodBindService.InjectSecrets:input_type -> portals.v1.PodSecrets
-	5,  // 17: portals.v1.PodBindService.Unbind:input_type -> portals.v1.UnbindRequest
-	7,  // 18: portals.v1.PodBindService.Get:input_type -> portals.v1.GetRequest
-	9,  // 19: portals.v1.NodeStreamService.Stream:input_type -> portals.v1.NodeMessage
-	3,  // 20: portals.v1.PodBindService.Bind:output_type -> portals.v1.BindResponse
-	4,  // 21: portals.v1.PodBindService.InjectSecrets:output_type -> portals.v1.InjectSecretsResponse
-	6,  // 22: portals.v1.PodBindService.Unbind:output_type -> portals.v1.UnbindResponse
-	8,  // 23: portals.v1.PodBindService.Get:output_type -> portals.v1.GetResponse
-	13, // 24: portals.v1.NodeStreamService.Stream:output_type -> portals.v1.RelayMessage
-	20, // [20:25] is the sub-list for method output_type
-	15, // [15:20] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	18, // 15: portals.v1.StoredBinding.policy:type_name -> portals.v1.EgressPolicy
+	17, // 16: portals.v1.StoredBinding.secrets:type_name -> portals.v1.StoredBinding.SecretsEntry
+	1,  // 17: portals.v1.PodBindService.Bind:input_type -> portals.v1.PodPolicy
+	2,  // 18: portals.v1.PodBindService.InjectSecrets:input_type -> portals.v1.PodSecrets
+	5,  // 19: portals.v1.PodBindService.Unbind:input_type -> portals.v1.UnbindRequest
+	7,  // 20: portals.v1.PodBindService.Get:input_type -> portals.v1.GetRequest
+	9,  // 21: portals.v1.NodeStreamService.Stream:input_type -> portals.v1.NodeMessage
+	3,  // 22: portals.v1.PodBindService.Bind:output_type -> portals.v1.BindResponse
+	4,  // 23: portals.v1.PodBindService.InjectSecrets:output_type -> portals.v1.InjectSecretsResponse
+	6,  // 24: portals.v1.PodBindService.Unbind:output_type -> portals.v1.UnbindResponse
+	8,  // 25: portals.v1.PodBindService.Get:output_type -> portals.v1.GetResponse
+	13, // 26: portals.v1.NodeStreamService.Stream:output_type -> portals.v1.RelayMessage
+	22, // [22:27] is the sub-list for method output_type
+	17, // [17:22] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_pkg_portals_v1_bind_proto_init() }
@@ -1372,7 +1471,7 @@ func file_pkg_portals_v1_bind_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_portals_v1_bind_proto_rawDesc), len(file_pkg_portals_v1_bind_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
