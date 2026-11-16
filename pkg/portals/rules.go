@@ -46,19 +46,17 @@ type PortalRule struct {
 
 // RuleSpec defines the specification for a dynamic proxy rule.
 type RuleSpec struct {
-	Host               string `json:"host"`
-	RewriteURL         string `json:"rewriteUrl"`
-	AuthToken          string `json:"authToken"`
-	AuthHeader         string `json:"authHeader"`
-	CacheTTL           string `json:"cacheTTL"`
-	AttributionHeaders bool   `json:"attributionHeaders,omitempty"`
+	Host       string `json:"host"`
+	RewriteURL string `json:"rewriteUrl"`
+	AuthToken  string `json:"authToken"`
+	AuthHeader string `json:"authHeader"`
+	CacheTTL   string `json:"cacheTTL"`
 }
 
 // Rule represents a loaded routing rule with its proxy and name.
 type Rule struct {
-	Proxy              *proxy.HTTPProxy
-	Name               string
-	AttributionHeaders bool
+	Proxy *proxy.HTTPProxy
+	Name  string
 }
 
 // RuleRouter routes incoming HTTP/HTTPS requests to the appropriate proxy based on host rules.
@@ -71,7 +69,6 @@ type RuleRouter struct {
 	caKeyPath  string
 	cacheTTL   time.Duration
 	cache      *cache.InMemoryCache
-	podMap     *PodMap
 }
 
 // NewRuleRouter creates a new RuleRouter instance.
@@ -85,13 +82,6 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 		cacheTTL:   cacheTTL,
 		cache:      c,
 	}
-}
-
-// SetPodMap sets the PodMap for caller pod resolution and policy enforcement.
-func (rr *RuleRouter) SetPodMap(pm *PodMap) {
-	rr.mu.Lock()
-	defer rr.mu.Unlock()
-	rr.podMap = pm
 }
 
 // MatchHost reports whether host matches a configured rule or fallback target.
@@ -220,9 +210,8 @@ func (rr *RuleRouter) loadRules() error {
 
 			host := strings.ToLower(rule.Spec.Host)
 			newRoutes[host] = &Rule{
-				Proxy:              p,
-				Name:               rule.Metadata.Name,
-				AttributionHeaders: rule.Spec.AttributionHeaders,
+				Proxy: p,
+				Name:  rule.Metadata.Name,
 			}
 			log.Printf("Loaded rule %s: host %s -> %s", rule.Metadata.Name, host, rewriteURLStr)
 		}
@@ -264,72 +253,21 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	pm := rr.podMap
 	rr.mu.RUnlock()
 
-	var pod *PodInfo
-	if pm != nil {
-		clientIP := proxy.HostWithoutPort(r.RemoteAddr)
-		var found bool
-		if pod, found = pm.GetPodByIP(clientIP); !found || pod == nil {
-			log.Printf("Request: %s %s | Caller: unknown (%s) | Action: denied", r.Method, host, clientIP)
-			http.Error(w, "Access Denied: caller not recognized as an opted-in pod", http.StatusForbidden)
-			return
-		}
-		if !pod.Bound {
-			log.Printf("Request: %s %s | Caller: %s/%s (%s) | State: unbound | Action: denied", r.Method, host, pod.Namespace, pod.Name, clientIP)
-			http.Error(w, "Access Denied: pod is unbound", http.StatusForbidden)
-			return
-		}
-	}
-
-	caller := "<none>"
-	if pod != nil {
-		caller = pod.Namespace + "/" + pod.Name
-	}
-
 	if ok {
-		if pm != nil && !pm.IsRuleAllowed(pod, rule.Name, host) {
-			log.Printf("Request: %s %s | Caller: %s | Policy: %s | Matched rule: %s | Action: denied", r.Method, host, caller, pod.Policy, rule.Name)
-			http.Error(w, "Access Denied: host not allowed by pod policy", http.StatusForbidden)
-			return
-		}
-		if pod != nil {
-			log.Printf("Request: %s %s | Caller: %s (identity: %s) | Matched rule: %s | Action: proxy", r.Method, host, caller, pod.Identity, rule.Name)
-			// Security: Only send attribution headers upstream when the PortalRule explicitly opts in to them (#182 review).
-			if rule.AttributionHeaders {
-				r.Header.Set("X-Forwarded-Client-Pod", caller)
-				if pod.Identity != "" {
-					r.Header.Set("X-Consumer-Identity", pod.Identity)
-				}
-			}
-		} else {
-			log.Printf("Request: %s %s | Matched rule: %s | Action: proxy", r.Method, host, rule.Name)
-		}
+		log.Printf("Request: %s %s | Matched rule: %s | Action: proxy", r.Method, host, rule.Name)
 		rule.Proxy.ServeHTTP(w, r)
 		return
 	}
 
 	if rr.fallback != nil {
-		if pm != nil && !pm.IsRuleAllowed(pod, "fallback", host) {
-			log.Printf("Request: %s %s | Caller: %s | Policy: %s | Matched rule: <fallback> | Action: denied", r.Method, host, caller, pod.Policy)
-			http.Error(w, "Access Denied: host not allowed by pod policy", http.StatusForbidden)
-			return
-		}
-		if pod != nil {
-			log.Printf("Request: %s %s | Caller: %s | Matched rule: <none> | Action: fallback", r.Method, host, caller)
-		} else {
-			log.Printf("Request: %s %s | Matched rule: <none> | Action: fallback", r.Method, host)
-		}
+		log.Printf("Request: %s %s | Matched rule: <none> | Action: fallback", r.Method, host)
 		rr.fallback.ServeHTTP(w, r)
 		return
 	}
 
-	if pod != nil {
-		log.Printf("Request: %s %s | Caller: %s | Matched rule: <none> | Action: denied", r.Method, host, caller)
-	} else {
-		log.Printf("Request: %s %s | Matched rule: <none> | Action: denied", r.Method, host)
-	}
+	log.Printf("Request: %s %s | Matched rule: <none> | Action: denied", r.Method, host)
 	http.Error(w, "Access Denied: host not allowed by portal rules", http.StatusForbidden)
 }
 
@@ -353,29 +291,7 @@ func (rr *RuleRouter) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificat
 			}
 		}
 	}
-	pm := rr.podMap
 	rr.mu.RUnlock()
-
-	if pm != nil {
-		var clientIP string
-		if info.Conn != nil && info.Conn.RemoteAddr() != nil {
-			clientIP = proxy.HostWithoutPort(info.Conn.RemoteAddr().String())
-		}
-		pod, found := pm.GetPodByIP(clientIP)
-		if !found || pod == nil {
-			return nil, fmt.Errorf("access denied for caller %s: unknown caller", clientIP)
-		}
-		if !pod.Bound {
-			return nil, fmt.Errorf("access denied for caller %s: pod is unbound", clientIP)
-		}
-		ruleName := ""
-		if ok {
-			ruleName = rule.Name
-		}
-		if !pm.IsRuleAllowed(pod, ruleName, host) {
-			return nil, fmt.Errorf("access denied for caller %s: host %q not permitted by policy %q", clientIP, host, pod.Policy)
-		}
-	}
 
 	if ok {
 		return rule.Proxy.GetCertificate(info)

@@ -41,7 +41,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-// DefaultAdminSocketPath is the default Unix domain socket path for the local node agent admin and bind API.
+// DefaultAdminSocketPath is the default Unix domain socket path for the local node agent admin API.
 const DefaultAdminSocketPath = "/run/service-portal/portal.sock"
 
 // DefaultBindSocketPath is the default Unix domain socket path for the local node agent PodBindService gRPC API.
@@ -277,11 +277,11 @@ func Run(ctx context.Context, config Config) error {
 		}
 		defer stopBind()
 
-		// Security: The admin and Bind API must bind exclusively to a private Unix domain socket
+		// Security: The admin API must bind exclusively to a private Unix domain socket
 		// or loopback (127.0.0.1 or ::1). Because the node proxy runs with hostNetwork: true,
-		// binding to 0.0.0.0 or an external interface would expose pod registration and policy
-		// binding to any pod on the node network or external network entities, creating an
-		// unauthenticated privilege escalation bypass (daemonset-mode.md Question 2).
+		// binding to 0.0.0.0 or an external interface would expose pod registration to any
+		// pod on the node network or external network entities, creating an unauthenticated
+		// privilege escalation bypass (daemonset-mode.md Question 2).
 		// Controller-facing remote transport with gRPC and mTLS is tracked separately in #227.
 		adminAddr := os.Getenv("ADMIN_ADDR")
 		if adminAddr == "" {

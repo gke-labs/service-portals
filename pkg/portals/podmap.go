@@ -16,13 +16,12 @@ package portals
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 )
 
-// PodInfo holds identity, policy, and network metadata for an intercepted pod.
+// PodInfo holds network metadata for an intercepted pod.
 type PodInfo struct {
 	UID         string            `json:"uid"`
 	Namespace   string            `json:"namespace"`
@@ -30,12 +29,9 @@ type PodInfo struct {
 	IPs         []string          `json:"ips"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
-	Identity    string            `json:"identity,omitempty"`
-	Policy      string            `json:"policy,omitempty"`
-	Bound       bool              `json:"bound,omitempty"`
 }
 
-// PodMap tracks pod network identities and per-pod policies on the node.
+// PodMap tracks pod network identities on the node.
 type PodMap struct {
 	mu    sync.RWMutex
 	byUID map[string]*PodInfo
@@ -61,9 +57,6 @@ func (pm *PodMap) addOrUpdateLocked(info *PodInfo) {
 				delete(pm.byIP, old)
 			}
 		}
-		info.Identity, info.Policy, info.Bound = ex.Identity, ex.Policy, ex.Bound
-	} else if pol, ok := info.Annotations["service-portal.gke.io/policy"]; ok && pol != "" {
-		info.Policy, info.Identity, info.Bound = pol, info.Annotations["service-portal.gke.io/identity"], true
 	}
 	pm.byUID[info.UID] = info
 	for _, ip := range info.IPs {
@@ -119,100 +112,9 @@ func (pm *PodMap) GetPodByIP(ip string) (*PodInfo, bool) {
 	return pod, ok
 }
 
-// Bind assigns user identity and policy to a pod by UID.
-func (pm *PodMap) Bind(uid, identity, policy string) error {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	pod, ok := pm.byUID[uid]
-	if !ok {
-		pod = &PodInfo{UID: uid}
-		pm.byUID[uid] = pod
-	}
-	pod.Identity, pod.Policy, pod.Bound = identity, policy, true
-	return nil
-}
-
-// Unbind revokes identity and policy from a pod, returning it to fail-closed state.
-func (pm *PodMap) Unbind(uid string) error {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	pod, ok := pm.byUID[uid]
-	if !ok {
-		return fmt.Errorf("pod UID %q not found", uid)
-	}
-	pod.Identity, pod.Policy, pod.Bound = "", "", false
-	return nil
-}
-
-// IsRuleAllowed checks if the given rule and host are permitted by the pod's policy.
-func (pm *PodMap) IsRuleAllowed(pod *PodInfo, ruleName, host string) bool {
-	if pod == nil || !pod.Bound || pod.Policy == "" {
-		return false
-	}
-	for _, tok := range strings.Split(pod.Policy, ",") {
-		tok = strings.TrimSpace(strings.ToLower(tok))
-		if tok == "*" || tok == strings.ToLower(ruleName) || tok == strings.ToLower(host) {
-			return true
-		}
-	}
-	return false
-}
-
-// BindRequest represents the payload for the Bind API.
-type BindRequest struct {
-	PodUID   string `json:"podUID"`
-	Identity string `json:"identity"`
-	Policy   string `json:"policy"`
-}
-
-// UnbindRequest represents the payload for the Unbind API.
-type UnbindRequest struct {
-	PodUID string `json:"podUID"`
-}
-
-// AdminHandler returns an http.Handler serving the Bind API and pod map management endpoints.
+// AdminHandler returns an http.Handler serving the pod map management endpoints.
 func (pm *PodMap) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/bind", func(w http.ResponseWriter, r *http.Request) {
-		var req BindRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			req.PodUID = r.URL.Query().Get("podUID")
-			req.Identity = r.URL.Query().Get("identity")
-			req.Policy = r.URL.Query().Get("policy")
-		}
-		if req.PodUID == "" {
-			http.Error(w, "missing podUID", http.StatusBadRequest)
-			return
-		}
-		if err := pm.Bind(req.PodUID, req.Identity, req.Policy); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]string{"status": "bound", "podUID": req.PodUID}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
-	mux.HandleFunc("/unbind", func(w http.ResponseWriter, r *http.Request) {
-		var req UnbindRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			req.PodUID = r.URL.Query().Get("podUID")
-		}
-		if req.PodUID == "" {
-			http.Error(w, "missing podUID", http.StatusBadRequest)
-			return
-		}
-		if err := pm.Unbind(req.PodUID); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]string{"status": "unbound", "podUID": req.PodUID}); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	})
 	mux.HandleFunc("/api/v1/pods", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

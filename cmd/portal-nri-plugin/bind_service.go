@@ -57,18 +57,16 @@ func readInput(path string, stdin io.Reader) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func closeConn(conn *grpc.ClientConn) {
-	if err := conn.Close(); err != nil {
-		klog.V(4).Infof("error closing connection: %v", err)
-	}
-}
-
 func withBindClient(ctx context.Context, sock string, fn func(context.Context, portalsv1.PodBindServiceClient) error) error {
 	conn, client, err := dialBindService(sock)
 	if err != nil {
 		return fmt.Errorf("failed to connect to bind service: %w", err)
 	}
-	defer closeConn(conn)
+	defer func() {
+		if err := conn.Close(); err != nil {
+			klog.V(4).Infof("error closing connection: %v", err)
+		}
+	}()
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
