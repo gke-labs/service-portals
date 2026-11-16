@@ -38,50 +38,280 @@ service PodBindService {
   rpc Get(GetRequest) returns (GetResponse);
 }
 
+// NodeStreamService is served by the bind relay and dialed by node agents.
+// A node agent opens one long-lived bidirectional stream over which it declares
+// which pods it has (and updates that as pods come and go), receives pushes from
+// the relay, and answers each push with accepted or refused and why.
+service NodeStreamService {
+  // Stream is the long-lived bidirectional stream between the node agent and relay.
+  rpc Stream(stream NodeMessage) returns (stream RelayMessage);
+}
+
+// AcceptanceStatus describes the acceptance state of a pod's policy and secrets on a node.
+// "Accepted" has one meaning: the node holds the policy and every secret that the policy names.
+enum AcceptanceStatus {
+  // Default unspecified status.
+  ACCEPTANCE_STATUS_UNSPECIFIED = 0;
+
+  // The node holds the policy and every secret the policy names.
+  ACCEPTANCE_STATUS_ACCEPTED = 1;
+
+  // The push is held pending delivery to the node, or the node holds the policy/secrets
+  // but is still waiting for required companion secrets or policy to arrive.
+  ACCEPTANCE_STATUS_PENDING = 2;
+
+  // The push or binding was refused by the node or relay.
+  ACCEPTANCE_STATUS_REFUSED = 3;
+}
+
 // PodPolicy defines the identity and egress policy for a sandbox pod, keyed by pod UID.
 message PodPolicy {
+  // Pod UID identifying the target sandbox pod.
+  // Set by the client.
   string pod_uid = 1;
+
+  // Identity associated with the pod for credential resolution.
+  // Set by the client.
   string identity = 2;
+
+  // Egress policy defining permitted outbound network destinations and credential swaps.
+  // Set by the client.
   EgressPolicy policy = 3;
+
+  // If true, the call waits until the node has accepted the policy and all secrets
+  // the policy names, or until the wait times out or is refused.
+  // Set by the client.
+  bool wait = 4;
 }
 
 // PodSecrets defines named secret token bytes for a sandbox pod, keyed by pod UID.
+// Supplying secrets replaces the pod's whole set of secrets rather than merging.
 // Note: protobuf-go does not honour debug_redact in String() or prototext, so this
 // message must never be logged or passed to a logger as a value; Format only
 // covers fmt verbs.
 message PodSecrets {
+  // Pod UID identifying the target sandbox pod.
+  // Set by the client.
   string pod_uid = 1;
+
+  // Map of secret name to raw secret bytes.
+  // Set by the client.
   map<string, bytes> secrets = 2 [debug_redact = true];
+
+  // If true, the call waits until the node has accepted the secrets and pod policy,
+  // or until the wait times out or is refused.
+  // Set by the client.
+  bool wait = 3;
 }
 
+// BindResponse reports the outcome of a Bind call.
 message BindResponse {
+  // Pod UID identifying the sandbox pod.
+  // Set by the server.
   string pod_uid = 1;
+
+  // Indicates whether a binding entry exists for the pod.
+  // Set by the server.
   bool bound = 2;
+
+  // Acceptance status of the pod's policy and secrets on the node.
+  // Set by the server.
+  AcceptanceStatus status = 3;
+
+  // Refusal reason explaining why the binding was refused, if status is REFUSED.
+  // Set by the server.
+  string refusal_reason = 4;
 }
 
+// InjectSecretsResponse reports the outcome of an InjectSecrets call.
 message InjectSecretsResponse {
+  // Pod UID identifying the sandbox pod.
+  // Set by the server.
   string pod_uid = 1;
+
+  // Acceptance status of the pod's policy and secrets on the node.
+  // Set by the server.
+  AcceptanceStatus status = 2;
+
+  // Refusal reason explaining why secrets were refused, if status is REFUSED.
+  // Set by the server.
+  string refusal_reason = 3;
 }
 
+// UnbindRequest requests removal of bindings for a pod UID.
 message UnbindRequest {
+  // Pod UID identifying the sandbox pod to unbind.
+  // Set by the client.
   string pod_uid = 1;
+
+  // If true, the call waits until the node has processed the unbind,
+  // or until the wait times out or is refused.
+  // Set by the client.
+  bool wait = 2;
 }
 
+// UnbindResponse reports the outcome of an Unbind call.
 message UnbindResponse {
+  // Pod UID identifying the sandbox pod.
+  // Set by the server.
   string pod_uid = 1;
+
+  // Indicates whether a binding entry still exists for the pod (false on successful unbind).
+  // Set by the server.
   bool bound = 2;
+
+  // Acceptance status of the unbind operation on the node.
+  // Set by the server.
+  AcceptanceStatus status = 3;
+
+  // Refusal reason explaining why the unbind was refused, if status is REFUSED.
+  // Set by the server.
+  string refusal_reason = 4;
 }
 
+// GetRequest requests the current binding and status of a pod.
 message GetRequest {
+  // Pod UID identifying the sandbox pod.
+  // Set by the client.
   string pod_uid = 1;
 }
 
+// GetResponse returns the current binding and status of a pod.
 message GetResponse {
+  // Pod UID identifying the sandbox pod.
+  // Set by the server.
   string pod_uid = 1;
+
+  // Kubernetes namespace of the pod.
+  // Set by the server.
   string namespace = 2;
+
+  // Kubernetes pod name.
+  // Set by the server.
   string name = 3;
+
+  // IP addresses associated with the pod.
+  // Set by the server.
   repeated string ips = 4;
+
+  // Identity associated with the pod for credential resolution.
+  // Set by the server.
   string identity = 5;
+
+  // Egress policy currently applied to the pod.
+  // Set by the server.
   EgressPolicy policy = 6;
+
+  // Indicates whether a binding entry exists for the pod.
+  // Set by the server.
   bool bound = 7;
+
+  // Acceptance status of the pod's policy and secrets on the node.
+  // Set by the server.
+  AcceptanceStatus status = 8;
+
+  // Refusal reason if the binding was refused or invalid.
+  // Set by the server.
+  string refusal_reason = 9;
+}
+
+// NodeMessage is sent by a node agent to the relay over the node stream.
+message NodeMessage {
+  // The specific payload sent from the node agent to the relay.
+  // Set by the node agent.
+  oneof payload {
+    // Declares pods present on the node. Used on connect or reconnect to state
+    // or restate the node's full pod list.
+    // Set by the node agent.
+    PodDeclaration declaration = 1;
+
+    // Incremental update as pods come and go on the node.
+    // Set by the node agent.
+    PodUpdate update = 2;
+
+    // Answer to a push received from the relay.
+    // Set by the node agent.
+    PushAnswer answer = 3;
+  }
+}
+
+// PodDeclaration states or restates the full list of pods currently present on the node.
+// Sent by the node agent upon establishing or re-establishing the stream.
+message PodDeclaration {
+  // Full list of pod UIDs currently present on the node.
+  // Set by the node agent.
+  repeated string pod_uids = 1;
+}
+
+// PodUpdate informs the relay of pods added or removed on the node as pods come and go.
+message PodUpdate {
+  // Pod UIDs of pods that have arrived or started on the node.
+  // Set by the node agent.
+  repeated string added_pod_uids = 1;
+
+  // Pod UIDs of pods that have stopped or been removed from the node.
+  // Set by the node agent.
+  repeated string removed_pod_uids = 2;
+}
+
+// PushAnswer correlates with a push from the relay and reports whether the pod is
+// accepted or refused and why.
+message PushAnswer {
+  // push_id identifies which RelayPush this answer correlates with.
+  // Set by the node agent.
+  string push_id = 1;
+
+  // Pod UID this answer applies to.
+  // Set by the node agent.
+  string pod_uid = 2;
+
+  // Acceptance status of the pod on the node.
+  // Set to ACCEPTANCE_STATUS_ACCEPTED only when the node holds the policy and
+  // every secret the policy names. Set to ACCEPTANCE_STATUS_PENDING if the push
+  // was stored but companion secrets or policy are still missing.
+  // Set to ACCEPTANCE_STATUS_REFUSED if the push was refused.
+  // Set by the node agent.
+  AcceptanceStatus status = 3;
+
+  // Refusal reason explaining why the push was refused, if status is REFUSED.
+  // Set by the node agent.
+  string refusal_reason = 4;
+
+  // Names of secrets referenced by the policy that have not yet been provided to the node.
+  // Set by the node agent when status is PENDING.
+  repeated string missing_secrets = 5;
+}
+
+// RelayMessage is sent by the relay to a connected node agent over the node stream.
+message RelayMessage {
+  // The specific payload sent from the relay to the node agent.
+  // Set by the relay.
+  oneof payload {
+    // A push delivered to the node.
+    // Set by the relay.
+    RelayPush push = 1;
+  }
+}
+
+// RelayPush delivers a policy, full set of secrets, or unbind operation for a pod to the node.
+message RelayPush {
+  // push_id uniquely identifies this push so the node's answer can correlate with it.
+  // Set by the relay.
+  string push_id = 1;
+
+  // The operation pushed to the node.
+  // Set by the relay.
+  oneof action {
+    // Egress policy for a pod. Reuses PodPolicy.
+    // Set by the relay.
+    PodPolicy policy = 2;
+
+    // Full set of secrets for a pod. Reuses PodSecrets.
+    // Set by the relay.
+    PodSecrets secrets = 3 [debug_redact = true];
+
+    // Unbind a pod. Reuses UnbindRequest.
+    // Set by the relay.
+    UnbindRequest unbind = 4;
+  }
 }

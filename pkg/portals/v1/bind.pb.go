@@ -35,12 +35,81 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// AcceptanceStatus describes the acceptance state of a pod's policy and secrets on a node.
+// "Accepted" has one meaning: the node holds the policy and every secret that the policy names.
+type AcceptanceStatus int32
+
+const (
+	// Default unspecified status.
+	AcceptanceStatus_ACCEPTANCE_STATUS_UNSPECIFIED AcceptanceStatus = 0
+	// The node holds the policy and every secret the policy names.
+	AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED AcceptanceStatus = 1
+	// The push is held pending delivery to the node, or the node holds the policy/secrets
+	// but is still waiting for required companion secrets or policy to arrive.
+	AcceptanceStatus_ACCEPTANCE_STATUS_PENDING AcceptanceStatus = 2
+	// The push or binding was refused by the node or relay.
+	AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED AcceptanceStatus = 3
+)
+
+// Enum value maps for AcceptanceStatus.
+var (
+	AcceptanceStatus_name = map[int32]string{
+		0: "ACCEPTANCE_STATUS_UNSPECIFIED",
+		1: "ACCEPTANCE_STATUS_ACCEPTED",
+		2: "ACCEPTANCE_STATUS_PENDING",
+		3: "ACCEPTANCE_STATUS_REFUSED",
+	}
+	AcceptanceStatus_value = map[string]int32{
+		"ACCEPTANCE_STATUS_UNSPECIFIED": 0,
+		"ACCEPTANCE_STATUS_ACCEPTED":    1,
+		"ACCEPTANCE_STATUS_PENDING":     2,
+		"ACCEPTANCE_STATUS_REFUSED":     3,
+	}
+)
+
+func (x AcceptanceStatus) Enum() *AcceptanceStatus {
+	p := new(AcceptanceStatus)
+	*p = x
+	return p
+}
+
+func (x AcceptanceStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AcceptanceStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_pkg_portals_v1_bind_proto_enumTypes[0].Descriptor()
+}
+
+func (AcceptanceStatus) Type() protoreflect.EnumType {
+	return &file_pkg_portals_v1_bind_proto_enumTypes[0]
+}
+
+func (x AcceptanceStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AcceptanceStatus.Descriptor instead.
+func (AcceptanceStatus) EnumDescriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{0}
+}
+
 // PodPolicy defines the identity and egress policy for a sandbox pod, keyed by pod UID.
 type PodPolicy struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
-	Identity      string                 `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
-	Policy        *EgressPolicy          `protobuf:"bytes,3,opt,name=policy,proto3" json:"policy,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the target sandbox pod.
+	// Set by the client.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Identity associated with the pod for credential resolution.
+	// Set by the client.
+	Identity string `protobuf:"bytes,2,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Egress policy defining permitted outbound network destinations and credential swaps.
+	// Set by the client.
+	Policy *EgressPolicy `protobuf:"bytes,3,opt,name=policy,proto3" json:"policy,omitempty"`
+	// If true, the call waits until the node has accepted the policy and all secrets
+	// the policy names, or until the wait times out or is refused.
+	// Set by the client.
+	Wait          bool `protobuf:"varint,4,opt,name=wait,proto3" json:"wait,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -96,14 +165,30 @@ func (x *PodPolicy) GetPolicy() *EgressPolicy {
 	return nil
 }
 
+func (x *PodPolicy) GetWait() bool {
+	if x != nil {
+		return x.Wait
+	}
+	return false
+}
+
 // PodSecrets defines named secret token bytes for a sandbox pod, keyed by pod UID.
+// Supplying secrets replaces the pod's whole set of secrets rather than merging.
 // Note: protobuf-go does not honour debug_redact in String() or prototext, so this
 // message must never be logged or passed to a logger as a value; Format only
 // covers fmt verbs.
 type PodSecrets struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
-	Secrets       map[string][]byte      `protobuf:"bytes,2,rep,name=secrets,proto3" json:"secrets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the target sandbox pod.
+	// Set by the client.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Map of secret name to raw secret bytes.
+	// Set by the client.
+	Secrets map[string][]byte `protobuf:"bytes,2,rep,name=secrets,proto3" json:"secrets,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// If true, the call waits until the node has accepted the secrets and pod policy,
+	// or until the wait times out or is refused.
+	// Set by the client.
+	Wait          bool `protobuf:"varint,3,opt,name=wait,proto3" json:"wait,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -152,10 +237,28 @@ func (x *PodSecrets) GetSecrets() map[string][]byte {
 	return nil
 }
 
+func (x *PodSecrets) GetWait() bool {
+	if x != nil {
+		return x.Wait
+	}
+	return false
+}
+
+// BindResponse reports the outcome of a Bind call.
 type BindResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
-	Bound         bool                   `protobuf:"varint,2,opt,name=bound,proto3" json:"bound,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the sandbox pod.
+	// Set by the server.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Indicates whether a binding entry exists for the pod.
+	// Set by the server.
+	Bound bool `protobuf:"varint,2,opt,name=bound,proto3" json:"bound,omitempty"`
+	// Acceptance status of the pod's policy and secrets on the node.
+	// Set by the server.
+	Status AcceptanceStatus `protobuf:"varint,3,opt,name=status,proto3,enum=portals.v1.AcceptanceStatus" json:"status,omitempty"`
+	// Refusal reason explaining why the binding was refused, if status is REFUSED.
+	// Set by the server.
+	RefusalReason string `protobuf:"bytes,4,opt,name=refusal_reason,json=refusalReason,proto3" json:"refusal_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -204,9 +307,32 @@ func (x *BindResponse) GetBound() bool {
 	return false
 }
 
+func (x *BindResponse) GetStatus() AcceptanceStatus {
+	if x != nil {
+		return x.Status
+	}
+	return AcceptanceStatus_ACCEPTANCE_STATUS_UNSPECIFIED
+}
+
+func (x *BindResponse) GetRefusalReason() string {
+	if x != nil {
+		return x.RefusalReason
+	}
+	return ""
+}
+
+// InjectSecretsResponse reports the outcome of an InjectSecrets call.
 type InjectSecretsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the sandbox pod.
+	// Set by the server.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Acceptance status of the pod's policy and secrets on the node.
+	// Set by the server.
+	Status AcceptanceStatus `protobuf:"varint,2,opt,name=status,proto3,enum=portals.v1.AcceptanceStatus" json:"status,omitempty"`
+	// Refusal reason explaining why secrets were refused, if status is REFUSED.
+	// Set by the server.
+	RefusalReason string `protobuf:"bytes,3,opt,name=refusal_reason,json=refusalReason,proto3" json:"refusal_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -248,9 +374,30 @@ func (x *InjectSecretsResponse) GetPodUid() string {
 	return ""
 }
 
+func (x *InjectSecretsResponse) GetStatus() AcceptanceStatus {
+	if x != nil {
+		return x.Status
+	}
+	return AcceptanceStatus_ACCEPTANCE_STATUS_UNSPECIFIED
+}
+
+func (x *InjectSecretsResponse) GetRefusalReason() string {
+	if x != nil {
+		return x.RefusalReason
+	}
+	return ""
+}
+
+// UnbindRequest requests removal of bindings for a pod UID.
 type UnbindRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the sandbox pod to unbind.
+	// Set by the client.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// If true, the call waits until the node has processed the unbind,
+	// or until the wait times out or is refused.
+	// Set by the client.
+	Wait          bool `protobuf:"varint,2,opt,name=wait,proto3" json:"wait,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -292,10 +439,28 @@ func (x *UnbindRequest) GetPodUid() string {
 	return ""
 }
 
+func (x *UnbindRequest) GetWait() bool {
+	if x != nil {
+		return x.Wait
+	}
+	return false
+}
+
+// UnbindResponse reports the outcome of an Unbind call.
 type UnbindResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
-	Bound         bool                   `protobuf:"varint,2,opt,name=bound,proto3" json:"bound,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the sandbox pod.
+	// Set by the server.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Indicates whether a binding entry still exists for the pod (false on successful unbind).
+	// Set by the server.
+	Bound bool `protobuf:"varint,2,opt,name=bound,proto3" json:"bound,omitempty"`
+	// Acceptance status of the unbind operation on the node.
+	// Set by the server.
+	Status AcceptanceStatus `protobuf:"varint,3,opt,name=status,proto3,enum=portals.v1.AcceptanceStatus" json:"status,omitempty"`
+	// Refusal reason explaining why the unbind was refused, if status is REFUSED.
+	// Set by the server.
+	RefusalReason string `protobuf:"bytes,4,opt,name=refusal_reason,json=refusalReason,proto3" json:"refusal_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -344,9 +509,26 @@ func (x *UnbindResponse) GetBound() bool {
 	return false
 }
 
+func (x *UnbindResponse) GetStatus() AcceptanceStatus {
+	if x != nil {
+		return x.Status
+	}
+	return AcceptanceStatus_ACCEPTANCE_STATUS_UNSPECIFIED
+}
+
+func (x *UnbindResponse) GetRefusalReason() string {
+	if x != nil {
+		return x.RefusalReason
+	}
+	return ""
+}
+
+// GetRequest requests the current binding and status of a pod.
 type GetRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the sandbox pod.
+	// Set by the client.
+	PodUid        string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -388,15 +570,36 @@ func (x *GetRequest) GetPodUid() string {
 	return ""
 }
 
+// GetResponse returns the current binding and status of a pod.
 type GetResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PodUid        string                 `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
-	Namespace     string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
-	Ips           []string               `protobuf:"bytes,4,rep,name=ips,proto3" json:"ips,omitempty"`
-	Identity      string                 `protobuf:"bytes,5,opt,name=identity,proto3" json:"identity,omitempty"`
-	Policy        *EgressPolicy          `protobuf:"bytes,6,opt,name=policy,proto3" json:"policy,omitempty"`
-	Bound         bool                   `protobuf:"varint,7,opt,name=bound,proto3" json:"bound,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UID identifying the sandbox pod.
+	// Set by the server.
+	PodUid string `protobuf:"bytes,1,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Kubernetes namespace of the pod.
+	// Set by the server.
+	Namespace string `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	// Kubernetes pod name.
+	// Set by the server.
+	Name string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	// IP addresses associated with the pod.
+	// Set by the server.
+	Ips []string `protobuf:"bytes,4,rep,name=ips,proto3" json:"ips,omitempty"`
+	// Identity associated with the pod for credential resolution.
+	// Set by the server.
+	Identity string `protobuf:"bytes,5,opt,name=identity,proto3" json:"identity,omitempty"`
+	// Egress policy currently applied to the pod.
+	// Set by the server.
+	Policy *EgressPolicy `protobuf:"bytes,6,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Indicates whether a binding entry exists for the pod.
+	// Set by the server.
+	Bound bool `protobuf:"varint,7,opt,name=bound,proto3" json:"bound,omitempty"`
+	// Acceptance status of the pod's policy and secrets on the node.
+	// Set by the server.
+	Status AcceptanceStatus `protobuf:"varint,8,opt,name=status,proto3,enum=portals.v1.AcceptanceStatus" json:"status,omitempty"`
+	// Refusal reason if the binding was refused or invalid.
+	// Set by the server.
+	RefusalReason string `protobuf:"bytes,9,opt,name=refusal_reason,json=refusalReason,proto3" json:"refusal_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -480,36 +683,555 @@ func (x *GetResponse) GetBound() bool {
 	return false
 }
 
+func (x *GetResponse) GetStatus() AcceptanceStatus {
+	if x != nil {
+		return x.Status
+	}
+	return AcceptanceStatus_ACCEPTANCE_STATUS_UNSPECIFIED
+}
+
+func (x *GetResponse) GetRefusalReason() string {
+	if x != nil {
+		return x.RefusalReason
+	}
+	return ""
+}
+
+// NodeMessage is sent by a node agent to the relay over the node stream.
+type NodeMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The specific payload sent from the node agent to the relay.
+	// Set by the node agent.
+	//
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*NodeMessage_Declaration
+	//	*NodeMessage_Update
+	//	*NodeMessage_Answer
+	Payload       isNodeMessage_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NodeMessage) Reset() {
+	*x = NodeMessage{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NodeMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NodeMessage) ProtoMessage() {}
+
+func (x *NodeMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NodeMessage.ProtoReflect.Descriptor instead.
+func (*NodeMessage) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *NodeMessage) GetPayload() isNodeMessage_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *NodeMessage) GetDeclaration() *PodDeclaration {
+	if x != nil {
+		if x, ok := x.Payload.(*NodeMessage_Declaration); ok {
+			return x.Declaration
+		}
+	}
+	return nil
+}
+
+func (x *NodeMessage) GetUpdate() *PodUpdate {
+	if x != nil {
+		if x, ok := x.Payload.(*NodeMessage_Update); ok {
+			return x.Update
+		}
+	}
+	return nil
+}
+
+func (x *NodeMessage) GetAnswer() *PushAnswer {
+	if x != nil {
+		if x, ok := x.Payload.(*NodeMessage_Answer); ok {
+			return x.Answer
+		}
+	}
+	return nil
+}
+
+type isNodeMessage_Payload interface {
+	isNodeMessage_Payload()
+}
+
+type NodeMessage_Declaration struct {
+	// Declares pods present on the node. Used on connect or reconnect to state
+	// or restate the node's full pod list.
+	// Set by the node agent.
+	Declaration *PodDeclaration `protobuf:"bytes,1,opt,name=declaration,proto3,oneof"`
+}
+
+type NodeMessage_Update struct {
+	// Incremental update as pods come and go on the node.
+	// Set by the node agent.
+	Update *PodUpdate `protobuf:"bytes,2,opt,name=update,proto3,oneof"`
+}
+
+type NodeMessage_Answer struct {
+	// Answer to a push received from the relay.
+	// Set by the node agent.
+	Answer *PushAnswer `protobuf:"bytes,3,opt,name=answer,proto3,oneof"`
+}
+
+func (*NodeMessage_Declaration) isNodeMessage_Payload() {}
+
+func (*NodeMessage_Update) isNodeMessage_Payload() {}
+
+func (*NodeMessage_Answer) isNodeMessage_Payload() {}
+
+// PodDeclaration states or restates the full list of pods currently present on the node.
+// Sent by the node agent upon establishing or re-establishing the stream.
+type PodDeclaration struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Full list of pod UIDs currently present on the node.
+	// Set by the node agent.
+	PodUids       []string `protobuf:"bytes,1,rep,name=pod_uids,json=podUids,proto3" json:"pod_uids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PodDeclaration) Reset() {
+	*x = PodDeclaration{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PodDeclaration) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PodDeclaration) ProtoMessage() {}
+
+func (x *PodDeclaration) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PodDeclaration.ProtoReflect.Descriptor instead.
+func (*PodDeclaration) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *PodDeclaration) GetPodUids() []string {
+	if x != nil {
+		return x.PodUids
+	}
+	return nil
+}
+
+// PodUpdate informs the relay of pods added or removed on the node as pods come and go.
+type PodUpdate struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod UIDs of pods that have arrived or started on the node.
+	// Set by the node agent.
+	AddedPodUids []string `protobuf:"bytes,1,rep,name=added_pod_uids,json=addedPodUids,proto3" json:"added_pod_uids,omitempty"`
+	// Pod UIDs of pods that have stopped or been removed from the node.
+	// Set by the node agent.
+	RemovedPodUids []string `protobuf:"bytes,2,rep,name=removed_pod_uids,json=removedPodUids,proto3" json:"removed_pod_uids,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PodUpdate) Reset() {
+	*x = PodUpdate{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PodUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PodUpdate) ProtoMessage() {}
+
+func (x *PodUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PodUpdate.ProtoReflect.Descriptor instead.
+func (*PodUpdate) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *PodUpdate) GetAddedPodUids() []string {
+	if x != nil {
+		return x.AddedPodUids
+	}
+	return nil
+}
+
+func (x *PodUpdate) GetRemovedPodUids() []string {
+	if x != nil {
+		return x.RemovedPodUids
+	}
+	return nil
+}
+
+// PushAnswer correlates with a push from the relay and reports whether the pod is
+// accepted or refused and why.
+type PushAnswer struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// push_id identifies which RelayPush this answer correlates with.
+	// Set by the node agent.
+	PushId string `protobuf:"bytes,1,opt,name=push_id,json=pushId,proto3" json:"push_id,omitempty"`
+	// Pod UID this answer applies to.
+	// Set by the node agent.
+	PodUid string `protobuf:"bytes,2,opt,name=pod_uid,json=podUid,proto3" json:"pod_uid,omitempty"`
+	// Acceptance status of the pod on the node.
+	// Set to ACCEPTANCE_STATUS_ACCEPTED only when the node holds the policy and
+	// every secret the policy names. Set to ACCEPTANCE_STATUS_PENDING if the push
+	// was stored but companion secrets or policy are still missing.
+	// Set to ACCEPTANCE_STATUS_REFUSED if the push was refused.
+	// Set by the node agent.
+	Status AcceptanceStatus `protobuf:"varint,3,opt,name=status,proto3,enum=portals.v1.AcceptanceStatus" json:"status,omitempty"`
+	// Refusal reason explaining why the push was refused, if status is REFUSED.
+	// Set by the node agent.
+	RefusalReason string `protobuf:"bytes,4,opt,name=refusal_reason,json=refusalReason,proto3" json:"refusal_reason,omitempty"`
+	// Names of secrets referenced by the policy that have not yet been provided to the node.
+	// Set by the node agent when status is PENDING.
+	MissingSecrets []string `protobuf:"bytes,5,rep,name=missing_secrets,json=missingSecrets,proto3" json:"missing_secrets,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *PushAnswer) Reset() {
+	*x = PushAnswer{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PushAnswer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PushAnswer) ProtoMessage() {}
+
+func (x *PushAnswer) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PushAnswer.ProtoReflect.Descriptor instead.
+func (*PushAnswer) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PushAnswer) GetPushId() string {
+	if x != nil {
+		return x.PushId
+	}
+	return ""
+}
+
+func (x *PushAnswer) GetPodUid() string {
+	if x != nil {
+		return x.PodUid
+	}
+	return ""
+}
+
+func (x *PushAnswer) GetStatus() AcceptanceStatus {
+	if x != nil {
+		return x.Status
+	}
+	return AcceptanceStatus_ACCEPTANCE_STATUS_UNSPECIFIED
+}
+
+func (x *PushAnswer) GetRefusalReason() string {
+	if x != nil {
+		return x.RefusalReason
+	}
+	return ""
+}
+
+func (x *PushAnswer) GetMissingSecrets() []string {
+	if x != nil {
+		return x.MissingSecrets
+	}
+	return nil
+}
+
+// RelayMessage is sent by the relay to a connected node agent over the node stream.
+type RelayMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The specific payload sent from the relay to the node agent.
+	// Set by the relay.
+	//
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*RelayMessage_Push
+	Payload       isRelayMessage_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RelayMessage) Reset() {
+	*x = RelayMessage{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelayMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelayMessage) ProtoMessage() {}
+
+func (x *RelayMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelayMessage.ProtoReflect.Descriptor instead.
+func (*RelayMessage) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RelayMessage) GetPayload() isRelayMessage_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *RelayMessage) GetPush() *RelayPush {
+	if x != nil {
+		if x, ok := x.Payload.(*RelayMessage_Push); ok {
+			return x.Push
+		}
+	}
+	return nil
+}
+
+type isRelayMessage_Payload interface {
+	isRelayMessage_Payload()
+}
+
+type RelayMessage_Push struct {
+	// A push delivered to the node.
+	// Set by the relay.
+	Push *RelayPush `protobuf:"bytes,1,opt,name=push,proto3,oneof"`
+}
+
+func (*RelayMessage_Push) isRelayMessage_Payload() {}
+
+// RelayPush delivers a policy, full set of secrets, or unbind operation for a pod to the node.
+type RelayPush struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// push_id uniquely identifies this push so the node's answer can correlate with it.
+	// Set by the relay.
+	PushId string `protobuf:"bytes,1,opt,name=push_id,json=pushId,proto3" json:"push_id,omitempty"`
+	// The operation pushed to the node.
+	// Set by the relay.
+	//
+	// Types that are valid to be assigned to Action:
+	//
+	//	*RelayPush_Policy
+	//	*RelayPush_Secrets
+	//	*RelayPush_Unbind
+	Action        isRelayPush_Action `protobuf_oneof:"action"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RelayPush) Reset() {
+	*x = RelayPush{}
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelayPush) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelayPush) ProtoMessage() {}
+
+func (x *RelayPush) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_portals_v1_bind_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelayPush.ProtoReflect.Descriptor instead.
+func (*RelayPush) Descriptor() ([]byte, []int) {
+	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *RelayPush) GetPushId() string {
+	if x != nil {
+		return x.PushId
+	}
+	return ""
+}
+
+func (x *RelayPush) GetAction() isRelayPush_Action {
+	if x != nil {
+		return x.Action
+	}
+	return nil
+}
+
+func (x *RelayPush) GetPolicy() *PodPolicy {
+	if x != nil {
+		if x, ok := x.Action.(*RelayPush_Policy); ok {
+			return x.Policy
+		}
+	}
+	return nil
+}
+
+func (x *RelayPush) GetSecrets() *PodSecrets {
+	if x != nil {
+		if x, ok := x.Action.(*RelayPush_Secrets); ok {
+			return x.Secrets
+		}
+	}
+	return nil
+}
+
+func (x *RelayPush) GetUnbind() *UnbindRequest {
+	if x != nil {
+		if x, ok := x.Action.(*RelayPush_Unbind); ok {
+			return x.Unbind
+		}
+	}
+	return nil
+}
+
+type isRelayPush_Action interface {
+	isRelayPush_Action()
+}
+
+type RelayPush_Policy struct {
+	// Egress policy for a pod. Reuses PodPolicy.
+	// Set by the relay.
+	Policy *PodPolicy `protobuf:"bytes,2,opt,name=policy,proto3,oneof"`
+}
+
+type RelayPush_Secrets struct {
+	// Full set of secrets for a pod. Reuses PodSecrets.
+	// Set by the relay.
+	Secrets *PodSecrets `protobuf:"bytes,3,opt,name=secrets,proto3,oneof"`
+}
+
+type RelayPush_Unbind struct {
+	// Unbind a pod. Reuses UnbindRequest.
+	// Set by the relay.
+	Unbind *UnbindRequest `protobuf:"bytes,4,opt,name=unbind,proto3,oneof"`
+}
+
+func (*RelayPush_Policy) isRelayPush_Action() {}
+
+func (*RelayPush_Secrets) isRelayPush_Action() {}
+
+func (*RelayPush_Unbind) isRelayPush_Action() {}
+
 var File_pkg_portals_v1_bind_proto protoreflect.FileDescriptor
 
 const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\n" +
 	"\x19pkg/portals/v1/bind.proto\x12\n" +
-	"portals.v1\x1a\x1bpkg/portals/v1/egress.proto\"r\n" +
+	"portals.v1\x1a\x1bpkg/portals/v1/egress.proto\"\x86\x01\n" +
 	"\tPodPolicy\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x1a\n" +
 	"\bidentity\x18\x02 \x01(\tR\bidentity\x120\n" +
-	"\x06policy\x18\x03 \x01(\v2\x18.portals.v1.EgressPolicyR\x06policy\"\xa5\x01\n" +
+	"\x06policy\x18\x03 \x01(\v2\x18.portals.v1.EgressPolicyR\x06policy\x12\x12\n" +
+	"\x04wait\x18\x04 \x01(\bR\x04wait\"\xb9\x01\n" +
 	"\n" +
 	"PodSecrets\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12B\n" +
-	"\asecrets\x18\x02 \x03(\v2#.portals.v1.PodSecrets.SecretsEntryB\x03\x80\x01\x01R\asecrets\x1a:\n" +
+	"\asecrets\x18\x02 \x03(\v2#.portals.v1.PodSecrets.SecretsEntryB\x03\x80\x01\x01R\asecrets\x12\x12\n" +
+	"\x04wait\x18\x03 \x01(\bR\x04wait\x1a:\n" +
 	"\fSecretsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"=\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x9a\x01\n" +
 	"\fBindResponse\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x14\n" +
-	"\x05bound\x18\x02 \x01(\bR\x05bound\"0\n" +
+	"\x05bound\x18\x02 \x01(\bR\x05bound\x124\n" +
+	"\x06status\x18\x03 \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
+	"\x0erefusal_reason\x18\x04 \x01(\tR\rrefusalReason\"\x8d\x01\n" +
 	"\x15InjectSecretsResponse\x12\x17\n" +
-	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"(\n" +
+	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x124\n" +
+	"\x06status\x18\x02 \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
+	"\x0erefusal_reason\x18\x03 \x01(\tR\rrefusalReason\"<\n" +
 	"\rUnbindRequest\x12\x17\n" +
-	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"?\n" +
+	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x12\n" +
+	"\x04wait\x18\x02 \x01(\bR\x04wait\"\x9c\x01\n" +
 	"\x0eUnbindResponse\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x14\n" +
-	"\x05bound\x18\x02 \x01(\bR\x05bound\"%\n" +
+	"\x05bound\x18\x02 \x01(\bR\x05bound\x124\n" +
+	"\x06status\x18\x03 \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
+	"\x0erefusal_reason\x18\x04 \x01(\tR\rrefusalReason\"%\n" +
 	"\n" +
 	"GetRequest\x12\x17\n" +
-	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"\xce\x01\n" +
+	"\apod_uid\x18\x01 \x01(\tR\x06podUid\"\xab\x02\n" +
 	"\vGetResponse\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x12\n" +
@@ -517,12 +1239,47 @@ const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\x03ips\x18\x04 \x03(\tR\x03ips\x12\x1a\n" +
 	"\bidentity\x18\x05 \x01(\tR\bidentity\x120\n" +
 	"\x06policy\x18\x06 \x01(\v2\x18.portals.v1.EgressPolicyR\x06policy\x12\x14\n" +
-	"\x05bound\x18\a \x01(\bR\x05bound2\x8e\x02\n" +
+	"\x05bound\x18\a \x01(\bR\x05bound\x124\n" +
+	"\x06status\x18\b \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
+	"\x0erefusal_reason\x18\t \x01(\tR\rrefusalReason\"\xbb\x01\n" +
+	"\vNodeMessage\x12>\n" +
+	"\vdeclaration\x18\x01 \x01(\v2\x1a.portals.v1.PodDeclarationH\x00R\vdeclaration\x12/\n" +
+	"\x06update\x18\x02 \x01(\v2\x15.portals.v1.PodUpdateH\x00R\x06update\x120\n" +
+	"\x06answer\x18\x03 \x01(\v2\x16.portals.v1.PushAnswerH\x00R\x06answerB\t\n" +
+	"\apayload\"+\n" +
+	"\x0ePodDeclaration\x12\x19\n" +
+	"\bpod_uids\x18\x01 \x03(\tR\apodUids\"[\n" +
+	"\tPodUpdate\x12$\n" +
+	"\x0eadded_pod_uids\x18\x01 \x03(\tR\faddedPodUids\x12(\n" +
+	"\x10removed_pod_uids\x18\x02 \x03(\tR\x0eremovedPodUids\"\xc4\x01\n" +
+	"\n" +
+	"PushAnswer\x12\x17\n" +
+	"\apush_id\x18\x01 \x01(\tR\x06pushId\x12\x17\n" +
+	"\apod_uid\x18\x02 \x01(\tR\x06podUid\x124\n" +
+	"\x06status\x18\x03 \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
+	"\x0erefusal_reason\x18\x04 \x01(\tR\rrefusalReason\x12'\n" +
+	"\x0fmissing_secrets\x18\x05 \x03(\tR\x0emissingSecrets\"F\n" +
+	"\fRelayMessage\x12+\n" +
+	"\x04push\x18\x01 \x01(\v2\x15.portals.v1.RelayPushH\x00R\x04pushB\t\n" +
+	"\apayload\"\xcd\x01\n" +
+	"\tRelayPush\x12\x17\n" +
+	"\apush_id\x18\x01 \x01(\tR\x06pushId\x12/\n" +
+	"\x06policy\x18\x02 \x01(\v2\x15.portals.v1.PodPolicyH\x00R\x06policy\x127\n" +
+	"\asecrets\x18\x03 \x01(\v2\x16.portals.v1.PodSecretsB\x03\x80\x01\x01H\x00R\asecrets\x123\n" +
+	"\x06unbind\x18\x04 \x01(\v2\x19.portals.v1.UnbindRequestH\x00R\x06unbindB\b\n" +
+	"\x06action*\x93\x01\n" +
+	"\x10AcceptanceStatus\x12!\n" +
+	"\x1dACCEPTANCE_STATUS_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aACCEPTANCE_STATUS_ACCEPTED\x10\x01\x12\x1d\n" +
+	"\x19ACCEPTANCE_STATUS_PENDING\x10\x02\x12\x1d\n" +
+	"\x19ACCEPTANCE_STATUS_REFUSED\x10\x032\x8e\x02\n" +
 	"\x0ePodBindService\x127\n" +
 	"\x04Bind\x12\x15.portals.v1.PodPolicy\x1a\x18.portals.v1.BindResponse\x12J\n" +
 	"\rInjectSecrets\x12\x16.portals.v1.PodSecrets\x1a!.portals.v1.InjectSecretsResponse\x12?\n" +
 	"\x06Unbind\x12\x19.portals.v1.UnbindRequest\x1a\x1a.portals.v1.UnbindResponse\x126\n" +
-	"\x03Get\x12\x16.portals.v1.GetRequest\x1a\x17.portals.v1.GetResponseB>Z<github.com/gke-labs/service-portals/pkg/portals/v1;portalsv1b\x06proto3"
+	"\x03Get\x12\x16.portals.v1.GetRequest\x1a\x17.portals.v1.GetResponse2T\n" +
+	"\x11NodeStreamService\x12?\n" +
+	"\x06Stream\x12\x17.portals.v1.NodeMessage\x1a\x18.portals.v1.RelayMessage(\x010\x01B>Z<github.com/gke-labs/service-portals/pkg/portals/v1;portalsv1b\x06proto3"
 
 var (
 	file_pkg_portals_v1_bind_proto_rawDescOnce sync.Once
@@ -536,36 +1293,58 @@ func file_pkg_portals_v1_bind_proto_rawDescGZIP() []byte {
 	return file_pkg_portals_v1_bind_proto_rawDescData
 }
 
-var file_pkg_portals_v1_bind_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_pkg_portals_v1_bind_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_pkg_portals_v1_bind_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_pkg_portals_v1_bind_proto_goTypes = []any{
-	(*PodPolicy)(nil),             // 0: portals.v1.PodPolicy
-	(*PodSecrets)(nil),            // 1: portals.v1.PodSecrets
-	(*BindResponse)(nil),          // 2: portals.v1.BindResponse
-	(*InjectSecretsResponse)(nil), // 3: portals.v1.InjectSecretsResponse
-	(*UnbindRequest)(nil),         // 4: portals.v1.UnbindRequest
-	(*UnbindResponse)(nil),        // 5: portals.v1.UnbindResponse
-	(*GetRequest)(nil),            // 6: portals.v1.GetRequest
-	(*GetResponse)(nil),           // 7: portals.v1.GetResponse
-	nil,                           // 8: portals.v1.PodSecrets.SecretsEntry
-	(*EgressPolicy)(nil),          // 9: portals.v1.EgressPolicy
+	(AcceptanceStatus)(0),         // 0: portals.v1.AcceptanceStatus
+	(*PodPolicy)(nil),             // 1: portals.v1.PodPolicy
+	(*PodSecrets)(nil),            // 2: portals.v1.PodSecrets
+	(*BindResponse)(nil),          // 3: portals.v1.BindResponse
+	(*InjectSecretsResponse)(nil), // 4: portals.v1.InjectSecretsResponse
+	(*UnbindRequest)(nil),         // 5: portals.v1.UnbindRequest
+	(*UnbindResponse)(nil),        // 6: portals.v1.UnbindResponse
+	(*GetRequest)(nil),            // 7: portals.v1.GetRequest
+	(*GetResponse)(nil),           // 8: portals.v1.GetResponse
+	(*NodeMessage)(nil),           // 9: portals.v1.NodeMessage
+	(*PodDeclaration)(nil),        // 10: portals.v1.PodDeclaration
+	(*PodUpdate)(nil),             // 11: portals.v1.PodUpdate
+	(*PushAnswer)(nil),            // 12: portals.v1.PushAnswer
+	(*RelayMessage)(nil),          // 13: portals.v1.RelayMessage
+	(*RelayPush)(nil),             // 14: portals.v1.RelayPush
+	nil,                           // 15: portals.v1.PodSecrets.SecretsEntry
+	(*EgressPolicy)(nil),          // 16: portals.v1.EgressPolicy
 }
 var file_pkg_portals_v1_bind_proto_depIdxs = []int32{
-	9, // 0: portals.v1.PodPolicy.policy:type_name -> portals.v1.EgressPolicy
-	8, // 1: portals.v1.PodSecrets.secrets:type_name -> portals.v1.PodSecrets.SecretsEntry
-	9, // 2: portals.v1.GetResponse.policy:type_name -> portals.v1.EgressPolicy
-	0, // 3: portals.v1.PodBindService.Bind:input_type -> portals.v1.PodPolicy
-	1, // 4: portals.v1.PodBindService.InjectSecrets:input_type -> portals.v1.PodSecrets
-	4, // 5: portals.v1.PodBindService.Unbind:input_type -> portals.v1.UnbindRequest
-	6, // 6: portals.v1.PodBindService.Get:input_type -> portals.v1.GetRequest
-	2, // 7: portals.v1.PodBindService.Bind:output_type -> portals.v1.BindResponse
-	3, // 8: portals.v1.PodBindService.InjectSecrets:output_type -> portals.v1.InjectSecretsResponse
-	5, // 9: portals.v1.PodBindService.Unbind:output_type -> portals.v1.UnbindResponse
-	7, // 10: portals.v1.PodBindService.Get:output_type -> portals.v1.GetResponse
-	7, // [7:11] is the sub-list for method output_type
-	3, // [3:7] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	16, // 0: portals.v1.PodPolicy.policy:type_name -> portals.v1.EgressPolicy
+	15, // 1: portals.v1.PodSecrets.secrets:type_name -> portals.v1.PodSecrets.SecretsEntry
+	0,  // 2: portals.v1.BindResponse.status:type_name -> portals.v1.AcceptanceStatus
+	0,  // 3: portals.v1.InjectSecretsResponse.status:type_name -> portals.v1.AcceptanceStatus
+	0,  // 4: portals.v1.UnbindResponse.status:type_name -> portals.v1.AcceptanceStatus
+	16, // 5: portals.v1.GetResponse.policy:type_name -> portals.v1.EgressPolicy
+	0,  // 6: portals.v1.GetResponse.status:type_name -> portals.v1.AcceptanceStatus
+	10, // 7: portals.v1.NodeMessage.declaration:type_name -> portals.v1.PodDeclaration
+	11, // 8: portals.v1.NodeMessage.update:type_name -> portals.v1.PodUpdate
+	12, // 9: portals.v1.NodeMessage.answer:type_name -> portals.v1.PushAnswer
+	0,  // 10: portals.v1.PushAnswer.status:type_name -> portals.v1.AcceptanceStatus
+	14, // 11: portals.v1.RelayMessage.push:type_name -> portals.v1.RelayPush
+	1,  // 12: portals.v1.RelayPush.policy:type_name -> portals.v1.PodPolicy
+	2,  // 13: portals.v1.RelayPush.secrets:type_name -> portals.v1.PodSecrets
+	5,  // 14: portals.v1.RelayPush.unbind:type_name -> portals.v1.UnbindRequest
+	1,  // 15: portals.v1.PodBindService.Bind:input_type -> portals.v1.PodPolicy
+	2,  // 16: portals.v1.PodBindService.InjectSecrets:input_type -> portals.v1.PodSecrets
+	5,  // 17: portals.v1.PodBindService.Unbind:input_type -> portals.v1.UnbindRequest
+	7,  // 18: portals.v1.PodBindService.Get:input_type -> portals.v1.GetRequest
+	9,  // 19: portals.v1.NodeStreamService.Stream:input_type -> portals.v1.NodeMessage
+	3,  // 20: portals.v1.PodBindService.Bind:output_type -> portals.v1.BindResponse
+	4,  // 21: portals.v1.PodBindService.InjectSecrets:output_type -> portals.v1.InjectSecretsResponse
+	6,  // 22: portals.v1.PodBindService.Unbind:output_type -> portals.v1.UnbindResponse
+	8,  // 23: portals.v1.PodBindService.Get:output_type -> portals.v1.GetResponse
+	13, // 24: portals.v1.NodeStreamService.Stream:output_type -> portals.v1.RelayMessage
+	20, // [20:25] is the sub-list for method output_type
+	15, // [15:20] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_pkg_portals_v1_bind_proto_init() }
@@ -574,18 +1353,32 @@ func file_pkg_portals_v1_bind_proto_init() {
 		return
 	}
 	file_pkg_portals_v1_egress_proto_init()
+	file_pkg_portals_v1_bind_proto_msgTypes[8].OneofWrappers = []any{
+		(*NodeMessage_Declaration)(nil),
+		(*NodeMessage_Update)(nil),
+		(*NodeMessage_Answer)(nil),
+	}
+	file_pkg_portals_v1_bind_proto_msgTypes[12].OneofWrappers = []any{
+		(*RelayMessage_Push)(nil),
+	}
+	file_pkg_portals_v1_bind_proto_msgTypes[13].OneofWrappers = []any{
+		(*RelayPush_Policy)(nil),
+		(*RelayPush_Secrets)(nil),
+		(*RelayPush_Unbind)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_portals_v1_bind_proto_rawDesc), len(file_pkg_portals_v1_bind_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   9,
+			NumEnums:      1,
+			NumMessages:   15,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_pkg_portals_v1_bind_proto_goTypes,
 		DependencyIndexes: file_pkg_portals_v1_bind_proto_depIdxs,
+		EnumInfos:         file_pkg_portals_v1_bind_proto_enumTypes,
 		MessageInfos:      file_pkg_portals_v1_bind_proto_msgTypes,
 	}.Build()
 	File_pkg_portals_v1_bind_proto = out.File
