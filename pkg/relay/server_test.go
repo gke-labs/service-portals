@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	authenticationv1 "k8s.io/api/authentication/v1"
 )
 
 type fakeLookup struct {
@@ -1022,5 +1023,56 @@ func TestPush_MorePushesThanQueueHolds_AllArriveInOrder(t *testing.T) {
 		if got := msg.GetPush().GetPushId(); got != expectedID {
 			t.Fatalf("out of order at %d: expected %s, got %s", i, expectedID, got)
 		}
+	}
+}
+
+// TestTimeout_ServerToControllerDeadlineExceeded verifies that when a wait times out
+// in the routing core (Server.Push), the client-facing Controller translates the ErrTimeout
+// to codes.DeadlineExceeded because errors.Is(err, context.DeadlineExceeded) is true.
+func TestTimeout_ServerToControllerDeadlineExceeded(t *testing.T) {
+	s := NewServer(ServerConfig{
+		Lookup:      &fakeLookup{},
+		Identity:    fakeIdentity,
+		PushTimeout: 50 * time.Millisecond,
+	})
+
+	auth, err := NewAuthenticator(AuthenticatorConfig{
+		Audience:         testAudience,
+		NodeAgentAccount: testNodeAgent,
+		ClientAllowlist:  []string{testClientSA},
+		TokenReviews: &fakeTokenReviews{
+			reviewFn: func(ctx context.Context, tr *authenticationv1.TokenReview) (*authenticationv1.TokenReview, error) {
+				return &authenticationv1.TokenReview{
+					Status: authenticationv1.TokenReviewStatus{
+						Authenticated: true,
+						Audiences:     []string{testAudience},
+						User: authenticationv1.UserInfo{
+							Username: testClientSA,
+						},
+					},
+				}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewAuthenticator: %v", err)
+	}
+
+	ctrl, err := NewController(auth, s)
+	if err != nil {
+		t.Fatalf("NewController: %v", err)
+	}
+
+	ctx := incomingCtx("valid-token")
+	_, err = ctrl.Bind(ctx, &portalsv1.PodPolicy{
+		PodUid: "pod-timeout-test",
+		Policy: &portalsv1.EgressPolicy{},
+		Wait:   true,
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("expected codes.DeadlineExceeded, got %v: %v", status.Code(err), err)
 	}
 }
