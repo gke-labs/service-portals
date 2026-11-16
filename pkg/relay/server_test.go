@@ -69,7 +69,7 @@ func fakeIdentity(ctx context.Context) (string, time.Time, error) {
 
 func startTestRelay(t *testing.T, lookup PodLookup, pushTimeout time.Duration) (*Server, portalsv1.NodeStreamServiceClient) {
 	t.Helper()
-	s := New(Config{
+	s := NewServer(ServerConfig{
 		Lookup:      lookup,
 		Identity:    fakeIdentity,
 		PushTimeout: pushTimeout,
@@ -941,7 +941,7 @@ func TestPush_NonWaitingPushLivesForFullTimeout(t *testing.T) {
 // 15. Identity error is returned as is (Point 7 from review).
 func TestIdentity_ErrorReturnedAsIs(t *testing.T) {
 	expectedErr := status.Error(codes.PermissionDenied, "custom identity permission denied error")
-	s := New(Config{
+	s := NewServer(ServerConfig{
 		Lookup: &fakeLookup{},
 		Identity: func(ctx context.Context) (string, time.Time, error) {
 			return "", time.Time{}, expectedErr

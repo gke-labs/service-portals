@@ -108,7 +108,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:        testAudience,
 		ClientAllowlist: []string{testClientSA},
 		TokenReviews:    fakeTR,
@@ -179,7 +179,7 @@ func validTestPolicy() *portalsv1.EgressPolicy {
 
 func TestNewController_NilValidation(t *testing.T) {
 	fakeTR := &fakeTokenReviews{}
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:     testAudience,
 		TokenReviews: fakeTR,
 	})

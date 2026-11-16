@@ -42,8 +42,8 @@ type PodLookup interface {
 // IdentityFunc resolves the authenticated node and credential expiry for a stream.
 type IdentityFunc func(ctx context.Context) (node string, expiry time.Time, err error)
 
-// Config configures the bind relay server.
-type Config struct {
+// ServerConfig configures the bind relay server.
+type ServerConfig struct {
 	Lookup      PodLookup
 	Identity    IdentityFunc
 	PushTimeout time.Duration
@@ -80,8 +80,8 @@ type Server struct {
 	nextID  uint64
 }
 
-// New creates a new relay Server.
-func New(cfg Config) *Server {
+// NewServer creates a new relay Server.
+func NewServer(cfg ServerConfig) *Server {
 	timeout := cfg.PushTimeout
 	if timeout <= 0 {
 		timeout = defaultPushTimeout

@@ -46,8 +46,8 @@ type Caller struct {
 	ExpiresAt      time.Time
 }
 
-// Config configures an Authenticator.
-type Config struct {
+// AuthenticatorConfig configures an Authenticator.
+type AuthenticatorConfig struct {
 	// Audience is the required TokenReview audience for the relay.
 	Audience string
 
@@ -83,7 +83,7 @@ type Authenticator struct {
 }
 
 // NewAuthenticator constructs an Authenticator with the given configuration.
-func NewAuthenticator(cfg Config) (*Authenticator, error) {
+func NewAuthenticator(cfg AuthenticatorConfig) (*Authenticator, error) {
 	if cfg.Audience == "" {
 		return nil, errors.New("relay audience is required")
 	}

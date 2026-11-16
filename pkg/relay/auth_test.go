@@ -119,7 +119,7 @@ func TestNodeAgentToken_Success(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		TokenReviews:     fake,
@@ -160,7 +160,7 @@ func TestNodeAgentToken_ReturnedExpiry(t *testing.T) {
 	}
 
 	startTime := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		TokenReviews:     fake,
@@ -232,7 +232,7 @@ func TestNodeAgentToken_NoNodeNameRefused(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		TokenReviews:     fake,
@@ -269,7 +269,7 @@ func TestNodeAgentToken_WrongAccountRefused(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		TokenReviews:     fake,
@@ -306,7 +306,7 @@ func TestWrongAudienceRefused(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		TokenReviews:     fake,
@@ -344,7 +344,7 @@ func TestClientAllowlist_AcceptedAndRefused(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:        testAudience,
 		ClientAllowlist: []string{testClientSA},
 		TokenReviews:    fake,
@@ -376,7 +376,7 @@ func TestClientAllowlist_AcceptedAndRefused(t *testing.T) {
 
 func TestNoToken_Unauthenticated(t *testing.T) {
 	fake := &fakeTokenReviews{}
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		ClientAllowlist:  []string{testClientSA},
@@ -417,7 +417,7 @@ func TestEmptyAllowlistRefusesEveryone(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:        testAudience,
 		ClientAllowlist: []string{},
 		TokenReviews:    fake,
@@ -444,7 +444,7 @@ func TestTokenReviewError_Refuses(t *testing.T) {
 		},
 	}
 
-	auth1, err := NewAuthenticator(Config{
+	auth1, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		TokenReviews:     fakeErr,
@@ -476,7 +476,7 @@ func TestTokenReviewError_Refuses(t *testing.T) {
 		},
 	}
 
-	auth2, err := NewAuthenticator(Config{
+	auth2, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		TokenReviews:     fakeStatusErr,
@@ -521,7 +521,7 @@ func TestNoTokenInLogs(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:        testAudience,
 		ClientAllowlist: []string{testClientSA},
 		TokenReviews:    fake,
@@ -576,7 +576,7 @@ func TestCache_ExpiresNoLaterThanToken(t *testing.T) {
 	tokenExp := currentTime.Add(10 * time.Minute)
 	tokenWithExp := makeJWT(tokenExp)
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:        testAudience,
 		ClientAllowlist: []string{testClientSA},
 		TokenReviews:    fake,
@@ -646,7 +646,7 @@ func TestConcurrency_Race(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:         testAudience,
 		NodeAgentAccount: testNodeAgent,
 		ClientAllowlist:  []string{testClientSA},
@@ -707,7 +707,7 @@ func TestGRPCIntegration_MethodLogged(t *testing.T) {
 		},
 	}
 
-	auth, err := NewAuthenticator(Config{
+	auth, err := NewAuthenticator(AuthenticatorConfig{
 		Audience:        testAudience,
 		ClientAllowlist: []string{testClientSA},
 		TokenReviews:    fake,
