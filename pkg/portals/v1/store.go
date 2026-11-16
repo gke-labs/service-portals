@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"google.golang.org/grpc/codes"
@@ -191,4 +192,48 @@ func (s *BindingStore) ResolveSecret(podUID, name string) (Secret, bool) {
 		return Secret{}, false
 	}
 	return sec, true
+}
+
+// Acceptance reports the acceptance status of a pod UID and any missing secret names.
+// Accepted means the node holds the policy and every secret the policy names.
+func (s *BindingStore) Acceptance(podUID string) (AcceptanceStatus, []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entry, ok := s.pods[podUID]
+	if !ok || !entry.bound || entry.policy == nil {
+		return AcceptanceStatus_ACCEPTANCE_STATUS_PENDING, nil
+	}
+
+	var missing []string
+	seen := make(map[string]bool)
+	for _, rule := range entry.policy.GetRules() {
+		var effects *HttpRuleEffects
+		if rule.GetHttp() != nil {
+			effects = rule.GetHttp().GetEffects()
+		} else if rule.GetHttps() != nil {
+			effects = rule.GetHttps().GetEffects()
+		}
+		if effects == nil {
+			continue
+		}
+		for _, rh := range effects.GetReplaceHeaders() {
+			if rh == nil {
+				continue
+			}
+			name, err := parseCredentialURI(rh.GetCredentialUri())
+			if err != nil || name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			if _, ok := entry.secrets[name]; !ok {
+				missing = append(missing, name)
+			}
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		return AcceptanceStatus_ACCEPTANCE_STATUS_PENDING, missing
+	}
+	return AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED, nil
 }
