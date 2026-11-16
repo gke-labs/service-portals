@@ -1,0 +1,226 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: portalpolicies.portals.gke.io
+spec:
+  group: portals.gke.io
+  names:
+    kind: PortalPolicy
+    listKind: PortalPolicyList
+    plural: portalpolicies
+    singular: portalpolicy
+    shortNames:
+    - pp
+    - portalpol
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    additionalPrinterColumns:
+    - name: Ready
+      type: string
+      jsonPath: .status.conditions[?(@.type=="Ready")].status
+    - name: Selected-Pods
+      type: integer
+      jsonPath: .status.selectedPods
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+    schema:
+      openAPIV3Schema:
+        type: object
+        description: PortalPolicy defines per-pod routing rules, secret references, and default-deny egress policies for service-portals sidecars.
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            description: Specification of the desired behavior of the PortalPolicy.
+            required:
+            - podSelector
+            properties:
+              podSelector:
+                type: object
+                description: Label selector for pods to which this policy applies.
+                properties:
+                  matchLabels:
+                    type: object
+                    additionalProperties:
+                      type: string
+                  matchExpressions:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                      - key
+                      - operator
+                      properties:
+                        key:
+                          type: string
+                        operator:
+                          type: string
+                          enum:
+                          - In
+                          - NotIn
+                          - Exists
+                          - DoesNotExist
+                        values:
+                          type: array
+                          items:
+                            type: string
+              rules:
+                type: array
+                description: List of routing rules mapping hosts to upstreams with secret references.
+                items:
+                  type: object
+                  required:
+                  - host
+                  - secretRef
+                  properties:
+                    name:
+                      type: string
+                      description: Optional descriptive name for the rule.
+                    host:
+                      type: string
+                      description: The intercept hostname (e.g. github.backend). Must be a valid hostname.
+                      format: hostname
+                      pattern: ^([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])(\.([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\-]{0,61}[a-zA-Z0-9]))*$
+                    rewriteUrl:
+                      type: string
+                      description: The upstream URL to forward requests to (e.g. https://api.github.com).
+                    authHeader:
+                      type: string
+                      description: The header name used for injecting credentials (defaults to Authorization).
+                    secretRef:
+                      type: object
+                      description: Reference to a Kubernetes Secret in the same namespace containing the credential. Inline authToken is not permitted.
+                      required:
+                      - name
+                      - key
+                      properties:
+                        name:
+                          type: string
+                          description: Name of the Secret.
+                        key:
+                          type: string
+                          description: Key in the Secret containing the credential token.
+                    cacheTTL:
+                      type: string
+                      description: Optional response cache TTL (e.g. 10m).
+              egress:
+                type: object
+                description: Outbound network egress policies.
+                properties:
+                  defaultAction:
+                    type: string
+                    description: Action for unmatched outbound traffic (Deny or Allow).
+                    enum:
+                    - Deny
+                    - Allow
+                    - DENY
+                    - ALLOW
+                    default: Deny
+                  allowCIDRs:
+                    type: array
+                    description: CIDRs allowed for direct outbound communication (passed to ALLOW_CIDRS).
+                    items:
+                      type: string
+                  allowPorts:
+                    type: array
+                    description: Additional TCP ports allowed for direct outbound communication (passed to ALLOW_PORTS).
+                    items:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+                  dns:
+                    type: object
+                    description: DNS egress settings.
+                    properties:
+                      servers:
+                        type: array
+                        description: Allowed DNS server IPs (passed to DNS_SERVER_IPS).
+                        items:
+                          type: string
+                      allowMetadata:
+                        type: boolean
+                        description: Whether access to cloud instance metadata service (169.254.169.254) is permitted.
+              intercept:
+                type: object
+                description: Port interception settings for the pod.
+                properties:
+                  ports:
+                    type: array
+                    description: TCP ports to intercept and redirect to proxy (passed to INTERCEPT_PORTS).
+                    items:
+                      type: integer
+                      minimum: 1
+                      maximum: 65535
+              proxy:
+                type: object
+                description: Optional overrides for the sidecar proxy container.
+                properties:
+                  image:
+                    type: string
+                    description: Optional image override for the sidecar proxy container.
+                  resources:
+                    type: object
+                    description: Optional compute resource requirements for the sidecar proxy container.
+                    x-kubernetes-preserve-unknown-fields: true
+          status:
+            type: object
+            description: Most recently observed status of the PortalPolicy.
+            properties:
+              conditions:
+                type: array
+                description: List of status conditions for the policy.
+                items:
+                  type: object
+                  required:
+                  - type
+                  - status
+                  properties:
+                    type:
+                      type: string
+                      description: Type of condition (e.g. Ready, Invalid).
+                    status:
+                      type: string
+                      description: Status of condition (True, False, Unknown).
+                      enum:
+                      - "True"
+                      - "False"
+                      - "Unknown"
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                      description: Last time the condition transitioned.
+                    reason:
+                      type: string
+                      description: Unique, one-word, CamelCase reason for condition.
+                    message:
+                      type: string
+                      description: Human-readable message explaining condition details.
+              selectedPods:
+                type: integer
+                description: Total number of pods currently selected by this policy.
+                minimum: 0
