@@ -38,7 +38,10 @@ import (
 func newTestEnv(t *testing.T) (*PodMap, *portalsv1.BindingStore) {
 	t.Helper()
 	pm := NewPodMap()
-	store := portalsv1.NewBindingStore()
+	store, err := portalsv1.NewBindingStore("")
+	if err != nil {
+		t.Fatalf("failed to create BindingStore: %v", err)
+	}
 	return pm, store
 }
 

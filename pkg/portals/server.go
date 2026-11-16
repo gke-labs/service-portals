@@ -258,8 +258,13 @@ func Run(ctx context.Context, config Config) error {
 	if pm != nil {
 		store = config.BindingStore
 		if store == nil {
-			store = portalsv1.NewBindingStore()
+			var err error
+			store, err = portalsv1.NewBindingStore(os.Getenv("STORE_DIR"))
+			if err != nil {
+				return fmt.Errorf("failed to create binding store: %w", err)
+			}
 		}
+		pm.SetBindingStore(store)
 
 		// Security: The PodBindService gRPC API must bind exclusively to a private Unix domain
 		// socket reachable only by the proxy UID and root (mode 0600), never a TCP address.

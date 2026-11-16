@@ -20,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 )
 
 // PodInfo holds network metadata for an intercepted pod.
@@ -37,12 +39,21 @@ type PodMap struct {
 	mu       sync.RWMutex
 	byUID    map[string]*PodInfo
 	byIP     map[string]*PodInfo
+	store    *portalsv1.BindingStore
 	watchers []chan struct{}
 }
 
 // NewPodMap creates a new PodMap.
 func NewPodMap() *PodMap {
 	return &PodMap{byUID: make(map[string]*PodInfo), byIP: make(map[string]*PodInfo)}
+}
+
+// SetBindingStore associates a BindingStore with the PodMap so that pod removals
+// and synchronization update the store accordingly.
+func (pm *PodMap) SetBindingStore(store *portalsv1.BindingStore) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.store = store
 }
 
 func (pm *PodMap) addOrUpdateLocked(info *PodInfo) {
@@ -94,7 +105,6 @@ func (pm *PodMap) AddOrUpdatePod(info *PodInfo) {
 // RemovePod unregisters a pod by UID.
 func (pm *PodMap) RemovePod(uid string) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	if pod, ok := pm.byUID[uid]; ok {
 		for _, ip := range pod.IPs {
 			delete(pm.byIP, ip)
@@ -102,16 +112,23 @@ func (pm *PodMap) RemovePod(uid string) {
 		delete(pm.byUID, uid)
 		pm.notifyWatchersLocked()
 	}
+	store := pm.store
+	pm.mu.Unlock()
+
+	if store != nil {
+		store.RemovePod(uid)
+	}
 }
 
 // SynchronizePods updates the active pod map from a full sync list.
 func (pm *PodMap) SynchronizePods(pods []PodInfo) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	active := make(map[string]bool, len(pods))
+	activeUIDs := make([]string, 0, len(pods))
 	changed := false
 	for i := range pods {
 		active[pods[i].UID] = true
+		activeUIDs = append(activeUIDs, pods[i].UID)
 		if _, exists := pm.byUID[pods[i].UID]; !exists && pods[i].UID != "" {
 			changed = true
 		}
@@ -128,6 +145,12 @@ func (pm *PodMap) SynchronizePods(pods []PodInfo) {
 	}
 	if changed {
 		pm.notifyWatchersLocked()
+	}
+	store := pm.store
+	pm.mu.Unlock()
+
+	if store != nil {
+		store.DropAbsent(activeUIDs)
 	}
 }
 
