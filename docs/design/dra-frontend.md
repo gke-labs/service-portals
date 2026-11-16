@@ -10,7 +10,7 @@ The earlier spike rejected DRA. It tested DRA plus CDI hooks as the *interceptio
 
 Colleagues who work on DRA (John and Morten) suggested a different mapping: **one shared device per node**, standing for the node agent DaemonSet, with each opted-in pod consuming a share of it, possibly a nominal one. This document evaluates that mapping.
 
-The conclusion is that DRA is a good fit as the **API and scheduling layer**, and that it **does not replace NRI**. DRA decides *whether and where* a pod may run and records *what policy it gets*. NRI still installs the host-side rules, because DRA has no hook at the point where the pod's network namespace exists. This is the same split the DRA network driver DraNet uses.
+The conclusion is that DRA is a good fit as the **API and scheduling layer**, and that it **does not replace NRI**. DRA decides *whether and where* a pod may run. What the pod is allowed to reach is not DRA's to say: that is the egress policy bound to the pod's UID through the Service Portal Controller ([`service-portal-controller.md`](service-portal-controller.md)). NRI still installs the host-side rules, because DRA has no hook at the point where the pod's network namespace exists. This is the same split the DRA network driver DraNet uses.
 
 ## What DRA gives us
 
@@ -20,7 +20,7 @@ Claims in this section are checked against the Kubernetes documentation and sour
 
 2. **Fail-closed scheduling without a taint.** A pod with a claim is only scheduled to a node whose driver has published a matching device in a ResourceSlice. On the node, the kubelet calls the driver to prepare the claim and does not create the pod sandbox if that call fails. Today we rely on a taint that an external actor applies and removes, and a plugin restart leaves a window in which new pods start unprotected; that is the weakest item on the NRI acceptance bar. With DRA, "the agent is not ready" means "the pod stays Pending or fails to start", enforced by the scheduler and the kubelet.
 
-3. **Opt-in and policy as API objects.** Today a pod opts in with a label and selects policy with an annotation. A ResourceClaim is a typed object under RBAC, and its opaque device configuration can carry the policy reference. The claim's `status.reservedFor` and the prepare call give the node agent an authoritative record of which pod has which claim, supplied by the kubelet and not inferred from pod metadata.
+3. **Opt-in as an API object.** Today a pod opts in with a label. A ResourceClaim is a typed object under RBAC, and the claim's `status.reservedFor` and the prepare call give the node agent an authoritative record of which pod has which claim, supplied by the kubelet and not inferred from pod metadata. The claim says only "intercept this pod". It does not select the policy: policy and named secrets are pushed for the pod's UID by the component that created the sandbox, and letting the pod's own spec choose its policy would bring back the confused-deputy problem that the move away from policy annotations removed (see [`egress-policy.md`](egress-policy.md)).
 
 4. **Health as a scheduling signal.** A driver can taint its own device, so a node agent that detects a broken proxy can stop new intercepted pods from landing on the node.
 
@@ -37,7 +37,7 @@ So the proposal is DRA **and** NRI in one node agent, each doing the part it is 
 | Concern | Today (NRI only) | Proposed (DRA front end + NRI) |
 | :--- | :--- | :--- |
 | Opt-in | Pod label | Pod references a ResourceClaim (or template) |
-| Policy selection | Pod annotation | Claim device configuration |
+| Policy and secrets | Bound per pod UID through the Service Portal Controller; nothing is allowed until bound | Unchanged. The claim opts the pod in; it does not choose the policy |
 | Is the node ready? | Taint, applied and removed externally | ResourceSlice published by the agent; kubelet prepare call |
 | Agent down or restarting | New pods start unprotected until containerd reconnects | New pods do not start: prepare fails closed |
 | Which pods are opted in | Pod map built from NRI events | Prepared claims (kubelet-supplied), cross-checked in the NRI hook |
@@ -73,7 +73,7 @@ So CDI's role in this proposal is the narrow one in the table above: an optional
 **For**
 - Removes the taint gate and the restart window with machinery Kubernetes already has.
 - Opt-in becomes visible to the scheduler, to RBAC and to admission policy; "this namespace must be intercepted" becomes "pods here must carry this claim".
-- The claim is a natural place for per-pod policy and, later, quota.
+- The claim is a natural place for quota later. It is deliberately not where policy goes; policy stays with the bind call.
 - It is the mapping suggested by colleagues who work on DRA for a per-node shared service.
 
 **Against**
