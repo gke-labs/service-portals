@@ -169,6 +169,7 @@ The proxy intercepts the request, rewrites the destination to `https://generativ
 
 ## Documentation Index
 
+- **[Service Portal Controller](docs/controller.md)**: Deploying the controller and configuring sandbox egress policies and credentials.
 - **[Architecture & Security Model](docs/architecture.md)**: Threat model, trust model, MITM mechanics, iptables egress filtering, and "Duck Identity".
 - **[Roadmap: NRI Single-Mode Convergence](docs/roadmap.md)**: Transition plan to per-node NRI, acceptance criteria, and removal schedule for legacy modes.
 - **[Design & Decision Records](docs/design/README.md)**: Architectural decision records and spike evaluation reports.
