@@ -113,6 +113,16 @@ func (r *NodeResolver) Resolve(uid types.UID) Resolution {
 	return resolutionFromPod(pod)
 }
 
+// NodeForPod returns the node running the pod UID, or empty string if not scheduled or unknown.
+// Implements PodLookup.
+func (r *NodeResolver) NodeForPod(ctx context.Context, podUID string) (string, error) {
+	res := r.Resolve(types.UID(podUID))
+	if res.State == PodStateScheduled {
+		return res.Node, nil
+	}
+	return "", nil
+}
+
 func (r *NodeResolver) onAdd(obj any) {
 	if r.onChange != nil {
 		if pod := extractPod(obj); pod != nil {

@@ -82,11 +82,17 @@ func TestNodeResolver(t *testing.T) {
 	if res := resolver.Resolve(scheduledUID); res.State != PodStateScheduled || res.Node != "node-worker-1" {
 		t.Fatalf("expected scheduled pod to resolve to node-worker-1, got state=%v, node=%q", res.State, res.Node)
 	}
+	if node, err := resolver.NodeForPod(ctx, string(scheduledUID)); err != nil || node != "node-worker-1" {
+		t.Fatalf("expected NodeForPod to return node-worker-1, got node=%q, err=%v", node, err)
+	}
 
 	// 3. An unknown UID is unknown.
 	unknownUID := types.UID("uid-does-not-exist")
 	if res := resolver.Resolve(unknownUID); res.State != PodStateUnknown {
 		t.Fatalf("expected unknown UID to resolve to PodStateUnknown, got %v", res.State)
+	}
+	if node, err := resolver.NodeForPod(ctx, string(unknownUID)); err != nil || node != "" {
+		t.Fatalf("expected NodeForPod for unknown UID to return empty, got node=%q, err=%v", node, err)
 	}
 
 	// 4. An unscheduled pod resolves to "not scheduled" and a watcher is told when it is scheduled.

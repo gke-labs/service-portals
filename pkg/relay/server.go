@@ -32,7 +32,7 @@ import (
 const defaultPushTimeout = time.Minute
 
 // ErrTimeout indicates a push timed out before being accepted by the node.
-var ErrTimeout = errors.New("timed out waiting for node acceptance")
+var ErrTimeout = fmt.Errorf("timed out waiting for node acceptance: %w", context.DeadlineExceeded)
 
 // PodLookup returns the node running the specified pod UID.
 type PodLookup interface {
