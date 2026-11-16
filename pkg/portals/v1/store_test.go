@@ -526,3 +526,92 @@ func TestBindingStore_gRPCRegistration(t *testing.T) {
 	// Must not panic when registering (verifies testEmbeddedByValue)
 	RegisterPodBindServiceServer(grpcServer, store)
 }
+
+func TestBindingStore_Acceptance(t *testing.T) {
+	ctx := t.Context()
+	store := NewBindingStore()
+
+	// 1. Pod not bound
+	status, missing := store.Acceptance("pod-1")
+	if status != AcceptanceStatus_ACCEPTANCE_STATUS_PENDING || len(missing) != 0 {
+		t.Fatalf("expected PENDING with empty missing, got %v, %v", status, missing)
+	}
+
+	// 2. Policy naming no secrets is accepted on its own
+	noSecretsPolicy := &EgressPolicy{
+		Rules: []*EgressRule{
+			{Https: &HttpsRule{Hostnames: []string{"example.com"}}},
+		},
+	}
+	if _, err := store.Bind(ctx, &PodPolicy{PodUid: "pod-no-secrets", Policy: noSecretsPolicy}); err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+	status, missing = store.Acceptance("pod-no-secrets")
+	if status != AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED || len(missing) != 0 {
+		t.Fatalf("expected ACCEPTED for policy naming no secrets, got %v, %v", status, missing)
+	}
+
+	// 3. Policy naming secrets: pending until all secrets arrive
+	twoSecretsPolicy := &EgressPolicy{
+		Rules: []*EgressRule{
+			{
+				Https: &HttpsRule{
+					Hostnames: []string{"api.github.com"},
+					Effects: &HttpRuleEffects{
+						ReplaceHeaders: []*CredentialHeader{
+							{Header: "Authorization", CredentialUri: "secret://token-1"},
+							{Header: "X-Api-Key", CredentialUri: "secret://token-2"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if _, err := store.Bind(ctx, &PodPolicy{PodUid: "pod-1", Policy: twoSecretsPolicy}); err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	status, missing = store.Acceptance("pod-1")
+	if status != AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+		t.Fatalf("expected PENDING, got %v", status)
+	}
+	if len(missing) != 2 || missing[0] != "token-1" || missing[1] != "token-2" {
+		t.Fatalf("expected missing [token-1 token-2], got %v", missing)
+	}
+
+	// Inject one secret
+	if _, err := store.InjectSecrets(ctx, &PodSecrets{
+		PodUid:  "pod-1",
+		Secrets: map[string][]byte{"token-1": []byte("val-1")},
+	}); err != nil {
+		t.Fatalf("InjectSecrets failed: %v", err)
+	}
+	status, missing = store.Acceptance("pod-1")
+	if status != AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+		t.Fatalf("expected PENDING, got %v", status)
+	}
+	if len(missing) != 1 || missing[0] != "token-2" {
+		t.Fatalf("expected missing [token-2], got %v", missing)
+	}
+
+	// Inject all secrets
+	if _, err := store.InjectSecrets(ctx, &PodSecrets{
+		PodUid:  "pod-1",
+		Secrets: map[string][]byte{"token-1": []byte("val-1"), "token-2": []byte("val-2")},
+	}); err != nil {
+		t.Fatalf("InjectSecrets failed: %v", err)
+	}
+	status, missing = store.Acceptance("pod-1")
+	if status != AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED || len(missing) != 0 {
+		t.Fatalf("expected ACCEPTED, got %v, %v", status, missing)
+	}
+
+	// Unbind reverts to pending
+	if _, err := store.Unbind(ctx, &UnbindRequest{PodUid: "pod-1"}); err != nil {
+		t.Fatalf("Unbind failed: %v", err)
+	}
+	status, missing = store.Acceptance("pod-1")
+	if status != AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+		t.Fatalf("expected PENDING after unbind, got %v", status)
+	}
+}
