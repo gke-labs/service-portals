@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package relay
+package controller
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 // When wait is requested, a timeout waiting for node acceptance is reported
 // as an error for which errors.Is(err, context.DeadlineExceeded) is true.
 type Core interface {
-	Push(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error)
+	Push(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error)
 }
 
 // Controller serves PodBindService to clients, authorizing callers and routing pushes to nodes.
@@ -72,7 +72,7 @@ func (c *Controller) Bind(ctx context.Context, req *portalsv1.PodPolicy) (*porta
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
-	push := &portalsv1.RelayPush{Action: &portalsv1.RelayPush_Policy{Policy: req}}
+	push := &portalsv1.ControllerPush{Action: &portalsv1.ControllerPush_Policy{Policy: req}}
 	ans, err := c.push(ctx, caller, method, req.GetPodUid(), push, req.GetWait())
 	if err != nil {
 		return nil, err
@@ -99,7 +99,7 @@ func (c *Controller) InjectSecrets(ctx context.Context, req *portalsv1.PodSecret
 		return nil, status.Error(codes.InvalidArgument, "pod_uid cannot be empty")
 	}
 
-	push := &portalsv1.RelayPush{Action: &portalsv1.RelayPush_Secrets{Secrets: req}}
+	push := &portalsv1.ControllerPush{Action: &portalsv1.ControllerPush_Secrets{Secrets: req}}
 	ans, err := c.push(ctx, caller, method, req.GetPodUid(), push, req.GetWait())
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (c *Controller) Unbind(ctx context.Context, req *portalsv1.UnbindRequest) (
 		return nil, status.Error(codes.InvalidArgument, "pod_uid cannot be empty")
 	}
 
-	push := &portalsv1.RelayPush{Action: &portalsv1.RelayPush_Unbind{Unbind: req}}
+	push := &portalsv1.ControllerPush{Action: &portalsv1.ControllerPush_Unbind{Unbind: req}}
 	ans, err := c.push(ctx, caller, method, req.GetPodUid(), push, req.GetWait())
 	if err != nil {
 		return nil, err
@@ -152,7 +152,7 @@ func (c *Controller) Get(ctx context.Context, req *portalsv1.GetRequest) (*porta
 	return nil, status.Error(codes.Unimplemented, "get is not implemented: state lives on the node")
 }
 
-func (c *Controller) push(ctx context.Context, caller, method, podUID string, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+func (c *Controller) push(ctx context.Context, caller, method, podUID string, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 	ans, err := c.core.Push(ctx, push, wait)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {

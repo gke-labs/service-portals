@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package relay
+package controller
 
 import (
 	"bytes"
@@ -94,7 +94,7 @@ func incomingCtx(token string) context.Context {
 }
 
 const (
-	testAudience   = "https://relay.service-portals"
+	testAudience   = "https://controller.service-portals"
 	testNodeAgent  = "system:serviceaccount:service-portals:portal-node-agent"
 	testClientSA   = "system:serviceaccount:default:sandbox-controller"
 	otherClientSA  = "system:serviceaccount:default:unauthorized-client"

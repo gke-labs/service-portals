@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package relay
+package controller
 
 import (
 	"context"
@@ -59,7 +59,7 @@ type NodeResolver struct {
 }
 
 // NewNodeResolver creates a NodeResolver backed by a Pod informer.
-// The relay requires read-only RBAC permissions on pods (verbs: get, list, watch).
+// The controller requires read-only RBAC permissions on pods (verbs: get, list, watch).
 // The onChange callback is called whenever a pod's scheduling or node binding changes;
 // it must not block.
 func NewNodeResolver(client kubernetes.Interface, onChange func(types.UID)) (*NodeResolver, error) {

@@ -58,11 +58,11 @@ func TestPodSecrets_FmtRedaction(t *testing.T) {
 	}
 }
 
-func TestRelayPush_FmtRedaction(t *testing.T) {
-	const secretToken = "ghp_relay_push_super_secret_token_99999"
-	push := &RelayPush{
+func TestControllerPush_FmtRedaction(t *testing.T) {
+	const secretToken = "ghp_controller_push_super_secret_token_99999"
+	push := &ControllerPush{
 		PushId: "push-001",
-		Action: &RelayPush_Secrets{
+		Action: &ControllerPush_Secrets{
 			Secrets: &PodSecrets{
 				PodUid: "pod-5678",
 				Secrets: map[string][]byte{
@@ -72,17 +72,17 @@ func TestRelayPush_FmtRedaction(t *testing.T) {
 		},
 	}
 
-	// Verify that the proto descriptor marks the secrets field in RelayPush with debug_redact = true.
+	// Verify that the proto descriptor marks the secrets field in ControllerPush with debug_redact = true.
 	fd := push.ProtoReflect().Descriptor().Fields().ByName("secrets")
 	if fd == nil {
-		t.Fatal("secrets field not found in RelayPush descriptor")
+		t.Fatal("secrets field not found in ControllerPush descriptor")
 	}
 	opts, ok := fd.Options().(*descriptorpb.FieldOptions)
 	if !ok || !opts.GetDebugRedact() {
-		t.Errorf("expected secrets field in RelayPush to have debug_redact = true, got %v", opts.GetDebugRedact())
+		t.Errorf("expected secrets field in ControllerPush to have debug_redact = true, got %v", opts.GetDebugRedact())
 	}
 
-	// Verify that formatting RelayPush with fmt verbs does not leak secret token bytes.
+	// Verify that formatting ControllerPush with fmt verbs does not leak secret token bytes.
 	for _, text := range []string{
 		fmt.Sprint(push),
 		fmt.Sprintf("%v", push),
@@ -90,16 +90,16 @@ func TestRelayPush_FmtRedaction(t *testing.T) {
 		fmt.Sprintf("%s", push),
 	} {
 		if strings.Contains(text, secretToken) {
-			t.Errorf("fmt verb output of RelayPush (%q) leaked secret token", text)
+			t.Errorf("fmt verb output of ControllerPush (%q) leaked secret token", text)
 		}
 		if !strings.Contains(text, "[REDACTED]") {
-			t.Errorf("fmt verb output of RelayPush (%q) expected [REDACTED]", text)
+			t.Errorf("fmt verb output of ControllerPush (%q) expected [REDACTED]", text)
 		}
 	}
 
-	// Verify RelayMessage wrapping RelayPush also redacts secret token bytes.
-	msg := &RelayMessage{
-		Payload: &RelayMessage_Push{
+	// Verify ControllerMessage wrapping ControllerPush also redacts secret token bytes.
+	msg := &ControllerMessage{
+		Payload: &ControllerMessage_Push{
 			Push: push,
 		},
 	}
@@ -110,10 +110,10 @@ func TestRelayPush_FmtRedaction(t *testing.T) {
 		fmt.Sprintf("%s", msg),
 	} {
 		if strings.Contains(text, secretToken) {
-			t.Errorf("fmt verb output of RelayMessage (%q) leaked secret token", text)
+			t.Errorf("fmt verb output of ControllerMessage (%q) leaked secret token", text)
 		}
 		if !strings.Contains(text, "[REDACTED]") {
-			t.Errorf("fmt verb output of RelayMessage (%q) expected [REDACTED]", text)
+			t.Errorf("fmt verb output of ControllerMessage (%q) expected [REDACTED]", text)
 		}
 	}
 }
@@ -233,10 +233,10 @@ func TestMessages_RoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "RelayPush_Policy",
-			msg: &RelayPush{
+			name: "ControllerPush_Policy",
+			msg: &ControllerPush{
 				PushId: "push-policy-1",
-				Action: &RelayPush_Policy{
+				Action: &ControllerPush_Policy{
 					Policy: &PodPolicy{
 						PodUid:   "pod-1",
 						Identity: "user@example.com",
@@ -255,10 +255,10 @@ func TestMessages_RoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "RelayPush_Secrets",
-			msg: &RelayPush{
+			name: "ControllerPush_Secrets",
+			msg: &ControllerPush{
 				PushId: "push-secrets-1",
-				Action: &RelayPush_Secrets{
+				Action: &ControllerPush_Secrets{
 					Secrets: &PodSecrets{
 						PodUid: "pod-1",
 						Secrets: map[string][]byte{
@@ -270,10 +270,10 @@ func TestMessages_RoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "RelayPush_Unbind",
-			msg: &RelayPush{
+			name: "ControllerPush_Unbind",
+			msg: &ControllerPush{
 				PushId: "push-unbind-1",
-				Action: &RelayPush_Unbind{
+				Action: &ControllerPush_Unbind{
 					Unbind: &UnbindRequest{
 						PodUid: "pod-1",
 						Wait:   true,
@@ -282,12 +282,12 @@ func TestMessages_RoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name: "RelayMessage_Push",
-			msg: &RelayMessage{
-				Payload: &RelayMessage_Push{
-					Push: &RelayPush{
-						PushId: "push-relay-1",
-						Action: &RelayPush_Policy{
+			name: "ControllerMessage_Push",
+			msg: &ControllerMessage{
+				Payload: &ControllerMessage_Push{
+					Push: &ControllerPush{
+						PushId: "push-controller-1",
+						Action: &ControllerPush_Policy{
 							Policy: &PodPolicy{
 								PodUid: "pod-9",
 								Wait:   true,

@@ -56,18 +56,18 @@ func (x *PodSecrets) Format(f fmt.State, c rune) {
 
 // Format implements fmt.Formatter so secret token bytes are redacted when
 // formatted with fmt verbs (e.g. %v, %+v, %s).
-func (x *RelayPush) Format(f fmt.State, c rune) {
+func (x *ControllerPush) Format(f fmt.State, c rune) {
 	var b strings.Builder
 	if x == nil {
 		b.WriteString("<nil>")
 	} else {
 		fmt.Fprintf(&b, "push_id:%q", x.GetPushId())
 		switch act := x.GetAction().(type) {
-		case *RelayPush_Policy:
+		case *ControllerPush_Policy:
 			fmt.Fprintf(&b, " policy:<%v>", act.Policy)
-		case *RelayPush_Secrets:
+		case *ControllerPush_Secrets:
 			fmt.Fprintf(&b, " secrets:<%v>", act.Secrets)
-		case *RelayPush_Unbind:
+		case *ControllerPush_Unbind:
 			fmt.Fprintf(&b, " unbind:<%v>", act.Unbind)
 		}
 	}
@@ -78,13 +78,13 @@ func (x *RelayPush) Format(f fmt.State, c rune) {
 
 // Format implements fmt.Formatter so secret token bytes are redacted when
 // formatted with fmt verbs (e.g. %v, %+v, %s).
-func (x *RelayMessage) Format(f fmt.State, c rune) {
+func (x *ControllerMessage) Format(f fmt.State, c rune) {
 	var b strings.Builder
 	if x == nil {
 		b.WriteString("<nil>")
 	} else {
 		switch payload := x.GetPayload().(type) {
-		case *RelayMessage_Push:
+		case *ControllerMessage_Push:
 			fmt.Fprintf(&b, "push:<%v>", payload.Push)
 		}
 	}

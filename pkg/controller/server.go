@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package relay
+package controller
 
 import (
 	"context"
@@ -42,7 +42,7 @@ type PodLookup interface {
 // IdentityFunc resolves the authenticated node and credential expiry for a stream.
 type IdentityFunc func(ctx context.Context) (node string, expiry time.Time, err error)
 
-// ServerConfig configures the bind relay server.
+// ServerConfig configures the Server.
 type ServerConfig struct {
 	Lookup      PodLookup
 	Identity    IdentityFunc
@@ -50,7 +50,7 @@ type ServerConfig struct {
 }
 
 type pendingPush struct {
-	push       *portalsv1.RelayPush
+	push       *portalsv1.ControllerPush
 	podUID     string
 	sentStream *nodeStream
 	sentNode   string
@@ -80,7 +80,7 @@ type Server struct {
 	nextID  uint64
 }
 
-// NewServer creates a new relay Server.
+// NewServer creates a new Server.
 func NewServer(cfg ServerConfig) *Server {
 	timeout := cfg.PushTimeout
 	if timeout <= 0 {
@@ -155,7 +155,7 @@ func (s *Server) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 			dropped, push := p.dropped || p.sentStream != ns, p.push
 			s.mu.Unlock()
 			if !dropped && push != nil {
-				if err := stream.Send(&portalsv1.RelayMessage{Payload: &portalsv1.RelayMessage_Push{Push: push}}); err != nil {
+				if err := stream.Send(&portalsv1.ControllerMessage{Payload: &portalsv1.ControllerMessage_Push{Push: push}}); err != nil {
 					return err
 				}
 			}
@@ -221,7 +221,7 @@ func (s *Server) handleMessage(ns *nodeStream, msg *portalsv1.NodeMessage) {
 			case cur.answerCh <- ans:
 			default:
 			}
-			log.Printf("relay: pod %s node %s: outcome %s", ans.GetPodUid(), ns.node, ans.GetStatus())
+			log.Printf("controller: pod %s node %s: outcome %s", ans.GetPodUid(), ns.node, ans.GetStatus())
 		}
 	}
 	s.mu.Unlock()
@@ -230,12 +230,12 @@ func (s *Server) handleMessage(ns *nodeStream, msg *portalsv1.NodeMessage) {
 	}
 }
 
-// PodChanged notifies the relay that a pod's lookup information changed.
+// PodChanged notifies the server that a pod's lookup information changed.
 func (s *Server) PodChanged(podUID string) {
 	s.deliverPod(podUID)
 }
 
-func (s *Server) Push(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+func (s *Server) Push(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 	uid := podUID(push)
 	if uid == "" {
 		return nil, errors.New("missing pod UID")
@@ -252,7 +252,7 @@ func (s *Server) Push(ctx context.Context, push *portalsv1.RelayPush, wait bool)
 			case p.answerCh <- nil:
 			default:
 			}
-			log.Printf("relay: pod %s node %s: outcome timed out", p.podUID, p.sentNode)
+			log.Printf("controller: pod %s node %s: outcome timed out", p.podUID, p.sentNode)
 		}
 		s.mu.Unlock()
 	})
@@ -323,13 +323,13 @@ func (s *Server) dropPendingLocked(p *pendingPush) {
 	}
 }
 
-func podUID(p *portalsv1.RelayPush) string {
+func podUID(p *portalsv1.ControllerPush) string {
 	switch a := p.GetAction().(type) {
-	case *portalsv1.RelayPush_Policy:
+	case *portalsv1.ControllerPush_Policy:
 		return a.Policy.GetPodUid()
-	case *portalsv1.RelayPush_Secrets:
+	case *portalsv1.ControllerPush_Secrets:
 		return a.Secrets.GetPodUid()
-	case *portalsv1.RelayPush_Unbind:
+	case *portalsv1.ControllerPush_Unbind:
 		return a.Unbind.GetPodUid()
 	}
 	return ""

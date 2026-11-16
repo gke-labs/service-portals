@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package relay
+package controller
 
 import (
 	"context"
@@ -68,7 +68,7 @@ func fakeIdentity(ctx context.Context) (string, time.Time, error) {
 	return nodes[0], expiry, nil
 }
 
-func startTestRelay(t *testing.T, lookup PodLookup, pushTimeout time.Duration) (*Server, portalsv1.NodeStreamServiceClient) {
+func startTestServer(t *testing.T, lookup PodLookup, pushTimeout time.Duration) (*Server, portalsv1.NodeStreamServiceClient) {
 	t.Helper()
 	s := NewServer(ServerConfig{
 		Lookup:      lookup,
@@ -95,7 +95,7 @@ func startTestRelay(t *testing.T, lookup PodLookup, pushTimeout time.Duration) (
 
 	conn, err := grpc.Dial(l.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		t.Fatalf("failed to dial relay: %v", err)
+		t.Fatalf("failed to dial controller: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -121,7 +121,7 @@ func openStream(t *testing.T, client portalsv1.NodeStreamServiceClient, nodeName
 func TestPush_DeliveredAndAnswerLearned(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-1", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -134,9 +134,9 @@ func TestPush_DeliveredAndAnswerLearned(t *testing.T) {
 		t.Fatalf("failed to send declaration: %v", err)
 	}
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-1",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "test-user"},
 		},
 	}
@@ -179,14 +179,14 @@ func TestPush_DeliveredAndAnswerLearned(t *testing.T) {
 // 2. A push for a pod not yet scheduled is held and delivered when the lookup changes and the node declares the pod.
 func TestPush_HeldUntilScheduledAndDeclared(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-held",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-held", Identity: "test-user"},
 		},
 	}
@@ -207,7 +207,7 @@ func TestPush_HeldUntilScheduledAndDeclared(t *testing.T) {
 	default:
 	}
 
-	// Lookup changes: pod-held is now scheduled on node-1, notify relay.
+	// Lookup changes: pod-held is now scheduled on node-1, notify controller.
 	lookup.set("pod-held", "node-1")
 
 	// Node declares pod-held.
@@ -252,11 +252,11 @@ func TestPush_HeldUntilScheduledAndDeclared(t *testing.T) {
 // 3. A held push is dropped at the time limit and the waiting caller is told.
 func TestPush_DroppedAtTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, _ := startTestRelay(t, lookup, 50*time.Millisecond)
+	s, _ := startTestServer(t, lookup, 50*time.Millisecond)
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-timeout",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-never", Identity: "test-user"},
 		},
 	}
@@ -278,7 +278,7 @@ func TestPush_DroppedAtTimeout(t *testing.T) {
 func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-secure", "node-honest")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	streamRogue, cancelRogue := openStream(t, client, "node-rogue", "")
 	defer cancelRogue()
@@ -295,9 +295,9 @@ func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 	streamHonest, cancelHonest := openStream(t, client, "node-honest", "")
 	defer cancelHonest()
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-secure",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-secure", Identity: "test-user"},
 		},
 	}
@@ -308,7 +308,7 @@ func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 	}
 
 	// Verify rogue node never receives the push.
-	rogueReceived := make(chan *portalsv1.RelayMessage, 1)
+	rogueReceived := make(chan *portalsv1.ControllerMessage, 1)
 	go func() {
 		msg, _ := streamRogue.Recv()
 		if msg != nil {
@@ -344,7 +344,7 @@ func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 func TestPush_NodeRefusalWithReasonReachesCaller(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-refused", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -357,9 +357,9 @@ func TestPush_NodeRefusalWithReasonReachesCaller(t *testing.T) {
 		t.Fatalf("failed to send declaration: %v", err)
 	}
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-refused",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-refused", Identity: "test-user"},
 		},
 	}
@@ -397,7 +397,7 @@ func TestPush_NodeRefusalWithReasonReachesCaller(t *testing.T) {
 func TestStreamEnd_LosesRegistrationAndUndeliveredStayPending(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-undelivered", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 
@@ -426,9 +426,9 @@ func TestStreamEnd_LosesRegistrationAndUndeliveredStayPending(t *testing.T) {
 	}
 
 	// Push for pod-undelivered (which node-1 has not declared).
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-undelivered",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-undelivered", Identity: "test-user"},
 		},
 	}
@@ -460,7 +460,7 @@ func TestStreamEnd_LosesRegistrationAndUndeliveredStayPending(t *testing.T) {
 func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-rep", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream1, cancel1 := openStream(t, client, "node-1", "")
 	defer cancel1()
@@ -505,9 +505,9 @@ func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 	// Wait for stream2 to take over registration.
 	time.Sleep(30 * time.Millisecond)
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-rep",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-rep", Identity: "test-user"},
 		},
 	}
@@ -515,7 +515,7 @@ func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 		t.Fatalf("Push failed: %v", err)
 	}
 
-	stream1Msgs := make(chan *portalsv1.RelayMessage, 1)
+	stream1Msgs := make(chan *portalsv1.ControllerMessage, 1)
 	go func() {
 		msg, _ := stream1.Recv()
 		if msg != nil {
@@ -542,7 +542,7 @@ func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-sec-answer", "node-1")
-	s, client := startTestRelay(t, lookup, 50*time.Millisecond)
+	s, client := startTestServer(t, lookup, 50*time.Millisecond)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -557,9 +557,9 @@ func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 
 	// --- Part A: Dropped after answer ---
 	secretToken1 := []byte("secret-token-to-answer")
-	pushAnswer := &portalsv1.RelayPush{
+	pushAnswer := &portalsv1.ControllerPush{
 		PushId: "push-sec-answer",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
 				PodUid:  "pod-sec-answer",
 				Secrets: map[string][]byte{"tok": secretToken1},
@@ -608,9 +608,9 @@ func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 
 	// --- Part B: Dropped after timeout ---
 	secretToken2 := []byte("secret-token-to-timeout")
-	pushTimeout := &portalsv1.RelayPush{
+	pushTimeout := &portalsv1.ControllerPush{
 		PushId: "push-sec-timeout",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
 				PodUid:  "pod-sec-unscheduled",
 				Secrets: map[string][]byte{"tok": secretToken2},
@@ -635,7 +635,7 @@ func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 // 9. If identity has an expiry, stream ends at that time.
 func TestIdentityExpiry_EndsStream(t *testing.T) {
 	lookup := &fakeLookup{}
-	_, client := startTestRelay(t, lookup, time.Minute)
+	_, client := startTestServer(t, lookup, time.Minute)
 
 	expiryTime := time.Now().Add(60 * time.Millisecond).Format(time.RFC3339Nano)
 	stream, cancel := openStream(t, client, "node-expiring", expiryTime)
@@ -662,7 +662,7 @@ func TestIdentityExpiry_EndsStream(t *testing.T) {
 func TestPush_AnswerIgnoredFromDifferentNode(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-auth", "node-1")
-	s, client := startTestRelay(t, lookup, 150*time.Millisecond)
+	s, client := startTestServer(t, lookup, 150*time.Millisecond)
 
 	stream1, cancel1 := openStream(t, client, "node-1", "")
 	defer cancel1()
@@ -682,9 +682,9 @@ func TestPush_AnswerIgnoredFromDifferentNode(t *testing.T) {
 		},
 	})
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-auth-1",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-auth", Identity: "test-user"},
 		},
 	}
@@ -736,7 +736,7 @@ func TestPush_AnswerIgnoredFromDifferentNode(t *testing.T) {
 // 11. PodUpdate removal does not cancel pending push (Point 2 from review).
 func TestPodUpdate_RemovalDoesNotCancelPendingPush(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream1, cancel1 := openStream(t, client, "node-1", "")
 	defer cancel1()
@@ -747,9 +747,9 @@ func TestPodUpdate_RemovalDoesNotCancelPendingPush(t *testing.T) {
 		},
 	})
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-rem",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-rem", Identity: "test-user"},
 		},
 	}
@@ -782,23 +782,23 @@ func TestPodUpdate_RemovalDoesNotCancelPendingPush(t *testing.T) {
 func TestPush_MultiplePushesArriveInOrder(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-order", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
-	p1 := &portalsv1.RelayPush{
+	p1 := &portalsv1.ControllerPush{
 		PushId: "order-1-policy",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-order", Identity: "user-1"},
 		},
 	}
-	p2 := &portalsv1.RelayPush{
+	p2 := &portalsv1.ControllerPush{
 		PushId: "order-2-secrets",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{PodUid: "pod-order", Secrets: map[string][]byte{"k": []byte("v")}},
 		},
 	}
-	p3 := &portalsv1.RelayPush{
+	p3 := &portalsv1.ControllerPush{
 		PushId: "order-3-unbind",
-		Action: &portalsv1.RelayPush_Unbind{
+		Action: &portalsv1.ControllerPush_Unbind{
 			Unbind: &portalsv1.UnbindRequest{PodUid: "pod-order"},
 		},
 	}
@@ -839,7 +839,7 @@ func TestPush_MultiplePushesArriveInOrder(t *testing.T) {
 // 13. Dropped push is never written to stream (Point 4 from review).
 func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
@@ -857,18 +857,18 @@ func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 	s.mu.Lock()
 	ns := s.nodes["node-1"]
 	pDropped := &pendingPush{
-		push: &portalsv1.RelayPush{
+		push: &portalsv1.ControllerPush{
 			PushId: "push-dropped",
-			Action: &portalsv1.RelayPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
+			Action: &portalsv1.ControllerPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
 		},
 		podUID:     "pod-1",
 		sentStream: ns,
 		dropped:    true,
 	}
 	pValid := &pendingPush{
-		push: &portalsv1.RelayPush{
+		push: &portalsv1.ControllerPush{
 			PushId: "push-valid",
-			Action: &portalsv1.RelayPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
+			Action: &portalsv1.ControllerPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
 		},
 		podUID:     "pod-1",
 		sentStream: ns,
@@ -887,7 +887,7 @@ func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 		t.Fatalf("expected push-valid, but got dropped push: %v", msg.GetPush().GetPushId())
 	}
 
-	recvCh := make(chan *portalsv1.RelayMessage, 1)
+	recvCh := make(chan *portalsv1.ControllerMessage, 1)
 	go func() {
 		m, _ := stream.Recv()
 		if m != nil {
@@ -904,11 +904,11 @@ func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 // 14. Non-waiting push lives for the full time limit (Point 6 from review).
 func TestPush_NonWaitingPushLivesForFullTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
-	s, _ := startTestRelay(t, lookup, 200*time.Millisecond)
+	s, _ := startTestServer(t, lookup, 200*time.Millisecond)
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-short-ctx",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-short-ctx", Identity: "test-user"},
 		},
 	}
@@ -985,13 +985,13 @@ func TestIdentity_ErrorReturnedAsIs(t *testing.T) {
 func TestPush_MorePushesThanQueueHolds_AllArriveInOrder(t *testing.T) {
 	lookup := &fakeLookup{}
 	lookup.set("pod-large-queue", "node-1")
-	s, client := startTestRelay(t, lookup, time.Minute)
+	s, client := startTestServer(t, lookup, time.Minute)
 
 	const count = 100
 	for i := 0; i < count; i++ {
-		push := &portalsv1.RelayPush{
+		push := &portalsv1.ControllerPush{
 			PushId: fmt.Sprintf("queue-push-%03d", i),
-			Action: &portalsv1.RelayPush_Policy{
+			Action: &portalsv1.ControllerPush_Policy{
 				Policy: &portalsv1.PodPolicy{
 					PodUid:   "pod-large-queue",
 					Identity: fmt.Sprintf("user-%d", i),

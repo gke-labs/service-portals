@@ -38,13 +38,13 @@ service PodBindService {
   rpc Get(GetRequest) returns (GetResponse);
 }
 
-// NodeStreamService is served by the bind relay and dialed by node agents.
+// NodeStreamService is served by the Service Portal Controller and dialed by node agents.
 // A node agent opens one long-lived bidirectional stream over which it declares
 // which pods it has (and updates that as pods come and go), receives pushes from
-// the relay, and answers each push with accepted or refused and why.
+// the controller, and answers each push with accepted or refused and why.
 service NodeStreamService {
-  // Stream is the long-lived bidirectional stream between the node agent and relay.
-  rpc Stream(stream NodeMessage) returns (stream RelayMessage);
+  // Stream is the long-lived bidirectional stream between the node agent and controller.
+  rpc Stream(stream NodeMessage) returns (stream ControllerMessage);
 }
 
 // AcceptanceStatus describes the acceptance state of a pod's policy and secrets on a node.
@@ -60,7 +60,7 @@ enum AcceptanceStatus {
   // but is still waiting for required companion secrets or policy to arrive.
   ACCEPTANCE_STATUS_PENDING = 2;
 
-  // The push or binding was refused by the node or relay.
+  // The push or binding was refused by the node or controller.
   ACCEPTANCE_STATUS_REFUSED = 3;
 }
 
@@ -215,9 +215,9 @@ message GetResponse {
   string refusal_reason = 9;
 }
 
-// NodeMessage is sent by a node agent to the relay over the node stream.
+// NodeMessage is sent by a node agent to the controller over the node stream.
 message NodeMessage {
-  // The specific payload sent from the node agent to the relay.
+  // The specific payload sent from the node agent to the controller.
   // Set by the node agent.
   oneof payload {
     // Declares pods present on the node. Used on connect or reconnect to state
@@ -229,7 +229,7 @@ message NodeMessage {
     // Set by the node agent.
     PodUpdate update = 2;
 
-    // Answer to a push received from the relay.
+    // Answer to a push received from the controller.
     // Set by the node agent.
     PushAnswer answer = 3;
   }
@@ -243,7 +243,7 @@ message PodDeclaration {
   repeated string pod_uids = 1;
 }
 
-// PodUpdate informs the relay of pods added or removed on the node as pods come and go.
+// PodUpdate informs the controller of pods added or removed on the node as pods come and go.
 message PodUpdate {
   // Pod UIDs of pods that have arrived or started on the node.
   // Set by the node agent.
@@ -254,10 +254,10 @@ message PodUpdate {
   repeated string removed_pod_uids = 2;
 }
 
-// PushAnswer correlates with a push from the relay and reports whether the pod is
+// PushAnswer correlates with a push from the controller and reports whether the pod is
 // accepted or refused and why.
 message PushAnswer {
-  // push_id identifies which RelayPush this answer correlates with.
+  // push_id identifies which ControllerPush this answer correlates with.
   // Set by the node agent.
   string push_id = 1;
 
@@ -282,36 +282,36 @@ message PushAnswer {
   repeated string missing_secrets = 5;
 }
 
-// RelayMessage is sent by the relay to a connected node agent over the node stream.
-message RelayMessage {
-  // The specific payload sent from the relay to the node agent.
-  // Set by the relay.
+// ControllerMessage is sent by the controller to a connected node agent over the node stream.
+message ControllerMessage {
+  // The specific payload sent from the controller to the node agent.
+  // Set by the controller.
   oneof payload {
     // A push delivered to the node.
-    // Set by the relay.
-    RelayPush push = 1;
+    // Set by the controller.
+    ControllerPush push = 1;
   }
 }
 
-// RelayPush delivers a policy, full set of secrets, or unbind operation for a pod to the node.
-message RelayPush {
+// ControllerPush delivers a policy, full set of secrets, or unbind operation for a pod to the node.
+message ControllerPush {
   // push_id uniquely identifies this push so the node's answer can correlate with it.
-  // Set by the relay.
+  // Set by the controller.
   string push_id = 1;
 
   // The operation pushed to the node.
-  // Set by the relay.
+  // Set by the controller.
   oneof action {
     // Egress policy for a pod. Reuses PodPolicy.
-    // Set by the relay.
+    // Set by the controller.
     PodPolicy policy = 2;
 
     // Full set of secrets for a pod. Reuses PodSecrets.
-    // Set by the relay.
+    // Set by the controller.
     PodSecrets secrets = 3 [debug_redact = true];
 
     // Unbind a pod. Reuses UnbindRequest.
-    // Set by the relay.
+    // Set by the controller.
     UnbindRequest unbind = 4;
   }
 }
@@ -319,7 +319,7 @@ message RelayPush {
 // Node-local persistence
 
 // StoredBinding describes what is stored on the node for a pod binding across proxy restarts.
-// This message represents persisted node-local state, not something clients or relay send.
+// This message represents persisted node-local state, not something clients or controller send.
 // Note: protobuf-go does not honour debug_redact in String() or prototext, so this
 // message must never be logged or passed to a logger as a value; Format only
 // covers fmt verbs.

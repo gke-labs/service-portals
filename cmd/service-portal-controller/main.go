@@ -27,8 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gke-labs/service-portals/pkg/controller"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
-	"github.com/gke-labs/service-portals/pkg/relay"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -118,7 +118,7 @@ func run(ctx context.Context, cfg Config, kubeClient kubernetes.Interface, lis n
 		return fmt.Errorf("accessing Kubernetes API: %w", err)
 	}
 
-	auth, err := relay.NewAuthenticator(relay.AuthenticatorConfig{
+	auth, err := controller.NewAuthenticator(controller.AuthenticatorConfig{
 		Audience:         cfg.Audience,
 		NodeAgentAccount: cfg.NodeAgentAccount,
 		ClientAllowlist:  cfg.ClientAllowlist,
@@ -128,8 +128,8 @@ func run(ctx context.Context, cfg Config, kubeClient kubernetes.Interface, lis n
 		return fmt.Errorf("creating authenticator: %w", err)
 	}
 
-	var routingServer *relay.Server
-	resolver, err := relay.NewNodeResolver(kubeClient, func(uid types.UID) {
+	var routingServer *controller.Server
+	resolver, err := controller.NewNodeResolver(kubeClient, func(uid types.UID) {
 		if routingServer != nil {
 			routingServer.PodChanged(string(uid))
 		}
@@ -138,13 +138,13 @@ func run(ctx context.Context, cfg Config, kubeClient kubernetes.Interface, lis n
 		return fmt.Errorf("creating node resolver: %w", err)
 	}
 
-	routingServer = relay.NewServer(relay.ServerConfig{
+	routingServer = controller.NewServer(controller.ServerConfig{
 		Lookup:      resolver,
 		Identity:    auth.AuthorizeNodeAgent,
 		PushTimeout: cfg.PushTimeout,
 	})
 
-	ctrl, err := relay.NewController(auth, routingServer)
+	ctrl, err := controller.NewController(auth, routingServer)
 	if err != nil {
 		return fmt.Errorf("creating controller: %w", err)
 	}
