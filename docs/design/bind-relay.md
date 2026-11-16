@@ -29,7 +29,7 @@ controller ──push(pod UID, policy / secrets, wait?)──▶ bind relay ◀�
 
 ### The node holds the state
 
-The node agent is the source of truth for the pods on its node. It keeps policy and secrets in memory for enforcement, as today, and also writes them to a protected location on local disk so that a node proxy restart restores them without anyone re-pushing.
+The node agent is the source of truth for the pods on its node. It keeps policy and secrets in memory for enforcement, as today, and also writes them to a protected location on the node (see Security for where) so that a node proxy restart or update restores them without anyone re-pushing.
 
 The relay is a router, not a store. It holds a push only until the node has accepted it, then forgets it. Consequences:
 
@@ -59,7 +59,18 @@ A push may ask to wait. The call then returns only when the node has accepted, o
 - **Clients are authorised.** Pushing policy and secrets for a pod is a privileged act. Clients authenticate, and an allowlist says who may push; an empty allowlist allows nobody. Whether authorisation is narrower than "may push for any pod" (per namespace, for example) is an open question.
 - **Fail closed everywhere.** A pod with no accepted policy reaches nothing. A relay with no route to the node holds or fails the push; it never reports acceptance it did not get.
 - **Secrets are never logged**, by the relay or the node, and the relay keeps them in memory only and only while a push is pending.
-- **Secrets on the node's disk.** The node already holds every secret for its pods in memory, and root on the node can read them there, so persisting them does not widen who can obtain them at run time. It does add exposure at rest (disk images, backups, a reused disk). The location must be readable only by the proxy's user, outside any path a sandbox can mount, and removed with the pod. Whether to use a memory-backed filesystem, which survives a proxy restart but not a node reboot, is an open question.
+- **Where the node keeps them.** The node already holds every secret for its pods in memory, and root on the node can read them there, so writing them to a file does not widen who can obtain them at run time. The question is what survives which failure, and what is left at rest:
+
+  | Where | Agent crash or container restart | Agent update (DaemonSet replaces the pod) | Node reboot | Left on persistent disk |
+  |---|---|---|---|---|
+  | Process memory (today) | lost | lost | lost | no |
+  | Memory-backed `emptyDir` | kept | lost | lost | no |
+  | `hostPath` on the node's memory-backed `/run` | kept | kept | lost | no |
+  | `hostPath` on disk | kept | kept | kept | yes |
+
+  A memory-backed filesystem belongs to the mount, not to the process, so a crash does not lose it. An `emptyDir` belongs to the pod, so an update, which replaces the pod, does lose it. A host path under `/run` belongs to the node and survives both.
+
+  **Recommendation:** a host path under `/run`, beside the existing sockets in `/run/service-portal`, readable only by the proxy's user, outside any path a sandbox can mount, with a pod's entries removed when the pod goes away. It survives the two common cases (a crash and an update) and never writes a secret to persistent disk. A node reboot loses it; after a reboot the pods on that node have been restarted as well, are denied until bound again, and the controller pushes again as it would for a new pod. On start the node agent drops entries for pods that no longer exist.
 - **Nothing new listens on the node.** Node agents only dial out.
 
 ## What changes for existing pieces
@@ -84,7 +95,7 @@ A push may ask to wait. The call then returns only when the node has accepted, o
 ## Open questions
 
 1. **Node identity.** How does a node agent prove which node it is? Candidates are a projected service account token checked with TokenReview, if the token can be tied to the node the agent's pod runs on, or per-node client certificates. Not yet verified: whether bound service account tokens carry the node name on the Kubernetes versions we target.
-2. **At rest on the node.** Disk or a memory-backed filesystem; and whether to encrypt, given the key would have to live on the same node.
+2. **Node reboot.** With state under `/run`, a reboot loses bindings and the controller must push again. Is that acceptable, or do some users need bindings to survive a reboot, which means persistent disk and the at-rest exposure that comes with it?
 3. **More than one relay replica.** A node is connected to one replica; a client may reach another. A single replica with leader election is the simple answer; routing between replicas is more work.
 4. **Time limit for pending pushes.** How long the relay holds a push for a pod that has not arrived, and whether the client can set it.
 5. **Client authorisation scope.** Any pod, or limited by namespace or by who created the pod.
@@ -94,7 +105,7 @@ A push may ask to wait. The call then returns only when the node has accepted, o
 
 Each step is one issue and one small PR:
 
-1. Node agent persists its `BindingStore` to a protected local path and restores it on start; removes a pod's entries when the pod goes away. Useful on its own, with the existing socket.
+1. Node agent keeps its `BindingStore` in a protected host path under `/run` and restores it on start; removes a pod's entries when the pod goes away. Useful on its own, with the existing socket.
 2. Proto for the node-facing stream: declare pods, receive pushes, acknowledge.
 3. Relay: accept node connections, route a push to a connected node, pending pushes with a time limit. In-process tests, no Kubernetes yet.
 4. Relay checks pod to node against the Kubernetes API, and authenticates nodes.
