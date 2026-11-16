@@ -27,8 +27,8 @@ import (
 	"syscall"
 	"time"
 
-	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"github.com/gke-labs/service-portals/pkg/controller"
+	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

@@ -237,11 +237,11 @@ func TestWiredController(t *testing.T) {
 			}
 			var uid string
 			switch a := push.GetAction().(type) {
-			case *portalsv1.RelayPush_Policy:
+			case *portalsv1.ControllerPush_Policy:
 				uid = a.Policy.GetPodUid()
-			case *portalsv1.RelayPush_Secrets:
+			case *portalsv1.ControllerPush_Secrets:
 				uid = a.Secrets.GetPodUid()
-			case *portalsv1.RelayPush_Unbind:
+			case *portalsv1.ControllerPush_Unbind:
 				uid = a.Unbind.GetPodUid()
 			}
 			_ = stream.Send(&portalsv1.NodeMessage{

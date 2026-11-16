@@ -47,7 +47,7 @@ const (
 	// The push is held pending delivery to the node, or the node holds the policy/secrets
 	// but is still waiting for required companion secrets or policy to arrive.
 	AcceptanceStatus_ACCEPTANCE_STATUS_PENDING AcceptanceStatus = 2
-	// The push or binding was refused by the node or relay.
+	// The push or binding was refused by the node or controller.
 	AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED AcceptanceStatus = 3
 )
 
@@ -697,10 +697,10 @@ func (x *GetResponse) GetRefusalReason() string {
 	return ""
 }
 
-// NodeMessage is sent by a node agent to the relay over the node stream.
+// NodeMessage is sent by a node agent to the controller over the node stream.
 type NodeMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The specific payload sent from the node agent to the relay.
+	// The specific payload sent from the node agent to the controller.
 	// Set by the node agent.
 	//
 	// Types that are valid to be assigned to Payload:
@@ -795,7 +795,7 @@ type NodeMessage_Update struct {
 }
 
 type NodeMessage_Answer struct {
-	// Answer to a push received from the relay.
+	// Answer to a push received from the controller.
 	// Set by the node agent.
 	Answer *PushAnswer `protobuf:"bytes,3,opt,name=answer,proto3,oneof"`
 }
@@ -854,7 +854,7 @@ func (x *PodDeclaration) GetPodUids() []string {
 	return nil
 }
 
-// PodUpdate informs the relay of pods added or removed on the node as pods come and go.
+// PodUpdate informs the controller of pods added or removed on the node as pods come and go.
 type PodUpdate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Pod UIDs of pods that have arrived or started on the node.
@@ -911,11 +911,11 @@ func (x *PodUpdate) GetRemovedPodUids() []string {
 	return nil
 }
 
-// PushAnswer correlates with a push from the relay and reports whether the pod is
+// PushAnswer correlates with a push from the controller and reports whether the pod is
 // accepted or refused and why.
 type PushAnswer struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// push_id identifies which RelayPush this answer correlates with.
+	// push_id identifies which ControllerPush this answer correlates with.
 	// Set by the node agent.
 	PushId string `protobuf:"bytes,1,opt,name=push_id,json=pushId,proto3" json:"push_id,omitempty"`
 	// Pod UID this answer applies to.
@@ -1003,34 +1003,34 @@ func (x *PushAnswer) GetMissingSecrets() []string {
 	return nil
 }
 
-// RelayMessage is sent by the relay to a connected node agent over the node stream.
-type RelayMessage struct {
+// ControllerMessage is sent by the controller to a connected node agent over the node stream.
+type ControllerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The specific payload sent from the relay to the node agent.
-	// Set by the relay.
+	// The specific payload sent from the controller to the node agent.
+	// Set by the controller.
 	//
 	// Types that are valid to be assigned to Payload:
 	//
-	//	*RelayMessage_Push
-	Payload       isRelayMessage_Payload `protobuf_oneof:"payload"`
+	//	*ControllerMessage_Push
+	Payload       isControllerMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RelayMessage) Reset() {
-	*x = RelayMessage{}
+func (x *ControllerMessage) Reset() {
+	*x = ControllerMessage{}
 	mi := &file_pkg_portals_v1_bind_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RelayMessage) String() string {
+func (x *ControllerMessage) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RelayMessage) ProtoMessage() {}
+func (*ControllerMessage) ProtoMessage() {}
 
-func (x *RelayMessage) ProtoReflect() protoreflect.Message {
+func (x *ControllerMessage) ProtoReflect() protoreflect.Message {
 	mi := &file_pkg_portals_v1_bind_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1042,72 +1042,72 @@ func (x *RelayMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RelayMessage.ProtoReflect.Descriptor instead.
-func (*RelayMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use ControllerMessage.ProtoReflect.Descriptor instead.
+func (*ControllerMessage) Descriptor() ([]byte, []int) {
 	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{12}
 }
 
-func (x *RelayMessage) GetPayload() isRelayMessage_Payload {
+func (x *ControllerMessage) GetPayload() isControllerMessage_Payload {
 	if x != nil {
 		return x.Payload
 	}
 	return nil
 }
 
-func (x *RelayMessage) GetPush() *RelayPush {
+func (x *ControllerMessage) GetPush() *ControllerPush {
 	if x != nil {
-		if x, ok := x.Payload.(*RelayMessage_Push); ok {
+		if x, ok := x.Payload.(*ControllerMessage_Push); ok {
 			return x.Push
 		}
 	}
 	return nil
 }
 
-type isRelayMessage_Payload interface {
-	isRelayMessage_Payload()
+type isControllerMessage_Payload interface {
+	isControllerMessage_Payload()
 }
 
-type RelayMessage_Push struct {
+type ControllerMessage_Push struct {
 	// A push delivered to the node.
-	// Set by the relay.
-	Push *RelayPush `protobuf:"bytes,1,opt,name=push,proto3,oneof"`
+	// Set by the controller.
+	Push *ControllerPush `protobuf:"bytes,1,opt,name=push,proto3,oneof"`
 }
 
-func (*RelayMessage_Push) isRelayMessage_Payload() {}
+func (*ControllerMessage_Push) isControllerMessage_Payload() {}
 
-// RelayPush delivers a policy, full set of secrets, or unbind operation for a pod to the node.
-type RelayPush struct {
+// ControllerPush delivers a policy, full set of secrets, or unbind operation for a pod to the node.
+type ControllerPush struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// push_id uniquely identifies this push so the node's answer can correlate with it.
-	// Set by the relay.
+	// Set by the controller.
 	PushId string `protobuf:"bytes,1,opt,name=push_id,json=pushId,proto3" json:"push_id,omitempty"`
 	// The operation pushed to the node.
-	// Set by the relay.
+	// Set by the controller.
 	//
 	// Types that are valid to be assigned to Action:
 	//
-	//	*RelayPush_Policy
-	//	*RelayPush_Secrets
-	//	*RelayPush_Unbind
-	Action        isRelayPush_Action `protobuf_oneof:"action"`
+	//	*ControllerPush_Policy
+	//	*ControllerPush_Secrets
+	//	*ControllerPush_Unbind
+	Action        isControllerPush_Action `protobuf_oneof:"action"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RelayPush) Reset() {
-	*x = RelayPush{}
+func (x *ControllerPush) Reset() {
+	*x = ControllerPush{}
 	mi := &file_pkg_portals_v1_bind_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RelayPush) String() string {
+func (x *ControllerPush) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RelayPush) ProtoMessage() {}
+func (*ControllerPush) ProtoMessage() {}
 
-func (x *RelayPush) ProtoReflect() protoreflect.Message {
+func (x *ControllerPush) ProtoReflect() protoreflect.Message {
 	mi := &file_pkg_portals_v1_bind_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1119,82 +1119,82 @@ func (x *RelayPush) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RelayPush.ProtoReflect.Descriptor instead.
-func (*RelayPush) Descriptor() ([]byte, []int) {
+// Deprecated: Use ControllerPush.ProtoReflect.Descriptor instead.
+func (*ControllerPush) Descriptor() ([]byte, []int) {
 	return file_pkg_portals_v1_bind_proto_rawDescGZIP(), []int{13}
 }
 
-func (x *RelayPush) GetPushId() string {
+func (x *ControllerPush) GetPushId() string {
 	if x != nil {
 		return x.PushId
 	}
 	return ""
 }
 
-func (x *RelayPush) GetAction() isRelayPush_Action {
+func (x *ControllerPush) GetAction() isControllerPush_Action {
 	if x != nil {
 		return x.Action
 	}
 	return nil
 }
 
-func (x *RelayPush) GetPolicy() *PodPolicy {
+func (x *ControllerPush) GetPolicy() *PodPolicy {
 	if x != nil {
-		if x, ok := x.Action.(*RelayPush_Policy); ok {
+		if x, ok := x.Action.(*ControllerPush_Policy); ok {
 			return x.Policy
 		}
 	}
 	return nil
 }
 
-func (x *RelayPush) GetSecrets() *PodSecrets {
+func (x *ControllerPush) GetSecrets() *PodSecrets {
 	if x != nil {
-		if x, ok := x.Action.(*RelayPush_Secrets); ok {
+		if x, ok := x.Action.(*ControllerPush_Secrets); ok {
 			return x.Secrets
 		}
 	}
 	return nil
 }
 
-func (x *RelayPush) GetUnbind() *UnbindRequest {
+func (x *ControllerPush) GetUnbind() *UnbindRequest {
 	if x != nil {
-		if x, ok := x.Action.(*RelayPush_Unbind); ok {
+		if x, ok := x.Action.(*ControllerPush_Unbind); ok {
 			return x.Unbind
 		}
 	}
 	return nil
 }
 
-type isRelayPush_Action interface {
-	isRelayPush_Action()
+type isControllerPush_Action interface {
+	isControllerPush_Action()
 }
 
-type RelayPush_Policy struct {
+type ControllerPush_Policy struct {
 	// Egress policy for a pod. Reuses PodPolicy.
-	// Set by the relay.
+	// Set by the controller.
 	Policy *PodPolicy `protobuf:"bytes,2,opt,name=policy,proto3,oneof"`
 }
 
-type RelayPush_Secrets struct {
+type ControllerPush_Secrets struct {
 	// Full set of secrets for a pod. Reuses PodSecrets.
-	// Set by the relay.
+	// Set by the controller.
 	Secrets *PodSecrets `protobuf:"bytes,3,opt,name=secrets,proto3,oneof"`
 }
 
-type RelayPush_Unbind struct {
+type ControllerPush_Unbind struct {
 	// Unbind a pod. Reuses UnbindRequest.
-	// Set by the relay.
+	// Set by the controller.
 	Unbind *UnbindRequest `protobuf:"bytes,4,opt,name=unbind,proto3,oneof"`
 }
 
-func (*RelayPush_Policy) isRelayPush_Action() {}
+func (*ControllerPush_Policy) isControllerPush_Action() {}
 
-func (*RelayPush_Secrets) isRelayPush_Action() {}
+func (*ControllerPush_Secrets) isControllerPush_Action() {}
 
-func (*RelayPush_Unbind) isRelayPush_Action() {}
+func (*ControllerPush_Unbind) isControllerPush_Action() {}
 
 // StoredBinding describes what is stored on the node for a pod binding across proxy restarts.
-// This message represents persisted node-local state, not something clients or relay send.
+// This message represents persisted node-local state, not something clients or controller send.
 // Note: protobuf-go does not honour debug_redact in String() or prototext, so this
 // message must never be logged or passed to a logger as a value; Format only
 // covers fmt verbs.
@@ -1344,11 +1344,11 @@ const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\apod_uid\x18\x02 \x01(\tR\x06podUid\x124\n" +
 	"\x06status\x18\x03 \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
 	"\x0erefusal_reason\x18\x04 \x01(\tR\rrefusalReason\x12'\n" +
-	"\x0fmissing_secrets\x18\x05 \x03(\tR\x0emissingSecrets\"F\n" +
-	"\fRelayMessage\x12+\n" +
-	"\x04push\x18\x01 \x01(\v2\x15.portals.v1.RelayPushH\x00R\x04pushB\t\n" +
-	"\apayload\"\xcd\x01\n" +
-	"\tRelayPush\x12\x17\n" +
+	"\x0fmissing_secrets\x18\x05 \x03(\tR\x0emissingSecrets\"P\n" +
+	"\x11ControllerMessage\x120\n" +
+	"\x04push\x18\x01 \x01(\v2\x1a.portals.v1.ControllerPushH\x00R\x04pushB\t\n" +
+	"\apayload\"\xd2\x01\n" +
+	"\x0eControllerPush\x12\x17\n" +
 	"\apush_id\x18\x01 \x01(\tR\x06pushId\x12/\n" +
 	"\x06policy\x18\x02 \x01(\v2\x15.portals.v1.PodPolicyH\x00R\x06policy\x127\n" +
 	"\asecrets\x18\x03 \x01(\v2\x16.portals.v1.PodSecretsB\x03\x80\x01\x01H\x00R\asecrets\x123\n" +
@@ -1372,9 +1372,9 @@ const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\x04Bind\x12\x15.portals.v1.PodPolicy\x1a\x18.portals.v1.BindResponse\x12J\n" +
 	"\rInjectSecrets\x12\x16.portals.v1.PodSecrets\x1a!.portals.v1.InjectSecretsResponse\x12?\n" +
 	"\x06Unbind\x12\x19.portals.v1.UnbindRequest\x1a\x1a.portals.v1.UnbindResponse\x126\n" +
-	"\x03Get\x12\x16.portals.v1.GetRequest\x1a\x17.portals.v1.GetResponse2T\n" +
-	"\x11NodeStreamService\x12?\n" +
-	"\x06Stream\x12\x17.portals.v1.NodeMessage\x1a\x18.portals.v1.RelayMessage(\x010\x01B>Z<github.com/gke-labs/service-portals/pkg/portals/v1;portalsv1b\x06proto3"
+	"\x03Get\x12\x16.portals.v1.GetRequest\x1a\x17.portals.v1.GetResponse2Y\n" +
+	"\x11NodeStreamService\x12D\n" +
+	"\x06Stream\x12\x17.portals.v1.NodeMessage\x1a\x1d.portals.v1.ControllerMessage(\x010\x01B>Z<github.com/gke-labs/service-portals/pkg/portals/v1;portalsv1b\x06proto3"
 
 var (
 	file_pkg_portals_v1_bind_proto_rawDescOnce sync.Once
@@ -1404,8 +1404,8 @@ var file_pkg_portals_v1_bind_proto_goTypes = []any{
 	(*PodDeclaration)(nil),        // 10: portals.v1.PodDeclaration
 	(*PodUpdate)(nil),             // 11: portals.v1.PodUpdate
 	(*PushAnswer)(nil),            // 12: portals.v1.PushAnswer
-	(*RelayMessage)(nil),          // 13: portals.v1.RelayMessage
-	(*RelayPush)(nil),             // 14: portals.v1.RelayPush
+	(*ControllerMessage)(nil),     // 13: portals.v1.ControllerMessage
+	(*ControllerPush)(nil),        // 14: portals.v1.ControllerPush
 	(*StoredBinding)(nil),         // 15: portals.v1.StoredBinding
 	nil,                           // 16: portals.v1.PodSecrets.SecretsEntry
 	nil,                           // 17: portals.v1.StoredBinding.SecretsEntry
@@ -1423,10 +1423,10 @@ var file_pkg_portals_v1_bind_proto_depIdxs = []int32{
 	11, // 8: portals.v1.NodeMessage.update:type_name -> portals.v1.PodUpdate
 	12, // 9: portals.v1.NodeMessage.answer:type_name -> portals.v1.PushAnswer
 	0,  // 10: portals.v1.PushAnswer.status:type_name -> portals.v1.AcceptanceStatus
-	14, // 11: portals.v1.RelayMessage.push:type_name -> portals.v1.RelayPush
-	1,  // 12: portals.v1.RelayPush.policy:type_name -> portals.v1.PodPolicy
-	2,  // 13: portals.v1.RelayPush.secrets:type_name -> portals.v1.PodSecrets
-	5,  // 14: portals.v1.RelayPush.unbind:type_name -> portals.v1.UnbindRequest
+	14, // 11: portals.v1.ControllerMessage.push:type_name -> portals.v1.ControllerPush
+	1,  // 12: portals.v1.ControllerPush.policy:type_name -> portals.v1.PodPolicy
+	2,  // 13: portals.v1.ControllerPush.secrets:type_name -> portals.v1.PodSecrets
+	5,  // 14: portals.v1.ControllerPush.unbind:type_name -> portals.v1.UnbindRequest
 	18, // 15: portals.v1.StoredBinding.policy:type_name -> portals.v1.EgressPolicy
 	17, // 16: portals.v1.StoredBinding.secrets:type_name -> portals.v1.StoredBinding.SecretsEntry
 	1,  // 17: portals.v1.PodBindService.Bind:input_type -> portals.v1.PodPolicy
@@ -1438,7 +1438,7 @@ var file_pkg_portals_v1_bind_proto_depIdxs = []int32{
 	4,  // 23: portals.v1.PodBindService.InjectSecrets:output_type -> portals.v1.InjectSecretsResponse
 	6,  // 24: portals.v1.PodBindService.Unbind:output_type -> portals.v1.UnbindResponse
 	8,  // 25: portals.v1.PodBindService.Get:output_type -> portals.v1.GetResponse
-	13, // 26: portals.v1.NodeStreamService.Stream:output_type -> portals.v1.RelayMessage
+	13, // 26: portals.v1.NodeStreamService.Stream:output_type -> portals.v1.ControllerMessage
 	22, // [22:27] is the sub-list for method output_type
 	17, // [17:22] is the sub-list for method input_type
 	17, // [17:17] is the sub-list for extension type_name
@@ -1458,12 +1458,12 @@ func file_pkg_portals_v1_bind_proto_init() {
 		(*NodeMessage_Answer)(nil),
 	}
 	file_pkg_portals_v1_bind_proto_msgTypes[12].OneofWrappers = []any{
-		(*RelayMessage_Push)(nil),
+		(*ControllerMessage_Push)(nil),
 	}
 	file_pkg_portals_v1_bind_proto_msgTypes[13].OneofWrappers = []any{
-		(*RelayPush_Policy)(nil),
-		(*RelayPush_Secrets)(nil),
-		(*RelayPush_Unbind)(nil),
+		(*ControllerPush_Policy)(nil),
+		(*ControllerPush_Secrets)(nil),
+		(*ControllerPush_Unbind)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

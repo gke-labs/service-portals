@@ -50,7 +50,7 @@ type ServerConfig struct {
 }
 
 type pendingPush struct {
-	push       *portalsv1.RelayPush
+	push       *portalsv1.ControllerPush
 	podUID     string
 	sentStream *nodeStream
 	sentNode   string
@@ -155,7 +155,7 @@ func (s *Server) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 			dropped, push := p.dropped || p.sentStream != ns, p.push
 			s.mu.Unlock()
 			if !dropped && push != nil {
-				if err := stream.Send(&portalsv1.RelayMessage{Payload: &portalsv1.RelayMessage_Push{Push: push}}); err != nil {
+				if err := stream.Send(&portalsv1.ControllerMessage{Payload: &portalsv1.ControllerMessage_Push{Push: push}}); err != nil {
 					return err
 				}
 			}
@@ -235,7 +235,7 @@ func (s *Server) PodChanged(podUID string) {
 	s.deliverPod(podUID)
 }
 
-func (s *Server) Push(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+func (s *Server) Push(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 	uid := podUID(push)
 	if uid == "" {
 		return nil, errors.New("missing pod UID")
@@ -323,13 +323,13 @@ func (s *Server) dropPendingLocked(p *pendingPush) {
 	}
 }
 
-func podUID(p *portalsv1.RelayPush) string {
+func podUID(p *portalsv1.ControllerPush) string {
 	switch a := p.GetAction().(type) {
-	case *portalsv1.RelayPush_Policy:
+	case *portalsv1.ControllerPush_Policy:
 		return a.Policy.GetPodUid()
-	case *portalsv1.RelayPush_Secrets:
+	case *portalsv1.ControllerPush_Secrets:
 		return a.Secrets.GetPodUid()
-	case *portalsv1.RelayPush_Unbind:
+	case *portalsv1.ControllerPush_Unbind:
 		return a.Unbind.GetPodUid()
 	}
 	return ""

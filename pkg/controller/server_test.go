@@ -134,9 +134,9 @@ func TestPush_DeliveredAndAnswerLearned(t *testing.T) {
 		t.Fatalf("failed to send declaration: %v", err)
 	}
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-1",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "test-user"},
 		},
 	}
@@ -184,9 +184,9 @@ func TestPush_HeldUntilScheduledAndDeclared(t *testing.T) {
 	stream, cancel := openStream(t, client, "node-1", "")
 	defer cancel()
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-held",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-held", Identity: "test-user"},
 		},
 	}
@@ -254,9 +254,9 @@ func TestPush_DroppedAtTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
 	s, _ := startTestServer(t, lookup, 50*time.Millisecond)
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-timeout",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-never", Identity: "test-user"},
 		},
 	}
@@ -295,9 +295,9 @@ func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 	streamHonest, cancelHonest := openStream(t, client, "node-honest", "")
 	defer cancelHonest()
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-secure",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-secure", Identity: "test-user"},
 		},
 	}
@@ -308,7 +308,7 @@ func TestPush_NeverSentToNodeOtherThanLookupNames(t *testing.T) {
 	}
 
 	// Verify rogue node never receives the push.
-	rogueReceived := make(chan *portalsv1.RelayMessage, 1)
+	rogueReceived := make(chan *portalsv1.ControllerMessage, 1)
 	go func() {
 		msg, _ := streamRogue.Recv()
 		if msg != nil {
@@ -357,9 +357,9 @@ func TestPush_NodeRefusalWithReasonReachesCaller(t *testing.T) {
 		t.Fatalf("failed to send declaration: %v", err)
 	}
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-refused",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-refused", Identity: "test-user"},
 		},
 	}
@@ -426,9 +426,9 @@ func TestStreamEnd_LosesRegistrationAndUndeliveredStayPending(t *testing.T) {
 	}
 
 	// Push for pod-undelivered (which node-1 has not declared).
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-undelivered",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-undelivered", Identity: "test-user"},
 		},
 	}
@@ -505,9 +505,9 @@ func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 	// Wait for stream2 to take over registration.
 	time.Sleep(30 * time.Millisecond)
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-rep",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-rep", Identity: "test-user"},
 		},
 	}
@@ -515,7 +515,7 @@ func TestReplacedStream_GetsNoFurtherPushes(t *testing.T) {
 		t.Fatalf("Push failed: %v", err)
 	}
 
-	stream1Msgs := make(chan *portalsv1.RelayMessage, 1)
+	stream1Msgs := make(chan *portalsv1.ControllerMessage, 1)
 	go func() {
 		msg, _ := stream1.Recv()
 		if msg != nil {
@@ -557,9 +557,9 @@ func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 
 	// --- Part A: Dropped after answer ---
 	secretToken1 := []byte("secret-token-to-answer")
-	pushAnswer := &portalsv1.RelayPush{
+	pushAnswer := &portalsv1.ControllerPush{
 		PushId: "push-sec-answer",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
 				PodUid:  "pod-sec-answer",
 				Secrets: map[string][]byte{"tok": secretToken1},
@@ -608,9 +608,9 @@ func TestPendingSecrets_GoneAfterAnswerAndTimeout(t *testing.T) {
 
 	// --- Part B: Dropped after timeout ---
 	secretToken2 := []byte("secret-token-to-timeout")
-	pushTimeout := &portalsv1.RelayPush{
+	pushTimeout := &portalsv1.ControllerPush{
 		PushId: "push-sec-timeout",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
 				PodUid:  "pod-sec-unscheduled",
 				Secrets: map[string][]byte{"tok": secretToken2},
@@ -682,9 +682,9 @@ func TestPush_AnswerIgnoredFromDifferentNode(t *testing.T) {
 		},
 	})
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-auth-1",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-auth", Identity: "test-user"},
 		},
 	}
@@ -747,9 +747,9 @@ func TestPodUpdate_RemovalDoesNotCancelPendingPush(t *testing.T) {
 		},
 	})
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-rem",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-rem", Identity: "test-user"},
 		},
 	}
@@ -784,21 +784,21 @@ func TestPush_MultiplePushesArriveInOrder(t *testing.T) {
 	lookup.set("pod-order", "node-1")
 	s, client := startTestServer(t, lookup, time.Minute)
 
-	p1 := &portalsv1.RelayPush{
+	p1 := &portalsv1.ControllerPush{
 		PushId: "order-1-policy",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-order", Identity: "user-1"},
 		},
 	}
-	p2 := &portalsv1.RelayPush{
+	p2 := &portalsv1.ControllerPush{
 		PushId: "order-2-secrets",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{PodUid: "pod-order", Secrets: map[string][]byte{"k": []byte("v")}},
 		},
 	}
-	p3 := &portalsv1.RelayPush{
+	p3 := &portalsv1.ControllerPush{
 		PushId: "order-3-unbind",
-		Action: &portalsv1.RelayPush_Unbind{
+		Action: &portalsv1.ControllerPush_Unbind{
 			Unbind: &portalsv1.UnbindRequest{PodUid: "pod-order"},
 		},
 	}
@@ -857,18 +857,18 @@ func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 	s.mu.Lock()
 	ns := s.nodes["node-1"]
 	pDropped := &pendingPush{
-		push: &portalsv1.RelayPush{
+		push: &portalsv1.ControllerPush{
 			PushId: "push-dropped",
-			Action: &portalsv1.RelayPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
+			Action: &portalsv1.ControllerPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
 		},
 		podUID:     "pod-1",
 		sentStream: ns,
 		dropped:    true,
 	}
 	pValid := &pendingPush{
-		push: &portalsv1.RelayPush{
+		push: &portalsv1.ControllerPush{
 			PushId: "push-valid",
-			Action: &portalsv1.RelayPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
+			Action: &portalsv1.ControllerPush_Policy{Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Identity: "user"}},
 		},
 		podUID:     "pod-1",
 		sentStream: ns,
@@ -887,7 +887,7 @@ func TestPush_DroppedPushNeverWrittenToStream(t *testing.T) {
 		t.Fatalf("expected push-valid, but got dropped push: %v", msg.GetPush().GetPushId())
 	}
 
-	recvCh := make(chan *portalsv1.RelayMessage, 1)
+	recvCh := make(chan *portalsv1.ControllerMessage, 1)
 	go func() {
 		m, _ := stream.Recv()
 		if m != nil {
@@ -906,9 +906,9 @@ func TestPush_NonWaitingPushLivesForFullTimeout(t *testing.T) {
 	lookup := &fakeLookup{}
 	s, _ := startTestServer(t, lookup, 200*time.Millisecond)
 
-	push := &portalsv1.RelayPush{
+	push := &portalsv1.ControllerPush{
 		PushId: "push-short-ctx",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-short-ctx", Identity: "test-user"},
 		},
 	}
@@ -989,9 +989,9 @@ func TestPush_MorePushesThanQueueHolds_AllArriveInOrder(t *testing.T) {
 
 	const count = 100
 	for i := 0; i < count; i++ {
-		push := &portalsv1.RelayPush{
+		push := &portalsv1.ControllerPush{
 			PushId: fmt.Sprintf("queue-push-%03d", i),
-			Action: &portalsv1.RelayPush_Policy{
+			Action: &portalsv1.ControllerPush_Policy{
 				Policy: &portalsv1.PodPolicy{
 					PodUid:   "pod-large-queue",
 					Identity: fmt.Sprintf("user-%d", i),

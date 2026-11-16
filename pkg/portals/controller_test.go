@@ -43,7 +43,7 @@ type fakeControllerServer struct {
 	tokens     []string
 	declCh     chan []string
 	answerCh   chan *portalsv1.PushAnswer
-	pushCh     chan *portalsv1.RelayPush
+	pushCh     chan *portalsv1.ControllerPush
 	dropStream chan struct{}
 }
 
@@ -51,7 +51,7 @@ func newFakeControllerServer() *fakeControllerServer {
 	return &fakeControllerServer{
 		declCh:     make(chan []string, 10),
 		answerCh:   make(chan *portalsv1.PushAnswer, 10),
-		pushCh:     make(chan *portalsv1.RelayPush, 10),
+		pushCh:     make(chan *portalsv1.ControllerPush, 10),
 		dropStream: make(chan struct{}, 1),
 	}
 }
@@ -94,8 +94,8 @@ func (s *fakeControllerServer) Stream(stream portalsv1.NodeStreamService_StreamS
 		case err := <-recvErr:
 			return err
 		case push := <-s.pushCh:
-			if err := stream.Send(&portalsv1.RelayMessage{
-				Payload: &portalsv1.RelayMessage_Push{Push: push},
+			if err := stream.Send(&portalsv1.ControllerMessage{
+				Payload: &portalsv1.ControllerMessage_Push{Push: push},
 			}); err != nil {
 				return err
 			}
@@ -265,9 +265,9 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 			},
 		},
 	}
-	fakeController.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.ControllerPush{
 		PushId: "push-1",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Policy: policyWithSecrets},
 		},
 	}
@@ -293,9 +293,9 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// Push first secret -> still pending
-	fakeController.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.ControllerPush{
 		PushId: "push-2",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
 				PodUid:  "pod-1",
 				Secrets: map[string][]byte{"token-1": []byte("sec-1")},
@@ -315,9 +315,9 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// Push full set of secrets -> accepted once last named secret arrives
-	fakeController.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.ControllerPush{
 		PushId: "push-3",
-		Action: &portalsv1.RelayPush_Secrets{
+		Action: &portalsv1.ControllerPush_Secrets{
 			Secrets: &portalsv1.PodSecrets{
 				PodUid:  "pod-1",
 				Secrets: map[string][]byte{"token-1": []byte("sec-1"), "token-2": []byte("sec-2")},
@@ -356,9 +356,9 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 			{Https: &portalsv1.HttpsRule{Hostnames: []string{"example.com"}}},
 		},
 	}
-	fakeController.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.ControllerPush{
 		PushId: "push-4",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-no-sec", Policy: noSecPolicy},
 		},
 	}
@@ -386,9 +386,9 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 			},
 		},
 	}
-	fakeController.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.ControllerPush{
 		PushId: "push-5",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-1", Policy: invalidPolicy},
 		},
 	}
@@ -405,9 +405,9 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// 6. Push for pod not on node is refused
-	fakeController.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.ControllerPush{
 		PushId: "push-6",
-		Action: &portalsv1.RelayPush_Policy{
+		Action: &portalsv1.ControllerPush_Policy{
 			Policy: &portalsv1.PodPolicy{PodUid: "pod-not-on-node", Policy: noSecPolicy},
 		},
 	}
@@ -427,9 +427,9 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 
 	// 7. Unbind removes the binding
-	fakeController.pushCh <- &portalsv1.RelayPush{
+	fakeController.pushCh <- &portalsv1.ControllerPush{
 		PushId: "push-7",
-		Action: &portalsv1.RelayPush_Unbind{
+		Action: &portalsv1.ControllerPush_Unbind{
 			Unbind: &portalsv1.UnbindRequest{PodUid: "pod-1"},
 		},
 	}
@@ -479,7 +479,7 @@ func TestControllerClient_LifecycleAndAcceptance(t *testing.T) {
 	}
 }
 
-func TestRelayClient_TLSVerificationFailure(t *testing.T) {
+func TestControllerClient_TLSVerificationFailure(t *testing.T) {
 	_, serverCertPath, serverKeyPath := generateTestCertificates(t)
 	untrustedCACertPath, _, _ := generateTestCertificates(t)
 

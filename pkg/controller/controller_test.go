@@ -34,12 +34,12 @@ import (
 
 type fakeCore struct {
 	mu     sync.Mutex
-	pushes []*portalsv1.RelayPush
+	pushes []*portalsv1.ControllerPush
 	waits  []bool
-	pushFn func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error)
+	pushFn func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error)
 }
 
-func (f *fakeCore) Push(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+func (f *fakeCore) Push(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 	f.mu.Lock()
 	f.pushes = append(f.pushes, push)
 	f.waits = append(f.waits, wait)
@@ -60,7 +60,7 @@ func (f *fakeCore) PushCount() int {
 	return len(f.pushes)
 }
 
-func (f *fakeCore) LastPush() (*portalsv1.RelayPush, bool) {
+func (f *fakeCore) LastPush() (*portalsv1.ControllerPush, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.pushes) == 0 {
@@ -69,13 +69,13 @@ func (f *fakeCore) LastPush() (*portalsv1.RelayPush, bool) {
 	return f.pushes[len(f.pushes)-1], f.waits[len(f.waits)-1]
 }
 
-func podUIDFromPush(p *portalsv1.RelayPush) string {
+func podUIDFromPush(p *portalsv1.ControllerPush) string {
 	switch a := p.GetAction().(type) {
-	case *portalsv1.RelayPush_Policy:
+	case *portalsv1.ControllerPush_Policy:
 		return a.Policy.GetPodUid()
-	case *portalsv1.RelayPush_Secrets:
+	case *portalsv1.ControllerPush_Secrets:
 		return a.Secrets.GetPodUid()
-	case *portalsv1.RelayPush_Unbind:
+	case *portalsv1.ControllerPush_Unbind:
 		return a.Unbind.GetPodUid()
 	}
 	return ""
@@ -200,7 +200,7 @@ func TestController_Bind_WaitAccepted(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.stop()
 
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		if !wait {
 			t.Errorf("wait = false, want true")
 		}
@@ -237,7 +237,7 @@ func TestController_Bind_NoWaitPending(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.stop()
 
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		if wait {
 			t.Errorf("wait = true, want false")
 		}
@@ -279,7 +279,7 @@ func TestController_Bind_Refused(t *testing.T) {
 	defer env.stop()
 
 	const refusalReason = "conflicting policy already bound on node"
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return &portalsv1.PushAnswer{
 			PodUid:        push.GetPolicy().GetPodUid(),
 			Status:        portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED,
@@ -311,7 +311,7 @@ func TestController_Bind_DeadlineExceeded(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.stop()
 
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return nil, context.DeadlineExceeded
 	}
 
@@ -427,7 +427,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 	}
 
 	// 1. With wait -> returns accepted answer
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		if !wait {
 			t.Errorf("wait = false, want true")
 		}
@@ -453,7 +453,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 	}
 
 	// 2. Without wait -> returns pending immediately and push was submitted
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		if wait {
 			t.Errorf("wait = true, want false")
 		}
@@ -481,7 +481,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 
 	// 3. Refusal from node
 	const refusalReason = "secret rejected by node"
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return &portalsv1.PushAnswer{
 			PodUid:        push.GetSecrets().GetPodUid(),
 			Status:        portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED,
@@ -504,7 +504,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 	}
 
 	// 4. Wait runs out -> DeadlineExceeded
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return nil, context.DeadlineExceeded
 	}
 	_, err = env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
@@ -548,7 +548,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 	defer env.stop()
 
 	// 1. With wait -> returns accepted answer
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		if !wait {
 			t.Errorf("wait = false, want true")
 		}
@@ -576,7 +576,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 	}
 
 	// 2. Without wait -> returns pending immediately and push was submitted
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		if wait {
 			t.Errorf("wait = true, want false")
 		}
@@ -603,7 +603,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 
 	// 3. Refusal from node
 	const refusalReason = "unbind refused by node"
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return &portalsv1.PushAnswer{
 			PodUid:        push.GetUnbind().GetPodUid(),
 			Status:        portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED,
@@ -625,7 +625,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 	}
 
 	// 4. Wait runs out -> DeadlineExceeded
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return nil, context.DeadlineExceeded
 	}
 	_, err = env.client.Unbind(clientCtx("allowed-token"), &portalsv1.UnbindRequest{
@@ -710,7 +710,7 @@ func TestController_NoSecretsInLogs(t *testing.T) {
 	const secretValue = "super-secret-credential-value-xyz987"
 	const podUID = "pod-secret-test"
 
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return &portalsv1.PushAnswer{
 			PodUid: push.GetSecrets().GetPodUid(),
 			Status: portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED,
@@ -755,7 +755,7 @@ func TestController_Concurrency(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.stop()
 
-	env.core.pushFn = func(ctx context.Context, push *portalsv1.RelayPush, wait bool) (*portalsv1.PushAnswer, error) {
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return &portalsv1.PushAnswer{
 			PodUid: podUIDFromPush(push),
 			Status: portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED,

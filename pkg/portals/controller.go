@@ -175,17 +175,17 @@ func handleStream(ctx context.Context, stream portalsv1.NodeStreamService_Stream
 	}
 }
 
-func extractPodUID(push *portalsv1.RelayPush) string {
+func extractPodUID(push *portalsv1.ControllerPush) string {
 	switch act := push.GetAction().(type) {
-	case *portalsv1.RelayPush_Policy:
+	case *portalsv1.ControllerPush_Policy:
 		if act.Policy != nil {
 			return act.Policy.GetPodUid()
 		}
-	case *portalsv1.RelayPush_Secrets:
+	case *portalsv1.ControllerPush_Secrets:
 		if act.Secrets != nil {
 			return act.Secrets.GetPodUid()
 		}
-	case *portalsv1.RelayPush_Unbind:
+	case *portalsv1.ControllerPush_Unbind:
 		if act.Unbind != nil {
 			return act.Unbind.GetPodUid()
 		}
@@ -193,7 +193,7 @@ func extractPodUID(push *portalsv1.RelayPush) string {
 	return ""
 }
 
-func handlePush(pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.RelayPush) *portalsv1.PushAnswer {
+func handlePush(pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.ControllerPush) *portalsv1.PushAnswer {
 	podUID := extractPodUID(push)
 	if podUID == "" {
 		return pushRefused(push.GetPushId(), "", "missing pod UID")
@@ -205,11 +205,11 @@ func handlePush(pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.Relay
 	ctx := context.Background()
 	var err error
 	switch act := push.GetAction().(type) {
-	case *portalsv1.RelayPush_Policy:
+	case *portalsv1.ControllerPush_Policy:
 		_, err = store.Bind(ctx, act.Policy)
-	case *portalsv1.RelayPush_Secrets:
+	case *portalsv1.ControllerPush_Secrets:
 		_, err = store.InjectSecrets(ctx, act.Secrets)
-	case *portalsv1.RelayPush_Unbind:
+	case *portalsv1.ControllerPush_Unbind:
 		if _, err = store.Unbind(ctx, act.Unbind); err == nil {
 			log.Printf("controller push %s for pod %s: accepted unbind", push.GetPushId(), podUID)
 			return &portalsv1.PushAnswer{PushId: push.GetPushId(), PodUid: podUID, Status: portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED}
