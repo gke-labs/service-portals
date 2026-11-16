@@ -47,6 +47,27 @@ So the proposal is DRA **and** NRI in one node agent, each doing the part it is 
 
 The NRI hook gains one check: an opted-in sandbox must have a prepared claim, and a sandbox with a prepared claim must get rules or fail. That closes the case where the two mechanisms disagree.
 
+## What CDI can and cannot do here
+
+DRA's link to the container is CDI: a driver's prepare call returns CDI device names, and the runtime applies the matching CDI specification to each container that references the claim. A CDI specification can add mounts, environment variables, device nodes and OCI lifecycle hooks. So there is an integration, and it is worth being exact about what it is good for.
+
+**What it is good for**
+
+- **Trust injection.** Mounting the pod-local CA certificate and setting the environment variable that points at it is a mount and a variable, which is what CDI is for. Today the NRI plugin does this as a container adjustment in `CreateContainer`.
+
+**What it cannot replace**
+
+An OCI hook delivered through CDI runs on the host when a container is created, when the pod's network namespace already exists, so in principle it could install the interception rules. That is the approach the earlier spike tried. The reasons it does not work are properties of CDI, not of that prototype:
+
+1. **Only containers that name the claim.** The kubelet passes a claim's CDI devices only to containers that list the claim in `resources.claims`. The pause container, an init container or an ephemeral container that omits the claim gets no hook, and an init container that omits it runs before any rule exists.
+2. **Container events, not pod events.** There is no "sandbox created" or "sandbox removed" call, and a hook is not handed the pod's UID and addresses. Interception needs rules in place once per pod before any container runs, and caller identity needs the pod's addresses; NRI's `RunPodSandbox` provides both.
+3. **Sandboxed runtimes.** The spike found the hooks were silently lost under gVisor and Kata. NRI with host-side rules holds under gVisor, which CI checks.
+4. **Installation gets harder, not easier.** A hook is an executable that must exist on every node's filesystem, in addition to the DaemonSet that would install it.
+
+**Does DRA make the NRI plugin easier to install?** No. DRA does not install, register or enable an NRI plugin: the runtime still needs NRI enabled and a privileged DaemonSet still connects to the NRI socket, and a DRA driver is one more registration (with the kubelet) from the same DaemonSet. What DRA improves is around installation: pods that claim the resource are only scheduled where the driver has published it and fail closed at prepare, which replaces the node taint we manage today. Where privileged DaemonSets are not allowed, a DRA driver is blocked for the same reason an NRI plugin is.
+
+So CDI's role in this proposal is the narrow one in the table above: an optional way to deliver the CA bundle to containers that name the claim, with NRI remaining the mechanism for interception.
+
 ## Trade-offs
 
 **For**
