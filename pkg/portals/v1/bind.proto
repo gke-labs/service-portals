@@ -315,3 +315,28 @@ message RelayPush {
     UnbindRequest unbind = 4;
   }
 }
+
+// Node-local persistence
+
+// StoredBinding describes what is stored on the node for a pod binding across proxy restarts.
+// This message represents persisted node-local state, not something clients or relay send.
+// Note: protobuf-go does not honour debug_redact in String() or prototext, so this
+// message must never be logged or passed to a logger as a value; Format only
+// covers fmt verbs.
+message StoredBinding {
+  // Pod UID identifying the sandbox pod.
+  string pod_uid = 1;
+
+  // Identity associated with the pod for credential resolution.
+  string identity = 2;
+
+  // Egress policy defining permitted outbound network destinations and credential swaps.
+  EgressPolicy policy = 3;
+
+  // Map of secret name to raw secret bytes.
+  map<string, bytes> secrets = 4 [debug_redact = true];
+
+  // Indicates whether a binding entry exists for the pod.
+  bool bound = 5;
+}
+
