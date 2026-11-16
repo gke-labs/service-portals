@@ -1730,7 +1730,9 @@ spec:
         - name: SSL_CERT_FILE
           value: "/etc/service-portal/backend-ca/tls.crt"
         - name: SERVE_DNS
-          value: "true"` + proxyHostV6Env + `
+          value: "true"
+        - name: STORE_DIR
+          value: "/run/service-portal/store"` + proxyHostV6Env + `
         volumeMounts:
         - name: ca-volume
           mountPath: /etc/service-portal/ca
@@ -2022,7 +2024,33 @@ spec:
 		t.Logf("non-opted-in pod connection to proxy denied as expected: %v (output: %s)", err, out)
 	})
 
-	// 13. Unbind the pod and assert same request is then rejected
+	// 13. Restart proxy container and assert binding and secret resolution persist across restart
+	t.Run("ProxyRestart_RetainsBindings", func(t *testing.T) {
+		nodeContainer := fmt.Sprintf("%s-control-plane", h.ClusterName)
+		cmdGetID := exec.Command("docker", "exec", nodeContainer, "crictl", "ps", "--name", "proxy", "-q")
+		outGetID, err := cmdGetID.CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to get proxy container ID via crictl: %v (output: %s)", err, outGetID)
+		}
+		proxyContainerID := strings.TrimSpace(string(outGetID))
+		if proxyContainerID == "" {
+			t.Fatalf("no running proxy container found on node %s", nodeContainer)
+		}
+
+		t.Logf("Restarting proxy container %s on %s", proxyContainerID, nodeContainer)
+		cmdStop := exec.Command("docker", "exec", nodeContainer, "crictl", "stop", proxyContainerID)
+		if outStop, err := cmdStop.CombinedOutput(); err != nil {
+			t.Fatalf("failed to stop proxy container %s: %v (output: %s)", proxyContainerID, err, outStop)
+		}
+
+		h.WaitForPodReady("app=portal-node-agent", 2*time.Minute)
+
+		// Assert positive controls still succeed with swapped credentials without re-binding
+		runNRIPositiveControls(t, h, clientPodName, "backend", "gemini-nri-token")
+		t.Logf("Positive controls successfully passed after proxy container restart")
+	})
+
+	// 14. Unbind the pod and assert same request is then rejected
 	t.Run("Unbind_RevertsToDenied", func(t *testing.T) {
 		unbindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
 			"portal-nri-plugin", "bind-service", "unbind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID)
