@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1012,5 +1013,93 @@ func TestBindingStore_FailedUnbindFailsCall(t *testing.T) {
 	}
 	if s.Policy("pod-1") == nil {
 		t.Error("pod policy must not be cleared from memory when unbind fails to remove stored file")
+	}
+}
+
+func TestBindingStore_WaitMissingSecrets(t *testing.T) {
+	ctx := t.Context()
+	store := mustNewStore(t, "")
+
+	twoSecretsPolicy := &EgressPolicy{
+		Rules: []*EgressRule{
+			{
+				Https: &HttpsRule{
+					Hostnames: []string{"api.github.com"},
+					Effects: &HttpRuleEffects{
+						ReplaceHeaders: []*CredentialHeader{
+							{Header: "Authorization", CredentialUri: "secret://token-1"},
+							{Header: "X-Api-Key", CredentialUri: "secret://token-2"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// 1. Bind with wait=true reports PENDING with all missing secrets
+	bindResp, err := store.Bind(ctx, &PodPolicy{
+		PodUid: "pod-1",
+		Policy: twoSecretsPolicy,
+		Wait:   true,
+	})
+	if err != nil {
+		t.Fatalf("Bind with wait failed: %v", err)
+	}
+	if !bindResp.GetBound() {
+		t.Errorf("expected bound = true")
+	}
+	if bindResp.GetStatus() != AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+		t.Errorf("status = %v, want PENDING", bindResp.GetStatus())
+	}
+	if want := []string{"token-1", "token-2"}; !slices.Equal(bindResp.GetMissingSecrets(), want) {
+		t.Errorf("missing secrets = %v, want %v", bindResp.GetMissingSecrets(), want)
+	}
+
+	// 2. Inject one secret with wait=true reports PENDING with remaining missing secret
+	injectResp, err := store.InjectSecrets(ctx, &PodSecrets{
+		PodUid:  "pod-1",
+		Secrets: map[string][]byte{"token-1": []byte("val-1")},
+		Wait:    true,
+	})
+	if err != nil {
+		t.Fatalf("InjectSecrets with wait failed: %v", err)
+	}
+	if injectResp.GetStatus() != AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+		t.Errorf("status = %v, want PENDING", injectResp.GetStatus())
+	}
+	if want := []string{"token-2"}; !slices.Equal(injectResp.GetMissingSecrets(), want) {
+		t.Errorf("missing secrets = %v, want %v", injectResp.GetMissingSecrets(), want)
+	}
+
+	// 3. Inject all secrets with wait=true reports ACCEPTED with no missing secrets
+	injectResp, err = store.InjectSecrets(ctx, &PodSecrets{
+		PodUid:  "pod-1",
+		Secrets: map[string][]byte{"token-1": []byte("val-1"), "token-2": []byte("val-2")},
+		Wait:    true,
+	})
+	if err != nil {
+		t.Fatalf("InjectSecrets with wait failed: %v", err)
+	}
+	if injectResp.GetStatus() != AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
+		t.Errorf("status = %v, want ACCEPTED", injectResp.GetStatus())
+	}
+	if len(injectResp.GetMissingSecrets()) != 0 {
+		t.Errorf("missing secrets = %v, want empty", injectResp.GetMissingSecrets())
+	}
+
+	// 4. Bind with wait=false leaves status unspecified and missing secrets empty
+	bindRespNoWait, err := store.Bind(ctx, &PodPolicy{
+		PodUid: "pod-2",
+		Policy: twoSecretsPolicy,
+		Wait:   false,
+	})
+	if err != nil {
+		t.Fatalf("Bind without wait failed: %v", err)
+	}
+	if bindRespNoWait.GetStatus() != AcceptanceStatus_ACCEPTANCE_STATUS_UNSPECIFIED {
+		t.Errorf("status = %v, want UNSPECIFIED", bindRespNoWait.GetStatus())
+	}
+	if len(bindRespNoWait.GetMissingSecrets()) != 0 {
+		t.Errorf("missing secrets = %v, want empty", bindRespNoWait.GetMissingSecrets())
 	}
 }

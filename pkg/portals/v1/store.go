@@ -274,7 +274,13 @@ func (s *BindingStore) Bind(ctx context.Context, req *PodPolicy) (*BindResponse,
 	}
 	s.pods[req.GetPodUid()] = newEntry
 
-	return &BindResponse{PodUid: req.GetPodUid(), Bound: true}, nil
+	resp := &BindResponse{PodUid: req.GetPodUid(), Bound: true}
+	if req.GetWait() {
+		accStatus, missing := s.acceptanceLocked(req.GetPodUid())
+		resp.Status = accStatus
+		resp.MissingSecrets = missing
+	}
+	return resp, nil
 }
 
 // InjectSecrets replaces the whole set of named secrets for the pod UID.
@@ -305,7 +311,13 @@ func (s *BindingStore) InjectSecrets(ctx context.Context, req *PodSecrets) (*Inj
 	}
 	s.pods[req.GetPodUid()] = newEntry
 
-	return &InjectSecretsResponse{PodUid: req.GetPodUid()}, nil
+	resp := &InjectSecretsResponse{PodUid: req.GetPodUid()}
+	if req.GetWait() {
+		accStatus, missing := s.acceptanceLocked(req.GetPodUid())
+		resp.Status = accStatus
+		resp.MissingSecrets = missing
+	}
+	return resp, nil
 }
 
 // Unbind dissociates a pod UID, removing policy and secrets together.
@@ -432,7 +444,10 @@ func (s *BindingStore) ResolveSecret(podUID, name string) (Secret, bool) {
 func (s *BindingStore) Acceptance(podUID string) (AcceptanceStatus, []string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.acceptanceLocked(podUID)
+}
 
+func (s *BindingStore) acceptanceLocked(podUID string) (AcceptanceStatus, []string) {
 	entry, ok := s.pods[podUID]
 	if !ok || !entry.bound || entry.policy == nil {
 		return AcceptanceStatus_ACCEPTANCE_STATUS_PENDING, nil
