@@ -1641,7 +1641,7 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 
 	const (
 		controllerAudience   = "https://service-portal-controller"
-		nodeAgentAccount     = "system:serviceaccount:default:portal-node-agent"
+		nodeAgentAccount     = "system:serviceaccount:service-portal-system:portal-node-agent"
 		allowedClientSA      = "sandbox-controller"
 		unauthorizedClientSA = "unauthorized-controller"
 		allowedClientAccount = "system:serviceaccount:default:sandbox-controller"
@@ -1707,7 +1707,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: service-portal-controller-ca
-  namespace: default
+  namespace: service-portal-system
 data:
   tls.crt: %s
 `, base64.StdEncoding.EncodeToString(controllerCACert))
@@ -1757,6 +1757,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: backend-ca
+  namespace: service-portal-system
 data:
   tls.crt: %s
 `, base64.StdEncoding.EncodeToString(backendCert),
@@ -1860,156 +1861,42 @@ spec:` + serviceIPFamilies + `
 		}
 	}
 
-	// Deploy Node-Agent DaemonSet (Proxy + NRI Plugin)
-	nodeAgentManifest := `
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: portal-node-agent
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: portal-node-agent
-  labels:
-    app: portal-node-agent
-spec:
-  selector:
-    matchLabels:
-      app: portal-node-agent
-  template:
-    metadata:
-      labels:
-        app: portal-node-agent
-    spec:
-      serviceAccountName: portal-node-agent
-      tolerations:
-      - key: "service-portal.gke.io/uninitialized"
-        operator: "Exists"
-        effect: "NoSchedule"
-      dnsPolicy: ClusterFirstWithHostNet
-      hostNetwork: true
-      initContainers:
-      - name: node-init
-        image: portal-nri-plugin:e2e
-        imagePullPolicy: Never
-        args: ["init", "-ca-dir=/etc/service-portal/ca", "-socket-dir=/run/service-portal", "-proxy-uid=65532", "-proxy-gid=65532"]
-        volumeMounts:
-        - name: ca-volume
-          mountPath: /etc/service-portal/ca
-        - name: socket-volume
-          mountPath: /run/service-portal
-      containers:
-      - name: proxy
-        image: service-portal-agent:e2e
-        imagePullPolicy: Never
-        securityContext:
-          capabilities:
-            add: ["NET_BIND_SERVICE"]
-        env:
-        - name: PORT
-          value: "8080"
-        - name: HTTPS_PORT
-          value: "8443"
-        - name: PROXY_HOST
-          valueFrom:
-            fieldRef:
-              fieldPath: status.hostIP
-        - name: ENABLE_POD_MAP
-          value: "true"
-        - name: ADMIN_ADDR
-          value: "/run/service-portal/portal.sock"
-        - name: CA_CERT_PATH
-          value: "/etc/service-portal/ca/tls.crt"
-        - name: CA_KEY_PATH
-          value: "/etc/service-portal/ca/tls.key"
-        - name: SSL_CERT_FILE
-          value: "/etc/service-portal/backend-ca/tls.crt"
-        - name: SERVE_DNS
-          value: "true"
-        - name: STORE_DIR
-          value: "/run/service-portal/store"
-        - name: CONTROLLER_ADDR
-          value: "service-portal-controller.service-portal-system.svc:8443"
-        - name: CONTROLLER_TOKEN_PATH
-          value: "/var/run/secrets/tokens/controller/token"
-        - name: CONTROLLER_CA_CERT_PATH
-          value: "/etc/service-portal/controller-ca/tls.crt"` + proxyHostV6Env + `
-        volumeMounts:
-        - name: ca-volume
-          mountPath: /etc/service-portal/ca
-          readOnly: true
-        - name: backend-ca-volume
-          mountPath: /etc/service-portal/backend-ca
-          readOnly: true
-        - name: controller-ca-volume
-          mountPath: /etc/service-portal/controller-ca
-          readOnly: true
-        - name: controller-token
-          mountPath: /var/run/secrets/tokens/controller
-          readOnly: true
-        - name: socket-volume
-          mountPath: /run/service-portal
-      - name: nri-plugin
-        image: portal-nri-plugin:e2e
-        imagePullPolicy: Never
-        securityContext:
-          capabilities:
-            add: ["NET_ADMIN", "SYS_ADMIN"]
-        env:
-        - name: PROXY_HOST
-          valueFrom:
-            fieldRef:
-              fieldPath: status.hostIP
-        - name: PROXY_PORT
-          value: "8080"
-        - name: PROXY_HTTPS_PORT
-          value: "8443"
-        - name: ADMIN_URL
-          value: "unix:///run/service-portal/portal.sock"
-        - name: CA_CERT_PATH
-          value: "/etc/service-portal/ca/tls.crt"
-        - name: NRI_SOCKET_PATH
-          value: "/var/run/nri/nri.sock"` + proxyHostV6Env + `
-        volumeMounts:
-        - name: ca-volume
-          mountPath: /etc/service-portal/ca
-        - name: nri-socket
-          mountPath: /var/run/nri
-        - name: netns
-          mountPath: /run/netns
-          mountPropagation: HostToContainer
-        - name: socket-volume
-          mountPath: /run/service-portal
-      volumes:
-      - name: backend-ca-volume
-        secret:
-          secretName: backend-ca
-      - name: controller-ca-volume
-        secret:
-          secretName: service-portal-controller-ca
-      - name: controller-token
-        projected:
-          sources:
-          - serviceAccountToken:
-              path: token
-              expirationSeconds: 3600
-              audience: https://service-portal-controller
-      - name: ca-volume
-        hostPath:
-          path: /etc/service-portal/ca
-          type: DirectoryOrCreate
-      - name: nri-socket
-        hostPath:
-          path: /var/run/nri
-      - name: netns
-        hostPath:
-          path: /run/netns
-      - name: socket-volume
-        hostPath:
-          path: /run/service-portal
-          type: DirectoryOrCreate
-`
+	// Deploy Node-Agent DaemonSet from reference manifest (k8s/node-agent.yaml)
+	nodeAgentManifestPath := filepath.Join(gitRoot, "k8s/node-agent.yaml")
+	bNodeAgent, err := os.ReadFile(nodeAgentManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to read node agent manifest: %v", err)
+	}
+	nodeAgentManifest := string(bNodeAgent)
+
+	// Difference 1: :e2e image tags and Never pull policy for locally built images
+	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "image: portal-nri-plugin:latest", "image: portal-nri-plugin:e2e")
+	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "image: service-portal-agent:latest", "image: service-portal-agent:e2e")
+	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "imagePullPolicy: IfNotPresent", "imagePullPolicy: Never")
+
+	// Difference 2: Token audience matching the controller's expected audience
+	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, `audience: ""`, fmt.Sprintf(`audience: %q`, controllerAudience))
+
+	// Difference 3: Trust the test backend's self-signed CA in the proxy container
+	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
+		"- name: CA_KEY_PATH\n          value: \"/etc/service-portal/ca/tls.key\"",
+		"- name: CA_KEY_PATH\n          value: \"/etc/service-portal/ca/tls.key\"\n        - name: SSL_CERT_FILE\n          value: \"/etc/service-portal/backend-ca/tls.crt\"")
+	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
+		"- name: ca-volume\n          mountPath: /etc/service-portal/ca\n          readOnly: true",
+		"- name: ca-volume\n          mountPath: /etc/service-portal/ca\n          readOnly: true\n        - name: backend-ca-volume\n          mountPath: /etc/service-portal/backend-ca\n          readOnly: true")
+	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
+		"- name: controller-ca-volume\n        secret:\n          secretName: service-portal-controller-ca",
+		"- name: backend-ca-volume\n        secret:\n          secretName: backend-ca\n      - name: controller-ca-volume\n        secret:\n          secretName: service-portal-controller-ca")
+
+	// Difference 4: IPv6 proxy host address for dual-stack clusters
+	if proxyHostV6Env != "" {
+		nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
+			"- name: CONTROLLER_CA_CERT_PATH\n          value: \"/etc/service-portal/controller-ca/tls.crt\"",
+			"- name: CONTROLLER_CA_CERT_PATH\n          value: \"/etc/service-portal/controller-ca/tls.crt\""+proxyHostV6Env)
+		nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
+			"- name: NRI_SOCKET_PATH\n          value: \"/var/run/nri/nri.sock\"",
+			"- name: NRI_SOCKET_PATH\n          value: \"/var/run/nri/nri.sock\""+proxyHostV6Env)
+	}
 
 	// 1. Taint the node so uninitialized nodes cannot schedule opted-in pods
 	taintCmd := exec.Command("kubectl", "taint", "nodes", "--all", "service-portal.gke.io/uninitialized:NoSchedule", "--overwrite")
@@ -2061,6 +1948,7 @@ spec:
 
 	// 4. Deploy Node-Agent DaemonSet (with toleration; connects to NRI and registers)
 	h.KubectlApplyContent(nodeAgentManifest)
+	h.WaitForDaemonSetInNamespace("service-portal-system", "portal-node-agent", 2*time.Minute)
 	h.WaitForPodReady("app=portal-node-agent", 2*time.Minute)
 
 	// 5. Remove node initialization taint once DaemonSet is ready
@@ -2080,7 +1968,7 @@ spec:
 		var streamConnected bool
 		for i := 0; i < 30; i++ {
 			ctrlLogs := h.GetPodLogsByNamespaceAndLabel("service-portal-system", "app=service-portal-controller", "service-portal-controller")
-			nodeLogs := h.GetPodLogsByLabel("app=portal-node-agent", "proxy")
+			nodeLogs := h.GetPodLogsByNamespaceAndLabel("service-portal-system", "app=portal-node-agent", "proxy")
 			if strings.Contains(ctrlLogs, "stream connected") || strings.Contains(nodeLogs, "controller: stream connected") {
 				streamConnected = true
 				t.Logf("verified controller is ready and node agent stream is connected")
@@ -2160,7 +2048,7 @@ spec:
     }
   ]
 }`
-	bindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
+	bindCmd := exec.Command("kubectl", "-n", "service-portal-system", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
 		"portal-nri-plugin", "bind-service", "bind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--identity", "test-user-alice", "--policy-file", "-")
 	bindCmd.Stdin = strings.NewReader(policyJSON)
 	bindOut, err := bindCmd.CombinedOutput()
@@ -2171,7 +2059,7 @@ spec:
 
 	// Inject named secret over PodBindService. Secret value is passed via standard input and never as an argument or logged.
 	secretJSON := `{"backend-token": "gemini-nri-token"}`
-	injectCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
+	injectCmd := exec.Command("kubectl", "-n", "service-portal-system", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
 		"portal-nri-plugin", "bind-service", "inject-secrets", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--secrets-file", "-")
 	injectCmd.Stdin = strings.NewReader(secretJSON)
 	injectOut, err := injectCmd.CombinedOutput()
@@ -2209,7 +2097,7 @@ spec:
 
 	// 10. Assert proxy logs carry the pod namespace/name
 	t.Run("ProxyLogsCarryPodIdentity", func(t *testing.T) {
-		nodeAgentLogs := h.GetPodLogsByLabel("app=portal-node-agent", "proxy")
+		nodeAgentLogs := h.GetPodLogsByNamespaceAndLabel("service-portal-system", "app=portal-node-agent", "proxy")
 		if !strings.Contains(nodeAgentLogs, "Caller: default/"+clientPodName) {
 			t.Fatalf("proxy logs missing expected caller pod 'Caller: default/%s':\n%s", clientPodName, nodeAgentLogs)
 		}
@@ -2291,7 +2179,7 @@ spec:
 
 	// 14. Unbind the pod and assert same request is then rejected
 	t.Run("Unbind_RevertsToDenied", func(t *testing.T) {
-		unbindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
+		unbindCmd := exec.Command("kubectl", "-n", "service-portal-system", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
 			"portal-nri-plugin", "bind-service", "unbind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID)
 		unbindOut, err := unbindCmd.CombinedOutput()
 		if err != nil {
