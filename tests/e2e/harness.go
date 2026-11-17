@@ -243,6 +243,12 @@ func (h *Harness) WaitForDeploymentInNamespace(namespace, name string, timeout t
 	h.RunCommand("kubectl", "-n", namespace, "rollout", "status", "deployment/"+name, "--timeout="+timeout.String())
 }
 
+func (h *Harness) WaitForDaemonSetInNamespace(namespace, name string, timeout time.Duration) {
+	h.t.Helper()
+	h.t.Logf("Waiting for daemonset %s in namespace %s", name, namespace)
+	h.RunCommand("kubectl", "-n", namespace, "rollout", "status", "daemonset/"+name, "--timeout="+timeout.String())
+}
+
 func (h *Harness) WaitForPodReady(labelSelector string, timeout time.Duration) {
 	h.t.Helper()
 	h.t.Logf("Waiting for pod with label %s to be ready", labelSelector)
