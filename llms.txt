@@ -14,6 +14,7 @@ Service Portals is a credential-swapping, layer-7 intercepting proxy for sandbox
 
 ## Documentation Index
 
+- `docs/controller.md`: Deploying the controller and configuring sandbox egress policies and credentials.
 - `docs/roadmap.md`: Strategic roadmap to converge on NRI as the single supported mode and remove other modes.
 - `docs/architecture.md`: Threat model, trust model, MITM mechanics, iptables egress filtering, and "Duck Identity".
 - `docs/configuration.md`: Comprehensive reference for `PortalRule`, environment variables, flags, and caching.
