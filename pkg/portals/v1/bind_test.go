@@ -325,18 +325,20 @@ func TestMessages_RoundTrip(t *testing.T) {
 		{
 			name: "BindResponse_Acceptance",
 			msg: &BindResponse{
-				PodUid:        "pod-1",
-				Bound:         true,
-				Status:        AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED,
-				RefusalReason: "",
+				PodUid:         "pod-1",
+				Bound:          true,
+				Status:         AcceptanceStatus_ACCEPTANCE_STATUS_PENDING,
+				RefusalReason:  "",
+				MissingSecrets: []string{"secret-a", "secret-b"},
 			},
 		},
 		{
 			name: "InjectSecretsResponse_Acceptance",
 			msg: &InjectSecretsResponse{
-				PodUid:        "pod-2",
-				Status:        AcceptanceStatus_ACCEPTANCE_STATUS_PENDING,
-				RefusalReason: "",
+				PodUid:         "pod-2",
+				Status:         AcceptanceStatus_ACCEPTANCE_STATUS_PENDING,
+				RefusalReason:  "",
+				MissingSecrets: []string{"secret-c"},
 			},
 		},
 		{
