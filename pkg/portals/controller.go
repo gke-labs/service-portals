@@ -103,6 +103,8 @@ func runControllerClient(ctx context.Context, cfg controllerClientConfig) {
 			continue
 		}
 
+		log.Printf("controller: stream connected to %s", cfg.addr)
+
 		backoff = 50 * time.Millisecond
 		err = handleStream(streamCtx, stream, cfg, changeCh)
 		cancel()
