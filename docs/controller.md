@@ -37,17 +37,17 @@ The `service-portal-controller` binary accepts the following flags:
 
 ### What the Node Agent Needs
 
-The node agent DaemonSet pod runs two containers: the node proxy (`all-in-one-portal`) and the NRI plugin (`portal-nri-plugin`). The controller connection and binding persistence belong to the **node proxy container (`all-in-one-portal`)**, not `portal-nri-plugin`.
+The node agent DaemonSet pod runs two containers: the node proxy (`service-portal-agent`) and the NRI plugin (`portal-nri-plugin`). The controller connection and binding persistence belong to the **node proxy container (`service-portal-agent`)**, not `portal-nri-plugin`.
 
-The `all-in-one-portal` container requires the following environment variables and volume mounts:
+The `service-portal-agent` container requires the following environment variables and volume mounts:
 
-#### Environment Variables (in `all-in-one-portal`)
+#### Environment Variables (in `service-portal-agent`)
 - `CONTROLLER_ADDR`: The gRPC address of the controller (`host:port`, matching the Service in `k8s/controller.yaml`: `service-portal-controller.service-portal-system.svc:8443`). When set, the proxy dials out to the controller over TLS.
 - `CONTROLLER_CA_CERT_PATH`: File path to the CA certificate used to verify the controller's TLS server certificate. Required when `CONTROLLER_ADDR` is set.
 - `CONTROLLER_TOKEN_PATH`: File path to the node agent's projected service account token file. Required when `CONTROLLER_ADDR` is set.
 - `STORE_DIR`: Directory path where the proxy persists pod bindings on the node (e.g. `/run/service-portal/store`).
 
-#### Volume Mounts (mounted into `all-in-one-portal`)
+#### Volume Mounts (mounted into `service-portal-agent`)
 - **CA Certificate Volume**: Mounts the CA certificate used to verify the controller's server certificate at the path matching `CONTROLLER_CA_CERT_PATH`.
 - **Token Volume**: A Kubernetes projected volume mount providing a service account token at the path matching `CONTROLLER_TOKEN_PATH`, configured with:
   - `audience` matching the controller's `-audience` flag.

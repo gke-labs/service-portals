@@ -10,7 +10,7 @@ The **Transparent Sidecar Mode** is the **current recommended deployment mode** 
 
 | Mode | Status | Primary Binary / Mechanism | Privilege Requirements | Key Characteristics |
 | :--- | :--- | :--- | :--- | :--- |
-| **Transparent Sidecar Mode** | **Recommended (Current Default)** | `cmd/all-in-one-portal` + `cmd/init-service-portals` | `CAP_NET_ADMIN` for init container; workload is unprivileged | Zero application code changes; ephemeral pod-local CA; dynamic SNI TLS minting; packet-level default-deny egress filtering. |
+| **Transparent Sidecar Mode** | **Recommended (Current Default)** | `cmd/service-portal-agent` + `cmd/init-service-portals` | `CAP_NET_ADMIN` for init container; workload is unprivileged | Zero application code changes; ephemeral pod-local CA; dynamic SNI TLS minting; packet-level default-deny egress filtering. |
 | **Explicit Service Mode** | *Legacy* (scheduled for removal) | `cmd/service-portal` or service-specific portals (`gemini-portal`, etc.) | Unprivileged pod | Centralized cluster `Service`; plain HTTP in cluster; shared secret blast radius; no packet-level egress enforcement. |
 | **Application-Level Interception** | *Historical (Not Pursued)* | Injected proxy env + Kubernetes `NetworkPolicy` | Zero privileges (PSA baseline & restricted) | Spiked in #164; not pursued. Zero-privilege proxy env and NetworkPolicy; no separate code path for Autopilot. |
 | **Per-Node NRI Mode** | *In Development, Future Default* | containerd NRI plugin DaemonSet (`#198`) | Node-level daemon; zero in-pod privileges | Target: host-side (#181); current prototype uses pod-netns rules. Target single mode; eliminates UID-1337 bypass. |
@@ -19,7 +19,7 @@ The **Transparent Sidecar Mode** is the **current recommended deployment mode** 
 
 ## 1. Transparent Sidecar Mode (Recommended)
 
-In transparent sidecar mode, each application pod runs two helper containers alongside the workload: an `init-service-portals` init container and an `all-in-one-portal` sidecar container.
+In transparent sidecar mode, each application pod runs two helper containers alongside the workload: an `init-service-portals` init container and a `service-portal-agent` sidecar container.
 
 ```
 +---------------------------------------------------------------------------------+
@@ -52,7 +52,7 @@ In transparent sidecar mode, each application pod runs two helper containers alo
    - Mounts `ca-cert` read-only to trust the pod-local CA.
    - Resolves fake hostnames (e.g. `gemini.backend`) to arbitrary IPs using pod `hostAliases`.
    - Makes requests without API keys or with dummy tokens.
-3. **Sidecar Proxy (`all-in-one-portal`)**:
+3. **Sidecar Proxy (`service-portal-agent`)**:
    - Runs as UID `1337`.
    - Mounts `ca-private` read-only to access the CA private key.
    - Loads `PortalRule` definitions from a mounted Secret volume.

@@ -6,7 +6,7 @@ This document provides a comprehensive reference for all configuration mechanism
 
 ## `PortalRule` Specification
 
-The `all-in-one-portal` routes incoming requests dynamically based on YAML rule definitions. These rules map incoming `Host` headers to upstream API targets, inject credentials, and configure caching.
+The `service-portal-agent` routes incoming requests dynamically based on YAML rule definitions. These rules map incoming `Host` headers to upstream API targets, inject credentials, and configure caching.
 
 ### Example Multi-Rule Secret
 
@@ -84,7 +84,7 @@ Note that once a rules directory is configured, `config.DefaultTargetURL` (what 
 
 ## Environment Variables & Flags
 
-### 1. Service Portals (`all-in-one-portal`, `service-portal`, `gemini-portal`, `anthropic-portal`, `github-portal`)
+### 1. Service Portals (`service-portal-agent`, `service-portal`, `gemini-portal`, `anthropic-portal`, `github-portal`)
 
 These variables configure the HTTP/HTTPS proxy servers.
 
@@ -93,9 +93,9 @@ These variables configure the HTTP/HTTPS proxy servers.
 | `PORT` | `8080` | Port to listen on for standard HTTP requests and transparently redirected port 80 traffic. |
 | `HTTPS_PORT` | `8443` | Port to listen on for TLS connections and transparently redirected port 443 traffic. Always started; if `CA_CERT_PATH` and `CA_KEY_PATH` are not configured, the listener is active but incoming TLS handshakes fail with a certificate signing error. |
 | `RULES_DIR` / `--rules-dir` | `""` | Directory containing `PortalRule` YAML files. The `--rules-dir` flag takes precedence over the environment variable. |
-| `TARGET_URL` | *See below* | Fallback / default target URL. With a rules directory (`--rules-dir` / `RULES_DIR`), both `all-in-one-portal` and `service-portal` (as well as provider-specific portals) deny unmatched hosts unless `TARGET_URL` is explicitly set in the environment. Without a rules directory, defaults to:<br>• `service-portal` & `all-in-one-portal`: `https://generativelanguage.googleapis.com`<br>• `gemini-portal`: `https://generativelanguage.googleapis.com`<br>• `anthropic-portal`: `https://api.anthropic.com`<br>• `github-portal`: `https://api.github.com/` |
+| `TARGET_URL` | *See below* | Fallback / default target URL. With a rules directory (`--rules-dir` / `RULES_DIR`), both `service-portal-agent` and `service-portal` (as well as provider-specific portals) deny unmatched hosts unless `TARGET_URL` is explicitly set in the environment. Without a rules directory, defaults to:<br>• `service-portal` & `service-portal-agent`: `https://generativelanguage.googleapis.com`<br>• `gemini-portal`: `https://generativelanguage.googleapis.com`<br>• `anthropic-portal`: `https://api.anthropic.com`<br>• `github-portal`: `https://api.github.com/` |
 | `UPSTREAM_AUTH_TOKEN` | `""` | Default token injected into requests when falling through to `TARGET_URL`. |
-| `UPSTREAM_AUTH_HEADER` | *See below* | Header used for `UPSTREAM_AUTH_TOKEN`. Defaults: <br>• `gemini-portal`: `x-goog-api-key`<br>• `anthropic-portal`: `x-api-key`<br>• `service-portal`, `all-in-one-portal`, `github-portal`: `Authorization` |
+| `UPSTREAM_AUTH_HEADER` | *See below* | Header used for `UPSTREAM_AUTH_TOKEN`. Defaults: <br>• `gemini-portal`: `x-goog-api-key`<br>• `anthropic-portal`: `x-api-key`<br>• `service-portal`, `service-portal-agent`, `github-portal`: `Authorization` |
 | `CA_CERT_PATH` | `""` | Path to public Root CA certificate PEM file (`tls.crt`). Required for TLS interception and dynamic cert minting. |
 | `CA_KEY_PATH` | `""` | Path to Root CA private key PEM file (`tls.key`). Must be readable by the proxy UID (`1337`). |
 | `CACHE_TTL` | `""` | Global fallback cache TTL duration string (e.g. `10m`, `1h`). |

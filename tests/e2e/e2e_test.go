@@ -191,12 +191,12 @@ spec:
 	}
 }
 
-func TestAllInOnePortal(t *testing.T) {
+func TestServicePortalAgent(t *testing.T) {
 	if os.Getenv("RUN_E2E") == "" {
 		t.Skip("RUN_E2E env var not set, skipping")
 	}
 
-	h := NewHarness(t, "all-in-one-portal-e2e")
+	h := NewHarness(t, "service-portal-agent-e2e")
 	if h.IsGVisor() {
 		t.Skip("skipping non-NRI test when running under gVisor runtime")
 	}
@@ -205,10 +205,10 @@ func TestAllInOnePortal(t *testing.T) {
 	gitRoot := h.GetGitRoot()
 
 	// Paths relative to git root
-	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("service-portal-agent:e2e", filepath.Join(gitRoot, "images/service-portal-agent/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 
-	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("service-portal-agent:e2e")
 	h.KindLoad("toolbox:e2e")
 
 	// Deploy Backend (Toolbox Server)
@@ -253,12 +253,12 @@ spec:
 	// TODO: Add health/readiness checks for services and deployments to avoid timing issues.
 	time.Sleep(5 * time.Second)
 
-	// Deploy All-In-One Portal
+	// Deploy Service Portal Agent
 	h.KubectlApplyContent(`
 apiVersion: v1
 kind: Secret
 metadata:
-  name: all-in-one-portal-secret
+  name: service-portal-agent-secret
 stringData:
   gemini-rule.yaml: |
     apiVersion: portals.gke.io/v1alpha1
@@ -284,22 +284,22 @@ stringData:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: all-in-one-portal
+  name: service-portal-agent
   labels:
-    app: all-in-one-portal
+    app: service-portal-agent
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: all-in-one-portal
+      app: service-portal-agent
   template:
     metadata:
       labels:
-        app: all-in-one-portal
+        app: service-portal-agent
     spec:
       containers:
-      - name: all-in-one-portal
-        image: all-in-one-portal:e2e
+      - name: service-portal-agent
+        image: service-portal-agent:e2e
         imagePullPolicy: Never
         ports:
         - containerPort: 8080
@@ -311,22 +311,22 @@ spec:
       volumes:
       - name: rules-volume
         secret:
-          secretName: all-in-one-portal-secret
+          secretName: service-portal-agent-secret
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: all-in-one-portal
+  name: service-portal-agent
 spec:
   selector:
-    app: all-in-one-portal
+    app: service-portal-agent
   ports:
   - port: 80
     targetPort: 8080
     protocol: TCP
 `
 	h.KubectlApplyContent(portalManifest)
-	h.WaitForDeployment("all-in-one-portal", 2*time.Minute)
+	h.WaitForDeployment("service-portal-agent", 2*time.Minute)
 	// TODO: Add health/readiness checks for services and deployments to avoid timing issues.
 	time.Sleep(5 * time.Second)
 
@@ -346,7 +346,7 @@ spec:
   - name: toolbox
     image: toolbox:e2e
     imagePullPolicy: Never
-    command: ["/bin/sh", "-c", "wget -qO- --header='Host: gemini.backend' http://all-in-one-portal:80"]
+    command: ["/bin/sh", "-c", "wget -qO- --header='Host: gemini.backend' http://service-portal-agent:80"]
   restartPolicy: Never
 `
 	h.KubectlApplyContent(clientManifestGemini)
@@ -379,7 +379,7 @@ spec:
   - name: toolbox
     image: toolbox:e2e
     imagePullPolicy: Never
-    command: ["/bin/sh", "-c", "wget -qO- --header='Host: github.backend' http://all-in-one-portal:80"]
+    command: ["/bin/sh", "-c", "wget -qO- --header='Host: github.backend' http://service-portal-agent:80"]
   restartPolicy: Never
 `
 	h.KubectlApplyContent(clientManifestGithub)
@@ -411,11 +411,11 @@ func TestSidecarPortal(t *testing.T) {
 	gitRoot := h.GetGitRoot()
 
 	// Paths relative to git root
-	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("service-portal-agent:e2e", filepath.Join(gitRoot, "images/service-portal-agent/Dockerfile"), gitRoot)
 	h.DockerBuild("init-service-portals:e2e", filepath.Join(gitRoot, "images/init-service-portals/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 
-	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("service-portal-agent:e2e")
 	h.KindLoad("init-service-portals:e2e")
 	h.KindLoad("toolbox:e2e")
 
@@ -541,7 +541,7 @@ spec:
       mountPath: /etc/service-portal/ca
       readOnly: true
   - name: service-portal-sidecar
-    image: all-in-one-portal:e2e
+    image: service-portal-agent:e2e
     imagePullPolicy: Never
     securityContext:
       runAsUser: 1337
@@ -650,11 +650,11 @@ func TestSidecarEgressDenied(t *testing.T) {
 	gitRoot := h.GetGitRoot()
 
 	// Paths relative to git root
-	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("service-portal-agent:e2e", filepath.Join(gitRoot, "images/service-portal-agent/Dockerfile"), gitRoot)
 	h.DockerBuild("init-service-portals:e2e", filepath.Join(gitRoot, "images/init-service-portals/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 
-	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("service-portal-agent:e2e")
 	h.KindLoad("init-service-portals:e2e")
 	h.KindLoad("toolbox:e2e")
 
@@ -828,7 +828,7 @@ spec:
       mountPath: /etc/service-portal/ca
       readOnly: true
   - name: service-portal-sidecar
-    image: all-in-one-portal:e2e
+    image: service-portal-agent:e2e
     imagePullPolicy: Never
     securityContext:
       runAsUser: 1337
@@ -1619,12 +1619,12 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 	gitRoot := h.GetGitRoot()
 
 	// Build and load images
-	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
+	h.DockerBuild("service-portal-agent:e2e", filepath.Join(gitRoot, "images/service-portal-agent/Dockerfile"), gitRoot)
 	h.DockerBuild("portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/portal-nri-plugin/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 	h.DockerBuild("service-portal-controller:e2e", filepath.Join(gitRoot, "images/service-portal-controller/Dockerfile"), gitRoot)
 
-	h.KindLoad("all-in-one-portal:e2e")
+	h.KindLoad("service-portal-agent:e2e")
 	h.KindLoad("portal-nri-plugin:e2e")
 	h.KindLoad("toolbox:e2e")
 	h.KindLoad("service-portal-controller:e2e")
@@ -1900,7 +1900,7 @@ spec:
           mountPath: /run/service-portal
       containers:
       - name: proxy
-        image: all-in-one-portal:e2e
+        image: service-portal-agent:e2e
         imagePullPolicy: Never
         securityContext:
           capabilities:

@@ -15,7 +15,7 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: all-in-one-portal-sidecar-secret
+  name: service-portal-agent-sidecar-secret
 stringData:
   gemini-rule.yaml: |
     apiVersion: portals.gke.io/v1alpha1
@@ -118,11 +118,11 @@ spec:
           mountPath: /etc/service-portal/ca
           readOnly: true
 
-      # 2. The Sidecar Container: runs the all-in-one-portal proxy.
+      # 2. The Sidecar Container: runs the service-portal-agent proxy.
       # It must run as the specified non-root user (UID 1337) matching PROXY_UID so that
       # its outbound requests are not intercepted and redirected to itself.
       - name: service-portal-sidecar
-        image: all-in-one-portal:latest
+        image: service-portal-agent:latest
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 1337
@@ -151,7 +151,7 @@ spec:
       volumes:
       - name: rules-volume
         secret:
-          secretName: all-in-one-portal-sidecar-secret
+          secretName: service-portal-agent-sidecar-secret
       - name: ca-cert
         emptyDir: {}
       - name: ca-key

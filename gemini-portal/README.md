@@ -1,7 +1,7 @@
 # Gemini Portal (`gemini-portal/`)
 
 > **Status: Legacy Single-Target Binary (Scheduled for Removal)**<br>
-> `gemini-portal` is a legacy single-target proxy binary designed for explicit Service mode. In accordance with the [project roadmap](../docs/roadmap.md), explicit Service mode and per-service portal binaries are scheduled for removal once the per-node containerd NRI mode meets its acceptance bar. New deployments should use the multi-service [`all-in-one-portal`](../cmd/all-in-one-portal/README.md) in the recommended transparent sidecar mode ([docs/sidecar-container.md](../docs/sidecar-container.md)).
+> `gemini-portal` is a legacy single-target proxy binary designed for explicit Service mode. In accordance with the [project roadmap](../docs/roadmap.md), explicit Service mode and per-service portal binaries are scheduled for removal once the per-node containerd NRI mode meets its acceptance bar. New deployments should use the multi-service [`service-portal-agent`](../cmd/service-portal-agent/README.md) in the recommended transparent sidecar mode ([docs/sidecar-container.md](../docs/sidecar-container.md)).
 
 `gemini-portal` is a specialized service portal tailored for Google's Generative Language API (`https://generativelanguage.googleapis.com`). It terminates requests, injects the Gemini API key, and provides structured logging of prompts and model responses across both JSON and gRPC protocols.
 

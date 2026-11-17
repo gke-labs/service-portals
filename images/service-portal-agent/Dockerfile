@@ -27,16 +27,16 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o /all-in-one-portal ./cmd/all-in-one-portal/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o /service-portal-agent ./cmd/service-portal-agent/main.go
 
 # Use a minimal base image to package the application
 FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /
 
-COPY --from=builder /all-in-one-portal /all-in-one-portal
+COPY --from=builder /service-portal-agent /service-portal-agent
 
 # Run as non-root user
 USER 65532:65532
 
-ENTRYPOINT ["/all-in-one-portal"]
+ENTRYPOINT ["/service-portal-agent"]

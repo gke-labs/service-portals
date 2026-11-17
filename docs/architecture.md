@@ -35,7 +35,7 @@ All outbound traffic is redirected through the portal proxy. The proxy terminate
 |                                                                                   |
 |  +--------------------+                               +------------------------+  |
 |  | Workload Container |                               | Sidecar Proxy          |  |
-|  | (Untrusted sandbox)|                               | (all-in-one-portal)    |  |
+|  | (Untrusted sandbox)|                               | (service-portal-agent) |  |
 |  |                    |                               |                        |  |
 |  | Holds NO secrets.  |  HTTP/HTTPS                   | Holds REAL secrets in  |  |
 |  | Sends placeholder  |  (Intercepted via iptables)   | private volume mount.  |  |
@@ -114,7 +114,7 @@ Any attempt by the workload to connect directly to external IP addresses or unau
 
 ### 3. Dynamic SNI TLS Minting
 When the workload issues an HTTPS request to an intercepted host (e.g., `https://gemini.backend` or `https://api.github.com`):
-1. The TCP connection is redirected by iptables to `all-in-one-portal` on port `8443`.
+1. The TCP connection is redirected by iptables to `service-portal-agent` on port `8443`.
 2. The proxy inspects the Server Name Indication (SNI) in the TLS `ClientHello`.
 3. The proxy dynamically mints an X.509 server certificate matching that hostname, signed by the pod-local CA private key (`ca-private/tls.key`), and caches the certificate in memory.
 4. The workload completes the TLS handshake successfully because it trusts the pod-local CA certificate (`ca-cert/tls.crt`).
