@@ -48,10 +48,13 @@
 #    the controller starts with an empty allowlist and all client calls
 #    are refused.
 
+# Also declared in k8s/node-agent.yaml; the privileged label is needed by the node agent.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: service-portal-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
 ---
 apiVersion: v1
 kind: ServiceAccount
