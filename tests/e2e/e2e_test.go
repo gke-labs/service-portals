@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2440,7 +2441,10 @@ spec:
 		if bindResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
 			t.Fatalf("expected Bind with wait to report PENDING (awaiting secrets), got %v", bindResp.GetStatus())
 		}
-		t.Logf("Bind with wait completed successfully (status: %v)", bindResp.GetStatus())
+		if want := []string{"backend-token"}; !slices.Equal(bindResp.GetMissingSecrets(), want) {
+			t.Fatalf("expected missing secrets %v after Bind with wait, got %v", want, bindResp.GetMissingSecrets())
+		}
+		t.Logf("Bind with wait completed successfully (status: %v, missing: %v)", bindResp.GetStatus(), bindResp.GetMissingSecrets())
 
 		secretsReq := &portalsv1.PodSecrets{
 			PodUid: controllerPodUID,
@@ -2455,6 +2459,9 @@ spec:
 		}
 		if injectResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
 			t.Fatalf("expected InjectSecrets with wait to end in ACCEPTED, got %v (refusal: %s)", injectResp.GetStatus(), injectResp.GetRefusalReason())
+		}
+		if len(injectResp.GetMissingSecrets()) != 0 {
+			t.Fatalf("expected no missing secrets after InjectSecrets with wait, got %v", injectResp.GetMissingSecrets())
 		}
 		t.Logf("InjectSecrets with wait ended in ACCEPTED as expected")
 	})
