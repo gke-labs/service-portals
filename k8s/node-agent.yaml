@@ -16,8 +16,9 @@
 #
 # Node Prerequisite:
 # Every node running this agent must have containerd configured with the Node
-# Resource Interface (NRI) enabled ("enable_nri = true" under
-# [plugins."io.containerd.nri.v1.nri"] in /etc/containerd/config.toml).
+# Resource Interface (NRI) enabled ("disable = false" under
+# [plugins."io.containerd.nri.v1.nri"] in /etc/containerd/config.toml, default
+# in containerd 2.0 and later).
 # The node agent connects to the NRI socket at /var/run/nri/nri.sock to intercept
 # container creation and configure transparent proxy redirection for opted-in pods.
 #
