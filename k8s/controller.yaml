@@ -1,0 +1,160 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reference manifest for the Service Portal Controller.
+#
+# Namespace:
+# All controller components are deployed into the "service-portal-system" namespace.
+#
+# TLS Certificate and Key:
+# The controller serves gRPC over TLS. The serving certificate and private key
+# come from a Kubernetes TLS Secret named "service-portal-controller-tls" that
+# the deployer must supply in the "service-portal-system" namespace before deploying
+# this manifest, containing "tls.crt" and "tls.key".
+#
+# Required Configuration Values:
+# Before applying this manifest to your cluster, set the following four values:
+# 1. image:
+#    In the Deployment container spec, set "image" to the location of the
+#    service-portal-controller container image
+#    (e.g. "gcr.io/PROJECT/service-portal-controller:TAG").
+# 2. audience:
+#    In the container args, set "--audience=<audience>" to the expected
+#    TokenReview audience used to authenticate incoming tokens from clients
+#    and node agents (e.g. "https://service-portal-controller" or your
+#    cluster's token audience).
+# 3. node agent service account:
+#    In the container args, set "--node-agent-account=<sa>" to the Kubernetes
+#    service account identity of the node agent in
+#    "system:serviceaccount:<namespace>:<name>" format
+#    (e.g. "system:serviceaccount:service-portals:portal-node-agent").
+# 4. client allowlist:
+#    In the container args, set "--client-allowlist=<sa1,sa2,...>" to a
+#    comma-separated list of permitted client service accounts in
+#    "system:serviceaccount:<namespace>:<name>" format
+#    (e.g. "system:serviceaccount:default:sandbox-controller").
+#    When applied as is with an empty allowlist ("--client-allowlist="),
+#    the controller starts with an empty allowlist and all client calls
+#    are refused.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: service-portal-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: service-portal-controller
+  namespace: service-portal-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: service-portal-controller
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: service-portal-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: service-portal-controller
+subjects:
+- kind: ServiceAccount
+  name: service-portal-controller
+  namespace: service-portal-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-portal-controller
+  namespace: service-portal-system
+  labels:
+    app: service-portal-controller
+spec:
+  # One replica: node agents hold a stream to one instance.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: service-portal-controller
+  template:
+    metadata:
+      labels:
+        app: service-portal-controller
+    spec:
+      serviceAccountName: service-portal-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: service-portal-controller
+        image: service-portal-controller:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: https
+          containerPort: 8443
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: 8443
+        args:
+        - "--listen-address=:8443"
+        - "--tls-cert-file=/etc/service-portal-controller/certs/tls.crt"
+        - "--tls-key-file=/etc/service-portal-controller/certs/tls.key"
+        - "--audience="
+        - "--node-agent-account="
+        - "--client-allowlist="
+        volumeMounts:
+        - name: tls-certs
+          mountPath: /etc/service-portal-controller/certs
+          readOnly: true
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: service-portal-controller-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-portal-controller
+  namespace: service-portal-system
+  labels:
+    app: service-portal-controller
+spec:
+  selector:
+    app: service-portal-controller
+  ports:
+  - name: https
+    port: 8443
+    targetPort: 8443
+    protocol: TCP
