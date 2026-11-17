@@ -1,6 +1,6 @@
-# All-In-One Portal (`cmd/all-in-one-portal`)
+# Service Portal Agent (`cmd/service-portal-agent`)
 
-`all-in-one-portal` is the primary multi-service proxy server. It is typically deployed as a sidecar container in sandboxed pods to handle transparent HTTP and HTTPS interception, dynamic TLS certificate minting, host-based routing, and credential swapping.
+`service-portal-agent` is the primary multi-service proxy server. It is typically deployed as a sidecar container in sandboxed pods to handle transparent HTTP and HTTPS interception, dynamic TLS certificate minting, host-based routing, and credential swapping.
 
 ---
 

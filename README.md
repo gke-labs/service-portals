@@ -35,7 +35,7 @@ The sandbox never sees or holds the real token.
 |                                                                                   |
 |  +--------------------+                               +------------------------+  |
 |  | Workload Container |                               | Sidecar Proxy          |  |
-|  | (Agent / Sandbox)  |                               | (all-in-one-portal)    |  |
+|  | (Agent / Sandbox)  |                               | (service-portal-agent) |  |
 |  |                    |                               |                        |  |
 |  | Holds NO secrets!  |  1. Transparent Redirection   | Holds REAL secrets in  |  |
 |  | Sends placeholder  |     via iptables              | private volume mount.  |  |
@@ -81,7 +81,7 @@ Placing an intercepting proxy in the outbound traffic path provides powerful cap
 
 The **transparent sidecar** is the single recommended deployment model for `service-portals`:
 - An `initContainer` (`init-service-portals`) configures packet-level `iptables` redirection and generates an ephemeral, pod-local CA.
-- A sidecar proxy (`all-in-one-portal`) intercepts HTTP (`:8080`) and HTTPS (`:8443`) outbound traffic, handles dynamic TLS certificate minting, matches multi-host `PortalRule` declarations, and swaps placeholder tokens for production credentials.
+- A sidecar proxy (`service-portal-agent`) intercepts HTTP (`:8080`) and HTTPS (`:8443`) outbound traffic, handles dynamic TLS certificate minting, matches multi-host `PortalRule` declarations, and swaps placeholder tokens for production credentials.
 - Workload containers require **zero application code changes** and run with unprivileged user permissions (`allowPrivilegeEscalation: false`) while egress traffic is strictly filtered.
 
 See the [Quick Start](#quick-start-transparent-sidecar) below and the [Sidecar Deployment Guide](docs/sidecar-container.md).
@@ -102,7 +102,7 @@ Create a Kubernetes Secret containing your routing rules and upstream credential
 apiVersion: v1
 kind: Secret
 metadata:
-  name: all-in-one-portal-sidecar-secret
+  name: service-portal-agent-sidecar-secret
 stringData:
   gemini-rule.yaml: |
     apiVersion: portals.gke.io/v1alpha1
@@ -136,7 +136,7 @@ kubectl apply -f k8s/sidecar.yaml
 The manifest configures:
 - `hostAliases` mapping `gemini.backend` and `github.backend` to dummy IPs so TCP connections are initiated.
 - An `initContainer` (`init-service-portals`) generating the pod-local CA and installing iptables redirection.
-- A sidecar container (`all-in-one-portal`) running as UID `1337` to intercept traffic and inject tokens.
+- A sidecar container (`service-portal-agent`) running as UID `1337` to intercept traffic and inject tokens.
 - A sandboxed workload container running as UID `1000` with `allowPrivilegeEscalation: false`.
 
 ### 3. Test from Within the Sandbox
@@ -157,7 +157,7 @@ The proxy intercepts the request, rewrites the destination to `https://generativ
 
 ## Available Service Portals & Components
 
-- **`all-in-one-portal`** (`cmd/all-in-one-portal/`): Recommended multi-service sidecar proxy with dynamic `PortalRule` routing, SNI TLS termination, and `SIGHUP` reload. ([README](cmd/all-in-one-portal/README.md))
+- **`service-portal-agent`** (`cmd/service-portal-agent/`): Recommended multi-service sidecar proxy with dynamic `PortalRule` routing, SNI TLS termination, and `SIGHUP` reload. ([README](cmd/service-portal-agent/README.md))
 - **`init-service-portals`** (`cmd/init-service-portals/`): Init container utility for Root CA generation, permission setup, and iptables redirection for transparent sidecar mode. ([README](cmd/init-service-portals/README.md))
 - **`gitproxy-server`** (`cmd/gitproxy-server/`): High-performance Git HTTP caching proxy supporting protocols v0/v1/v2, commit DAG reachability pruning, and packfile generation. ([README](cmd/gitproxy-server/README.md))
 - **`service-portal`** (`cmd/service-portal/`): *Legacy single-target binary*: Generic single-target reverse proxy and explicit HTTP CONNECT proxy; scheduled for removal alongside explicit Service mode. ([README](cmd/service-portal/README.md))

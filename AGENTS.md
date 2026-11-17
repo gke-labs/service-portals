@@ -13,7 +13,7 @@
 - **`pkg/gitproxy/`**: Protocol-aware Git caching. Implements Git Smart HTTP protocols (v0, v1, v2), packfile and delta chain (`OFS_DELTA`, `REF_DELTA`) parsing, commit DAG reachability analysis, and dynamic packfile generation from cache based on client `have` lines.
 
 ### Applications (`cmd/` and service directories)
-- **`cmd/all-in-one-portal/`**: The primary sidecar proxy binary. Uses `pkg/portals` to load `PortalRule` secrets from `--rules-dir`, listening on `:8080` (HTTP) and `:8443` (HTTPS) with SNI-based dynamic TLS minting.
+- **`cmd/service-portal-agent/`**: The primary sidecar proxy binary. Uses `pkg/portals` to load `PortalRule` secrets from `--rules-dir`, listening on `:8080` (HTTP) and `:8443` (HTTPS) with SNI-based dynamic TLS minting.
 - **`cmd/init-service-portals/`**: Setup binary for the pod `initContainer`. Generates ephemeral pod-local 2048-bit RSA Root CA key pairs, writes public certs to `/etc/service-portal/ca`, and writes private keys to `/etc/service-portal/ca-private`; executed by `entrypoint.sh` before it sets up iptables redirection and egress filtering.
 - **`cmd/gitproxy-server/`**: Standalone caching Git proxy binary supporting disk/memory caches and upstream token injection.
 - **`cmd/service-portal/`**: Single-target reverse proxy and HTTP proxy binary.

@@ -1,12 +1,12 @@
 # Service Portal - Sidecar Container Configuration
 
-This document describes how to deploy the **All-In-One Service Portal** as a transparent sidecar container inside a Kubernetes pod. This deployment pattern centralizes authentication and credential management without exposing API keys or tokens to the application (workload) container, and without requiring code changes to the application.
+This document describes how to deploy the **Service Portal Agent** as a transparent sidecar container inside a Kubernetes pod. This deployment pattern centralizes authentication and credential management without exposing API keys or tokens to the application (workload) container, and without requiring code changes to the application.
 
 ---
 
 ## Architecture Overview
 
-In a sidecar deployment model, the workload container, the `init-service-portals` init container, and the `all-in-one-portal` proxy container run within the same Kubernetes Pod, sharing the same network namespace, loopback interface, and pod-local storage volumes.
+In a sidecar deployment model, the workload container, the `init-service-portals` init container, and the `service-portal-agent` proxy container run within the same Kubernetes Pod, sharing the same network namespace, loopback interface, and pod-local storage volumes.
 
 The `init-service-portals` container runs prior to the application start. It generates a pod-local Root CA and configures `iptables` rules to transparently intercept outbound TCP traffic:
 - Port `80` (HTTP) is redirected to local proxy port `8080`.
@@ -19,7 +19,7 @@ The `init-service-portals` container runs prior to the application start. It gen
 |                                                                                 |
 |  +--------------------+                               +----------------------+  |
 |  | Workload Container |                               | Sidecar Container    |  |
-|  | (runAsUser: 1000)  |                               | (all-in-one-portal)  |  |
+|  | (runAsUser: 1000)  |                               |(service-portal-agent)|  |
 |  |                    |                               | (runAsUser: 1337)    |  |
 |  | Makes HTTP/HTTPS   |  Port 80 (HTTP) -> :8080      |                      |  |
 |  | request to host    |------------------------------>| HTTP Listener (:8080)|  |
@@ -45,7 +45,7 @@ Below is the complete, production-ready manifest implementing the transparent si
 apiVersion: v1
 kind: Secret
 metadata:
-  name: all-in-one-portal-sidecar-secret
+  name: service-portal-agent-sidecar-secret
 stringData:
   gemini-rule.yaml: |
     apiVersion: portals.gke.io/v1alpha1
@@ -143,11 +143,11 @@ spec:
           mountPath: /etc/service-portal/ca
           readOnly: true
 
-      # 2. The Sidecar Container: runs the all-in-one-portal proxy.
+      # 2. The Sidecar Container: runs the service-portal-agent proxy.
       # It must run as the specified non-root user (UID 1337) matching PROXY_UID so that
       # its outbound requests are not intercepted and redirected to itself.
       - name: service-portal-sidecar
-        image: all-in-one-portal:latest
+        image: service-portal-agent:latest
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 1337
@@ -176,7 +176,7 @@ spec:
       volumes:
       - name: rules-volume
         secret:
-          secretName: all-in-one-portal-sidecar-secret
+          secretName: service-portal-agent-sidecar-secret
       - name: ca-cert
         emptyDir: {}
       - name: ca-key
@@ -235,7 +235,7 @@ The `init-service-portals` container sets up the following rules (mirrored in `i
 12. Fail-closed IPv6: If IPv6 is disabled in the netns (`/proc/sys/net/ipv6/conf/all/disable_ipv6=1`), IPv6 rules are skipped with an info log. Otherwise, failure to restore `ip6tables` rules is fatal (`exit 1`) unless opted out with `ALLOW_UNFILTERED_IPV6=true`.
 13. Dumps the effective ruleset (`iptables-save`, `ip6tables-save`) to pod logs on startup.
 
-### 4. Sidecar Proxy Container (`all-in-one-portal`)
+### 4. Sidecar Proxy Container (`service-portal-agent`)
 The proxy container runs as UID `1337` and listens on:
 - **Port 8080 (HTTP)**: Handles cleartext HTTP traffic redirected from port 80.
 - **Port 8443 (HTTPS)**: Uses the CA private key in `/etc/service-portal/ca-private/tls.key` and certificate in `/etc/service-portal/ca-private/tls.crt` to dynamically sign TLS certificates for the requested SNI hostname.
