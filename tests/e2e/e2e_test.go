@@ -15,12 +15,17 @@
 package e2e
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -30,6 +35,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func TestServicePortal(t *testing.T) {
@@ -1261,6 +1274,97 @@ func generateSignedCert(caCertPEM, caKeyPEM []byte, hosts []string) (certPEM, ke
 	return cOut, kOut, nil
 }
 
+func startPortForward(ctx context.Context, namespace, target string) (string, func(), error) {
+	cmd := exec.CommandContext(ctx, "kubectl", "-n", namespace, "port-forward", target, ":8443")
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", nil, fmt.Errorf("getting port-forward stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return "", nil, fmt.Errorf("starting port-forward: %w", err)
+	}
+
+	addrCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Expected output format: "Forwarding from 127.0.0.1:XXXXX -> 8443"
+			if strings.Contains(line, "Forwarding from") && strings.Contains(line, "-> 8443") {
+				fields := strings.Fields(line)
+				for _, f := range fields {
+					if strings.HasPrefix(f, "127.0.0.1:") {
+						addrCh <- f
+						return
+					}
+				}
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			errCh <- err
+		} else {
+			errMsg := strings.TrimSpace(errBuf.String())
+			if errMsg != "" {
+				errCh <- fmt.Errorf("port-forward exited without printing forwarding address: %s", errMsg)
+			} else {
+				errCh <- errors.New("port-forward exited without printing forwarding address")
+			}
+		}
+	}()
+
+	select {
+	case addr := <-addrCh:
+		var dialErr error
+		for i := 0; i < 50; i++ {
+			c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+			if err == nil {
+				c.Close()
+				dialErr = nil
+				break
+			}
+			dialErr = err
+			time.Sleep(100 * time.Millisecond)
+		}
+		if dialErr != nil {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			return "", nil, fmt.Errorf("timed out waiting for port-forward to accept connections: %w", dialErr)
+		}
+		cleanup := func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+			}
+		}
+		return addr, cleanup, nil
+	case err := <-errCh:
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return "", nil, fmt.Errorf("port-forward failed: %w", err)
+	case <-time.After(30 * time.Second):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return "", nil, errors.New("timed out waiting for port-forward output")
+	}
+}
+
+func getServiceAccountToken(t *testing.T, sa, audience, namespace string) string {
+	t.Helper()
+	cmd := exec.Command("kubectl", "create", "token", sa, "--audience="+audience, "-n", namespace)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to create token for serviceaccount %s/%s: %v (output: %s)", namespace, sa, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func runSidecarDualStackAssertions(t *testing.T, h *Harness, clientPodName, backendIPv6ClusterIP string) {
 	if backendIPv6ClusterIP == "" {
 		t.Fatalf("runSidecarDualStackAssertions called on dual-stack cluster but backendIPv6ClusterIP is empty")
@@ -1518,10 +1622,12 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 	h.DockerBuild("all-in-one-portal:e2e", filepath.Join(gitRoot, "images/all-in-one-portal/Dockerfile"), gitRoot)
 	h.DockerBuild("portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/portal-nri-plugin/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
+	h.DockerBuild("service-portal-controller:e2e", filepath.Join(gitRoot, "images/service-portal-controller/Dockerfile"), gitRoot)
 
 	h.KindLoad("all-in-one-portal:e2e")
 	h.KindLoad("portal-nri-plugin:e2e")
 	h.KindLoad("toolbox:e2e")
+	h.KindLoad("service-portal-controller:e2e")
 
 	serviceIPFamilies := ""
 	if h.IsDualStack() {
@@ -1531,6 +1637,95 @@ func TestNRIPluginEgressDenied(t *testing.T) {
   - IPv6
   ipFamilyPolicy: RequireDualStack`
 	}
+
+	const (
+		controllerAudience   = "https://service-portal-controller"
+		nodeAgentAccount     = "system:serviceaccount:default:portal-node-agent"
+		allowedClientSA      = "sandbox-controller"
+		unauthorizedClientSA = "unauthorized-controller"
+		allowedClientAccount = "system:serviceaccount:default:sandbox-controller"
+	)
+
+	// Create client service accounts for controller authorization tests
+	clientSAManifest := `
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sandbox-controller
+  namespace: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: unauthorized-controller
+  namespace: default
+`
+	h.KubectlApplyContent(clientSAManifest)
+	t.Cleanup(func() {
+		h.RunCommand("kubectl", "delete", "serviceaccount", allowedClientSA, unauthorizedClientSA, "-n", "default", "--ignore-not-found")
+	})
+
+	// Deploy Service Portal Controller certificates and manifest
+	controllerCACert, controllerCAKey, err := generateTestCA()
+	if err != nil {
+		t.Fatalf("failed to generate controller CA: %v", err)
+	}
+	controllerCert, controllerKey, err := generateSignedCert(controllerCACert, controllerCAKey, []string{
+		"service-portal-controller",
+		"service-portal-controller.service-portal-system",
+		"service-portal-controller.service-portal-system.svc",
+		"service-portal-controller.service-portal-system.svc.cluster.local",
+		"localhost",
+		"127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("failed to generate controller serving cert: %v", err)
+	}
+
+	controllerTLSSecretManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: service-portal-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-controller-tls
+  namespace: service-portal-system
+type: kubernetes.io/tls
+data:
+  tls.crt: %s
+  tls.key: %s
+`, base64.StdEncoding.EncodeToString(controllerCert),
+		base64.StdEncoding.EncodeToString(controllerKey))
+	h.KubectlApplyContent(controllerTLSSecretManifest)
+
+	controllerCAManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: service-portal-controller-ca
+  namespace: default
+data:
+  tls.crt: %s
+`, base64.StdEncoding.EncodeToString(controllerCACert))
+	h.KubectlApplyContent(controllerCAManifest)
+
+	controllerManifestPath := filepath.Join(gitRoot, "k8s/controller.yaml")
+	bCtrl, err := os.ReadFile(controllerManifestPath)
+	if err != nil {
+		t.Fatalf("Failed to read controller manifest: %v", err)
+	}
+	controllerManifest := string(bCtrl)
+	controllerManifest = strings.ReplaceAll(controllerManifest, "image: service-portal-controller:latest", "image: service-portal-controller:e2e\n        imagePullPolicy: Never")
+	controllerManifest = strings.ReplaceAll(controllerManifest, `"--audience="`, fmt.Sprintf(`"--audience=%s"`, controllerAudience))
+	controllerManifest = strings.ReplaceAll(controllerManifest, `"--node-agent-account="`, fmt.Sprintf(`"--node-agent-account=%s"`, nodeAgentAccount))
+	controllerManifest = strings.ReplaceAll(controllerManifest, `"--client-allowlist="`, fmt.Sprintf(`"--client-allowlist=%s"`, allowedClientAccount))
+
+	h.KubectlApplyContent(controllerManifest)
+	h.WaitForDeploymentInNamespace("service-portal-system", "service-portal-controller", 2*time.Minute)
+	h.WaitForPodReady("app=service-portal-controller", 2*time.Minute)
 
 	// Deploy Backend Service and Deployment
 	backendCACert, backendCAKey, err := generateTestCA()
@@ -1732,13 +1927,25 @@ spec:
         - name: SERVE_DNS
           value: "true"
         - name: STORE_DIR
-          value: "/run/service-portal/store"` + proxyHostV6Env + `
+          value: "/run/service-portal/store"
+        - name: CONTROLLER_ADDR
+          value: "service-portal-controller.service-portal-system.svc:8443"
+        - name: CONTROLLER_TOKEN_PATH
+          value: "/var/run/secrets/tokens/controller/token"
+        - name: CONTROLLER_CA_CERT_PATH
+          value: "/etc/service-portal/controller-ca/tls.crt"` + proxyHostV6Env + `
         volumeMounts:
         - name: ca-volume
           mountPath: /etc/service-portal/ca
           readOnly: true
         - name: backend-ca-volume
           mountPath: /etc/service-portal/backend-ca
+          readOnly: true
+        - name: controller-ca-volume
+          mountPath: /etc/service-portal/controller-ca
+          readOnly: true
+        - name: controller-token
+          mountPath: /var/run/secrets/tokens/controller
           readOnly: true
         - name: socket-volume
           mountPath: /run/service-portal
@@ -1777,6 +1984,16 @@ spec:
       - name: backend-ca-volume
         secret:
           secretName: backend-ca
+      - name: controller-ca-volume
+        secret:
+          secretName: service-portal-controller-ca
+      - name: controller-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+              audience: https://service-portal-controller
       - name: ca-volume
         hostPath:
           path: /etc/service-portal/ca
@@ -1853,6 +2070,27 @@ spec:
 
 	// 6. Assert the client pod now schedules, transitions to Running, and becomes Ready
 	h.WaitForPodReady("app=test-client-nri-deny", 2*time.Minute)
+
+	// Verify controller is ready and node agent stream is connected
+	t.Run("ControllerReady_NodeStreamConnected", func(t *testing.T) {
+		h.WaitForDeploymentInNamespace("service-portal-system", "service-portal-controller", 2*time.Minute)
+		h.WaitForPodReady("app=service-portal-controller", 2*time.Minute)
+
+		var streamConnected bool
+		for i := 0; i < 30; i++ {
+			ctrlLogs := h.GetPodLogsByNamespaceAndLabel("service-portal-system", "app=service-portal-controller", "service-portal-controller")
+			nodeLogs := h.GetPodLogsByLabel("app=portal-node-agent", "proxy")
+			if strings.Contains(ctrlLogs, "stream connected") || strings.Contains(nodeLogs, "controller: stream connected") {
+				streamConnected = true
+				t.Logf("verified controller is ready and node agent stream is connected")
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if !streamConnected {
+			t.Fatalf("timed out waiting for node agent stream to connect to controller")
+		}
+	})
 
 	if h.IsGVisor() {
 		dmesgCmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--", "dmesg")
@@ -2075,6 +2313,223 @@ spec:
 			t.Fatalf("expected HTTPS request after unbind to be denied, but succeeded: %s", outHTTPS)
 		}
 		t.Logf("HTTPS request after unbind denied as expected: %v (output: %s)", errHTTPS, outHTTPS)
+	})
+
+	// 15. Controller E2E: bind a pod through the Service Portal Controller deployed from k8s/controller.yaml
+	controllerPodName := "test-client-controller"
+	h.DeletePod(controllerPodName)
+	t.Cleanup(func() {
+		h.DeletePod(controllerPodName)
+	})
+
+	controllerClientPodManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  labels:
+    app: %s
+    service-portal.gke.io/intercept: "true"
+spec:
+%s  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`, controllerPodName, controllerPodName, runtimeClassField)
+	h.KubectlApplyContent(controllerClientPodManifest)
+	h.WaitForPodReady("app="+controllerPodName, 2*time.Minute)
+
+	cmdCtrlUID := exec.Command("kubectl", "get", "pod", controllerPodName, "-o", "jsonpath={.metadata.uid}")
+	outCtrlUID, err := cmdCtrlUID.CombinedOutput()
+	if err != nil {
+		t.Fatalf("failed to get controller client pod UID: %v (output: %s)", err, outCtrlUID)
+	}
+	controllerPodUID := strings.TrimSpace(string(outCtrlUID))
+
+	portForwardCtx, cancelPortForward := context.WithCancel(context.Background())
+	t.Cleanup(cancelPortForward)
+
+	controllerAddr, cleanupForward, err := startPortForward(portForwardCtx, "service-portal-system", "svc/service-portal-controller")
+	if err != nil {
+		t.Fatalf("failed to start port-forward to controller: %v", err)
+	}
+	t.Cleanup(cleanupForward)
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(controllerCACert)
+	tlsCreds := credentials.NewTLS(&tls.Config{
+		RootCAs:    caPool,
+		ServerName: "service-portal-controller.service-portal-system.svc",
+	})
+	conn, err := grpc.NewClient(controllerAddr, grpc.WithTransportCredentials(tlsCreds))
+	if err != nil {
+		t.Fatalf("failed to dial controller at %s: %v", controllerAddr, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	bindClient := portalsv1.NewPodBindServiceClient(conn)
+
+	authorizedToken := getServiceAccountToken(t, allowedClientSA, controllerAudience, "default")
+	unauthorizedToken := getServiceAccountToken(t, unauthorizedClientSA, controllerAudience, "default")
+
+	authCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+authorizedToken))
+	unauthCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+unauthorizedToken))
+
+	policyProto := &portalsv1.EgressPolicy{}
+	if err := protojson.Unmarshal([]byte(policyJSON), policyProto); err != nil {
+		t.Fatalf("failed to unmarshal policyJSON: %v", err)
+	}
+
+	// Subtest: a pod with no binding is denied (fail closed)
+	t.Run("Controller_UnboundPod_Denied", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", controllerPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://backend/controller-unbound-check")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected unbound pod request through controller to be denied, but succeeded: %s", out)
+		}
+		t.Logf("unbound pod request denied as expected: %v (output: %s)", err, out)
+	})
+
+	// Subtest: a client whose service account is not on the allowlist gets PermissionDenied and the pod stays denied
+	t.Run("Controller_UnauthorizedClient_PermissionDenied_PodStaysDenied", func(t *testing.T) {
+		ctrlPolicy := &portalsv1.PodPolicy{
+			PodUid:   controllerPodUID,
+			Identity: "unauthorized-user",
+			Policy:   policyProto,
+			Wait:     true,
+		}
+		_, err := bindClient.Bind(unauthCtx, ctrlPolicy)
+		if err == nil {
+			t.Fatal("expected unauthorized client Bind to fail, but succeeded")
+		}
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("expected PermissionDenied for unauthorized client, got %v: %v", status.Code(err), err)
+		}
+		t.Logf("unauthorized client Bind rejected with PermissionDenied as expected: %v", err)
+
+		// Assert pod stays denied
+		cmd := exec.Command("kubectl", "exec", controllerPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "http://backend/controller-unauth-check")
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected pod to stay denied after unauthorized Bind attempt, but succeeded: %s", out)
+		}
+		t.Logf("pod stayed denied after unauthorized Bind attempt: %v (output: %s)", err, out)
+	})
+
+	// Subtest: Bind then InjectSecrets, each with wait, end in accepted
+	const controllerSecret = "controller-secret-token"
+	t.Run("Controller_BindAndInjectSecrets_Accepted", func(t *testing.T) {
+		ctrlPolicy := &portalsv1.PodPolicy{
+			PodUid:   controllerPodUID,
+			Identity: "test-user-controller",
+			Policy:   policyProto,
+			Wait:     true,
+		}
+		bindResp, err := bindClient.Bind(authCtx, ctrlPolicy)
+		if err != nil {
+			t.Fatalf("Bind with wait failed: %v", err)
+		}
+		if !bindResp.GetBound() {
+			t.Fatalf("expected Bind with wait to report bound=true, got bound=%v", bindResp.GetBound())
+		}
+		if bindResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+			t.Fatalf("expected Bind with wait to report PENDING (awaiting secrets), got %v", bindResp.GetStatus())
+		}
+		t.Logf("Bind with wait completed successfully (status: %v)", bindResp.GetStatus())
+
+		secretsReq := &portalsv1.PodSecrets{
+			PodUid: controllerPodUID,
+			Secrets: map[string][]byte{
+				"backend-token": []byte(controllerSecret),
+			},
+			Wait: true,
+		}
+		injectResp, err := bindClient.InjectSecrets(authCtx, secretsReq)
+		if err != nil {
+			t.Fatalf("InjectSecrets with wait failed: %v", err)
+		}
+		if injectResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
+			t.Fatalf("expected InjectSecrets with wait to end in ACCEPTED, got %v (refusal: %s)", injectResp.GetStatus(), injectResp.GetRefusalReason())
+		}
+		t.Logf("InjectSecrets with wait ended in ACCEPTED as expected")
+	})
+
+	// Subtest: that pod's request reaches the backend with the placeholder replaced
+	t.Run("Controller_BoundPod_RequestReachesBackend_CredentialSwapped", func(t *testing.T) {
+		cmdHTTP := exec.Command("kubectl", "exec", controllerPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "http://backend/controller-positive-http")
+		outHTTP, errHTTP := cmdHTTP.CombinedOutput()
+		if errHTTP != nil {
+			t.Fatalf("HTTP request from controller-bound pod failed: %v (output: %s)", errHTTP, outHTTP)
+		}
+		if !strings.Contains(string(outHTTP), "Bearer "+controllerSecret) {
+			t.Fatalf("HTTP response missing injected credential")
+		}
+		if strings.Contains(string(outHTTP), "placeholder-token") {
+			t.Fatalf("HTTP response still contains placeholder token")
+		}
+
+		cmdHTTPS := exec.Command("kubectl", "exec", controllerPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "https://backend/controller-positive-https")
+		outHTTPS, errHTTPS := cmdHTTPS.CombinedOutput()
+		if errHTTPS != nil {
+			t.Fatalf("HTTPS request from controller-bound pod failed: %v (output: %s)", errHTTPS, outHTTPS)
+		}
+		if !strings.Contains(string(outHTTPS), "Bearer "+controllerSecret) {
+			t.Fatalf("HTTPS response missing injected credential")
+		}
+		if strings.Contains(string(outHTTPS), "placeholder-token") {
+			t.Fatalf("HTTPS response still contains placeholder token")
+		}
+
+		backendLogs := h.GetDeploymentLogs("backend")
+		if !strings.Contains(backendLogs, "/controller-positive-http") {
+			t.Fatalf("backend access log missing /controller-positive-http")
+		}
+		if !strings.Contains(backendLogs, "/controller-positive-https") {
+			t.Fatalf("backend access log missing /controller-positive-https")
+		}
+		t.Logf("verified backend received swapped credentials for both HTTP and HTTPS")
+	})
+
+	// Subtest: Unbind with wait returns the pod to denied
+	t.Run("Controller_Unbind_RevertsToDenied", func(t *testing.T) {
+		unbindResp, err := bindClient.Unbind(authCtx, &portalsv1.UnbindRequest{
+			PodUid: controllerPodUID,
+			Wait:   true,
+		})
+		if err != nil {
+			t.Fatalf("Unbind with wait failed: %v", err)
+		}
+		if unbindResp.GetBound() {
+			t.Fatalf("expected Unbind with wait to report bound=false, got bound=%v", unbindResp.GetBound())
+		}
+		if unbindResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
+			t.Fatalf("expected Unbind with wait to end in ACCEPTED, got %v", unbindResp.GetStatus())
+		}
+		t.Logf("Unbind with wait completed successfully (status: %v)", unbindResp.GetStatus())
+
+		// Verify requests from pod are now denied
+		cmdHTTP := exec.Command("kubectl", "exec", controllerPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "http://backend/controller-http-after-unbind")
+		outHTTP, errHTTP := cmdHTTP.CombinedOutput()
+		if errHTTP == nil {
+			t.Fatalf("expected HTTP request after controller unbind to be denied, but succeeded: %s", outHTTP)
+		}
+		t.Logf("HTTP request after controller unbind denied as expected: %v (output: %s)", errHTTP, outHTTP)
+
+		cmdHTTPS := exec.Command("kubectl", "exec", controllerPodName, "-c", "workload", "--",
+			"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "https://backend/controller-https-after-unbind")
+		outHTTPS, errHTTPS := cmdHTTPS.CombinedOutput()
+		if errHTTPS == nil {
+			t.Fatalf("expected HTTPS request after controller unbind to be denied, but succeeded: %s", outHTTPS)
+		}
+		t.Logf("HTTPS request after controller unbind denied as expected: %v (output: %s)", errHTTPS, outHTTPS)
 	})
 }
 

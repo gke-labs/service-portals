@@ -120,6 +120,7 @@ func (s *Server) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 	}
 	s.nodes[node] = ns
 	s.mu.Unlock()
+	log.Printf("controller: node %s stream connected", node)
 
 	defer func() {
 		s.mu.Lock()
@@ -128,6 +129,7 @@ func (s *Server) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 			s.resetStreamLocked(ns)
 		}
 		s.mu.Unlock()
+		log.Printf("controller: node %s stream disconnected", node)
 	}()
 
 	errCh := make(chan error, 1)
