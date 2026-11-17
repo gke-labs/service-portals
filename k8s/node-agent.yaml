@@ -1,0 +1,271 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reference manifest for the Service Portal Node Agent (NRI mode with bound egress policy).
+#
+# Node Prerequisite:
+# Every node running this agent must have containerd configured with the Node
+# Resource Interface (NRI) enabled ("enable_nri = true" under
+# [plugins."io.containerd.nri.v1.nri"] in /etc/containerd/config.toml).
+# The node agent connects to the NRI socket at /var/run/nri/nri.sock to intercept
+# container creation and configure transparent proxy redirection for opted-in pods.
+#
+# Namespace:
+# All node agent components are deployed into the "service-portal-system" namespace,
+# matching the Service Portal Controller manifest (k8s/controller.yaml).
+# The namespace is labeled with "pod-security.kubernetes.io/enforce: privileged"
+# because the node agent requires host networking, host filesystem paths, and elevated
+# Linux capabilities to configure node iptables and NRI integration.
+#
+# Controller CA Certificate:
+# The node agent dials the Service Portal Controller over TLS and verifies the
+# controller's server certificate using the CA certificate supplied in a Kubernetes
+# Secret named "service-portal-controller-ca" (containing "tls.crt") in the
+# "service-portal-system" namespace.
+#
+# Node Agent Service Account:
+# The DaemonSet runs with the "portal-node-agent" ServiceAccount in the
+# "service-portal-system" namespace. The deployer supplies this identity to the
+# Service Portal Controller's "--node-agent-account" flag in
+# "system:serviceaccount:<namespace>:<name>" format:
+#   system:serviceaccount:service-portal-system:portal-node-agent
+#
+# Required Configuration Values:
+# Before applying this manifest to your cluster, verify or update the following values:
+# 1. images:
+#    In the container specs, set "image" to the appropriate container images:
+#    - node-init and nri-plugin: location of the portal-nri-plugin image
+#      (e.g. "gcr.io/PROJECT/portal-nri-plugin:TAG").
+#    - proxy: location of the service-portal-agent image
+#      (e.g. "gcr.io/PROJECT/service-portal-agent:TAG").
+# 2. audience:
+#    In the projected volume ("controller-token"), set "audience" to the expected
+#    TokenReview audience configured on the Service Portal Controller (matching the
+#    controller's "--audience" argument, e.g. "https://service-portal-controller").
+#    When applied as is with an empty audience ("audience: \"\""), the projected
+#    token is issued for the API server's own audience; the value must match the
+#    controller's "--audience".
+#
+# Elevated Privileges Rationale:
+# - hostNetwork: true:
+#   The proxy container binds to the node IP (status.hostIP) to receive intercepted
+#   HTTP, HTTPS, and DNS traffic redirected by host netfilter chains from sandbox pods.
+#   The NRI plugin manipulates host netfilter chains for intercepted pod interfaces.
+# - dnsPolicy: ClusterFirstWithHostNet:
+#   Ensures the hostNetwork pod can resolve in-cluster DNS records, including the
+#   Service Portal Controller service (service-portal-controller.service-portal-system.svc).
+# - Capabilities:
+#   - proxy: NET_BIND_SERVICE allows the non-root process (UID 65532) to bind to
+#     privileged DNS port 53.
+#   - nri-plugin: NET_ADMIN is required to manage iptables and ip6tables PREROUTING
+#     chains on host interfaces for intercepted pods. SYS_ADMIN is required to inspect
+#     pod network namespaces in /run/netns and bind-mount certificates into sandbox
+#     container namespaces via NRI.
+# - Host Paths:
+#   - /etc/service-portal/ca: Directory where node-init generates or stores the node CA
+#     certificate and key used by the proxy to dynamically generate TLS certificates
+#     for intercepted endpoints, and injected into sandbox containers by the NRI plugin.
+#   - /var/run/nri: containerd NRI domain socket for plugin registration and lifecycle events.
+#   - /run/netns: Container network namespaces on the host, observed by the NRI plugin via
+#     HostToContainer mount propagation to identify virtual ethernet interfaces.
+#   - /run/service-portal: Host memory-backed tmpfs (/run) directory holding private Unix
+#     domain sockets (portal.sock, bind.sock) and pod bindings under
+#     /run/service-portal/store that survive an agent restart or upgrade, not a
+#     node reboot, without writing secrets to persistent disk.
+
+# Also declared in k8s/controller.yaml; the privileged label is needed by the node agent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: service-portal-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: portal-node-agent
+  namespace: service-portal-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: portal-node-agent
+  namespace: service-portal-system
+  labels:
+    app: portal-node-agent
+spec:
+  selector:
+    matchLabels:
+      app: portal-node-agent
+  template:
+    metadata:
+      labels:
+        app: portal-node-agent
+    spec:
+      serviceAccountName: portal-node-agent
+      tolerations:
+      - key: "service-portal.gke.io/uninitialized"
+        operator: "Exists"
+        effect: "NoSchedule"
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      initContainers:
+      - name: node-init
+        image: portal-nri-plugin:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - "init"
+        - "-ca-dir=/etc/service-portal/ca"
+        - "-socket-dir=/run/service-portal"
+        - "-proxy-uid=65532"
+        - "-proxy-gid=65532"
+        resources:
+          requests:
+            cpu: 10m
+            memory: 16Mi
+        volumeMounts:
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+        - name: socket-volume
+          mountPath: /run/service-portal
+      containers:
+      - name: proxy
+        image: service-portal-agent:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            add:
+            - NET_BIND_SERVICE
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: https
+          containerPort: 8443
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+        livenessProbe:
+          tcpSocket:
+            port: 8080
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        env:
+        - name: PORT
+          value: "8080"
+        - name: HTTPS_PORT
+          value: "8443"
+        - name: PROXY_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: ENABLE_POD_MAP
+          value: "true"
+        - name: ADMIN_ADDR
+          value: "/run/service-portal/portal.sock"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: CA_KEY_PATH
+          value: "/etc/service-portal/ca/tls.key"
+        - name: SERVE_DNS
+          value: "true"
+        - name: STORE_DIR
+          value: "/run/service-portal/store"
+        - name: CONTROLLER_ADDR
+          value: "service-portal-controller.service-portal-system.svc:8443"
+        - name: CONTROLLER_TOKEN_PATH
+          value: "/var/run/secrets/tokens/controller/token"
+        - name: CONTROLLER_CA_CERT_PATH
+          value: "/etc/service-portal/controller-ca/tls.crt"
+        volumeMounts:
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+          readOnly: true
+        - name: controller-ca-volume
+          mountPath: /etc/service-portal/controller-ca
+          readOnly: true
+        - name: controller-token
+          mountPath: /var/run/secrets/tokens/controller
+          readOnly: true
+        - name: socket-volume
+          mountPath: /run/service-portal
+      - name: nri-plugin
+        image: portal-nri-plugin:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - SYS_ADMIN
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        env:
+        - name: PROXY_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: PROXY_PORT
+          value: "8080"
+        - name: PROXY_HTTPS_PORT
+          value: "8443"
+        - name: ADMIN_URL
+          value: "unix:///run/service-portal/portal.sock"
+        - name: CA_CERT_PATH
+          value: "/etc/service-portal/ca/tls.crt"
+        - name: NRI_SOCKET_PATH
+          value: "/var/run/nri/nri.sock"
+        volumeMounts:
+        - name: ca-volume
+          mountPath: /etc/service-portal/ca
+        - name: nri-socket
+          mountPath: /var/run/nri
+        - name: netns
+          mountPath: /run/netns
+          mountPropagation: HostToContainer
+        - name: socket-volume
+          mountPath: /run/service-portal
+      volumes:
+      - name: controller-ca-volume
+        secret:
+          secretName: service-portal-controller-ca
+      - name: controller-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+              audience: ""
+      - name: ca-volume
+        hostPath:
+          path: /etc/service-portal/ca
+          type: DirectoryOrCreate
+      - name: nri-socket
+        hostPath:
+          path: /var/run/nri
+      - name: netns
+        hostPath:
+          path: /run/netns
+      - name: socket-volume
+        hostPath:
+          path: /run/service-portal
+          type: DirectoryOrCreate
