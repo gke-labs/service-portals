@@ -237,6 +237,12 @@ func (h *Harness) WaitForDeployment(name string, timeout time.Duration) {
 	h.RunCommand("kubectl", "rollout", "status", "deployment/"+name, "--timeout="+timeout.String())
 }
 
+func (h *Harness) WaitForDeploymentInNamespace(namespace, name string, timeout time.Duration) {
+	h.t.Helper()
+	h.t.Logf("Waiting for deployment %s in namespace %s", name, namespace)
+	h.RunCommand("kubectl", "-n", namespace, "rollout", "status", "deployment/"+name, "--timeout="+timeout.String())
+}
+
 func (h *Harness) WaitForPodReady(labelSelector string, timeout time.Duration) {
 	h.t.Helper()
 	h.t.Logf("Waiting for pod with label %s to be ready", labelSelector)
@@ -269,6 +275,19 @@ func (h *Harness) GetPodLogsByLabel(labelSelector, container string) string {
 	out, err := exec.Command("kubectl", args...).CombinedOutput()
 	if err != nil {
 		h.t.Logf("Failed to get logs for label %s, container %s: %v (output: %s)", labelSelector, container, err, out)
+	}
+	return string(out)
+}
+
+func (h *Harness) GetPodLogsByNamespaceAndLabel(namespace, labelSelector, container string) string {
+	h.t.Helper()
+	args := []string{"-n", namespace, "logs", "-l", labelSelector}
+	if container != "" {
+		args = append(args, "-c", container)
+	}
+	out, err := exec.Command("kubectl", args...).CombinedOutput()
+	if err != nil {
+		h.t.Logf("Failed to get logs for namespace %s label %s, container %s: %v (output: %s)", namespace, labelSelector, container, err, out)
 	}
 	return string(out)
 }
