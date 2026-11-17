@@ -121,6 +121,10 @@ message BindResponse {
   // Refusal reason explaining why the binding was refused, if status is REFUSED.
   // Set by the server.
   string refusal_reason = 4;
+
+  // Names of secrets referenced by the policy that have not yet been provided to the node.
+  // Set by the server when status is PENDING.
+  repeated string missing_secrets = 5;
 }
 
 // InjectSecretsResponse reports the outcome of an InjectSecrets call.
@@ -136,6 +140,10 @@ message InjectSecretsResponse {
   // Refusal reason explaining why secrets were refused, if status is REFUSED.
   // Set by the server.
   string refusal_reason = 3;
+
+  // Names of secrets referenced by the policy that have not yet been provided to the node.
+  // Set by the server when status is PENDING.
+  repeated string missing_secrets = 4;
 }
 
 // UnbindRequest requests removal of bindings for a pod UID.

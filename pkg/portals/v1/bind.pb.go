@@ -259,8 +259,11 @@ type BindResponse struct {
 	// Refusal reason explaining why the binding was refused, if status is REFUSED.
 	// Set by the server.
 	RefusalReason string `protobuf:"bytes,4,opt,name=refusal_reason,json=refusalReason,proto3" json:"refusal_reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Names of secrets referenced by the policy that have not yet been provided to the node.
+	// Set by the server when status is PENDING.
+	MissingSecrets []string `protobuf:"bytes,5,rep,name=missing_secrets,json=missingSecrets,proto3" json:"missing_secrets,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *BindResponse) Reset() {
@@ -321,6 +324,13 @@ func (x *BindResponse) GetRefusalReason() string {
 	return ""
 }
 
+func (x *BindResponse) GetMissingSecrets() []string {
+	if x != nil {
+		return x.MissingSecrets
+	}
+	return nil
+}
+
 // InjectSecretsResponse reports the outcome of an InjectSecrets call.
 type InjectSecretsResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -333,8 +343,11 @@ type InjectSecretsResponse struct {
 	// Refusal reason explaining why secrets were refused, if status is REFUSED.
 	// Set by the server.
 	RefusalReason string `protobuf:"bytes,3,opt,name=refusal_reason,json=refusalReason,proto3" json:"refusal_reason,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Names of secrets referenced by the policy that have not yet been provided to the node.
+	// Set by the server when status is PENDING.
+	MissingSecrets []string `protobuf:"bytes,4,rep,name=missing_secrets,json=missingSecrets,proto3" json:"missing_secrets,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *InjectSecretsResponse) Reset() {
@@ -386,6 +399,13 @@ func (x *InjectSecretsResponse) GetRefusalReason() string {
 		return x.RefusalReason
 	}
 	return ""
+}
+
+func (x *InjectSecretsResponse) GetMissingSecrets() []string {
+	if x != nil {
+		return x.MissingSecrets
+	}
+	return nil
 }
 
 // UnbindRequest requests removal of bindings for a pod UID.
@@ -1297,16 +1317,18 @@ const file_pkg_portals_v1_bind_proto_rawDesc = "" +
 	"\x04wait\x18\x03 \x01(\bR\x04wait\x1a:\n" +
 	"\fSecretsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x9a\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xc3\x01\n" +
 	"\fBindResponse\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x14\n" +
 	"\x05bound\x18\x02 \x01(\bR\x05bound\x124\n" +
 	"\x06status\x18\x03 \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
-	"\x0erefusal_reason\x18\x04 \x01(\tR\rrefusalReason\"\x8d\x01\n" +
+	"\x0erefusal_reason\x18\x04 \x01(\tR\rrefusalReason\x12'\n" +
+	"\x0fmissing_secrets\x18\x05 \x03(\tR\x0emissingSecrets\"\xb6\x01\n" +
 	"\x15InjectSecretsResponse\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x124\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x1c.portals.v1.AcceptanceStatusR\x06status\x12%\n" +
-	"\x0erefusal_reason\x18\x03 \x01(\tR\rrefusalReason\"<\n" +
+	"\x0erefusal_reason\x18\x03 \x01(\tR\rrefusalReason\x12'\n" +
+	"\x0fmissing_secrets\x18\x04 \x03(\tR\x0emissingSecrets\"<\n" +
 	"\rUnbindRequest\x12\x17\n" +
 	"\apod_uid\x18\x01 \x01(\tR\x06podUid\x12\x12\n" +
 	"\x04wait\x18\x02 \x01(\bR\x04wait\"\x9c\x01\n" +

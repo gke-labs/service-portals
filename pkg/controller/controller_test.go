@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +231,80 @@ func TestController_Bind_WaitAccepted(t *testing.T) {
 	}
 	if env.core.PushCount() != 1 {
 		t.Errorf("push count = %d, want 1", env.core.PushCount())
+	}
+}
+
+func TestController_Bind_WaitPending_MissingSecrets(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.stop()
+
+	wantMissing := []string{"github-token", "openai-api-key"}
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
+		if !wait {
+			t.Errorf("wait = false, want true")
+		}
+		return &portalsv1.PushAnswer{
+			PodUid:         push.GetPolicy().GetPodUid(),
+			Status:         portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_PENDING,
+			MissingSecrets: wantMissing,
+		}, nil
+	}
+
+	resp, err := env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+		PodUid:   "pod-123",
+		Identity: "user@example.com",
+		Policy:   validTestPolicy(),
+		Wait:     true,
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+	if resp.GetPodUid() != "pod-123" {
+		t.Errorf("pod_uid = %q, want %q", resp.GetPodUid(), "pod-123")
+	}
+	if resp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+		t.Errorf("status = %v, want ACCEPTANCE_STATUS_PENDING", resp.GetStatus())
+	}
+	if !resp.GetBound() {
+		t.Errorf("bound = false, want true")
+	}
+	if !slices.Equal(resp.GetMissingSecrets(), wantMissing) {
+		t.Errorf("missing_secrets = %v, want %v", resp.GetMissingSecrets(), wantMissing)
+	}
+}
+
+func TestController_InjectSecrets_WaitPending_MissingSecrets(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.stop()
+
+	wantMissing := []string{"openai-api-key"}
+	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
+		if !wait {
+			t.Errorf("wait = false, want true")
+		}
+		return &portalsv1.PushAnswer{
+			PodUid:         push.GetSecrets().GetPodUid(),
+			Status:         portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_PENDING,
+			MissingSecrets: wantMissing,
+		}, nil
+	}
+
+	resp, err := env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+		PodUid:  "pod-123",
+		Secrets: map[string][]byte{"github-token": []byte("token-value")},
+		Wait:    true,
+	})
+	if err != nil {
+		t.Fatalf("InjectSecrets failed: %v", err)
+	}
+	if resp.GetPodUid() != "pod-123" {
+		t.Errorf("pod_uid = %q, want %q", resp.GetPodUid(), "pod-123")
+	}
+	if resp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_PENDING {
+		t.Errorf("status = %v, want ACCEPTANCE_STATUS_PENDING", resp.GetStatus())
+	}
+	if !slices.Equal(resp.GetMissingSecrets(), wantMissing) {
+		t.Errorf("missing_secrets = %v, want %v", resp.GetMissingSecrets(), wantMissing)
 	}
 }
 

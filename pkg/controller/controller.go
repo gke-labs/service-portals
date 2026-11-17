@@ -80,10 +80,11 @@ func (c *Controller) Bind(ctx context.Context, req *portalsv1.PodPolicy) (*porta
 
 	bound := req.GetWait() && ans.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED
 	return &portalsv1.BindResponse{
-		PodUid:        req.GetPodUid(),
-		Bound:         bound,
-		Status:        ans.GetStatus(),
-		RefusalReason: ans.GetRefusalReason(),
+		PodUid:         req.GetPodUid(),
+		Bound:          bound,
+		Status:         ans.GetStatus(),
+		RefusalReason:  ans.GetRefusalReason(),
+		MissingSecrets: ans.GetMissingSecrets(),
 	}, nil
 }
 
@@ -106,9 +107,10 @@ func (c *Controller) InjectSecrets(ctx context.Context, req *portalsv1.PodSecret
 	}
 
 	return &portalsv1.InjectSecretsResponse{
-		PodUid:        req.GetPodUid(),
-		Status:        ans.GetStatus(),
-		RefusalReason: ans.GetRefusalReason(),
+		PodUid:         req.GetPodUid(),
+		Status:         ans.GetStatus(),
+		RefusalReason:  ans.GetRefusalReason(),
+		MissingSecrets: ans.GetMissingSecrets(),
 	}, nil
 }
 
