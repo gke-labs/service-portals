@@ -246,7 +246,23 @@ func (h *Harness) WaitForDeploymentInNamespace(namespace, name string, timeout t
 func (h *Harness) WaitForPodReady(labelSelector string, timeout time.Duration) {
 	h.t.Helper()
 	h.t.Logf("Waiting for pod with label %s to be ready", labelSelector)
-	h.RunCommand("kubectl", "wait", "--for=condition=ready", "pod", "-l", labelSelector, "-A", "--timeout="+timeout.String())
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining < 0 {
+			remaining = 0
+		}
+		args := []string{"wait", "--for=condition=ready", "pod", "-l", labelSelector, "-A", "--timeout=" + remaining.String()}
+		cmd := exec.Command("kubectl", args...)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return
+		}
+		if !strings.Contains(string(out), "no matching resources found") || time.Now().After(deadline) {
+			h.t.Fatalf("Command failed: %s %v: %v\nOutput: %s", "kubectl", args, err, out)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func (h *Harness) DeletePod(name string) {
