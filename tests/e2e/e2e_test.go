@@ -1621,12 +1621,12 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 
 	// Build and load images
 	h.DockerBuild("service-portal-agent:e2e", filepath.Join(gitRoot, "images/service-portal-agent/Dockerfile"), gitRoot)
-	h.DockerBuild("portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/portal-nri-plugin/Dockerfile"), gitRoot)
+	h.DockerBuild("service-portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/service-portal-nri-plugin/Dockerfile"), gitRoot)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 	h.DockerBuild("service-portal-controller:e2e", filepath.Join(gitRoot, "images/service-portal-controller/Dockerfile"), gitRoot)
 
 	h.KindLoad("service-portal-agent:e2e")
-	h.KindLoad("portal-nri-plugin:e2e")
+	h.KindLoad("service-portal-nri-plugin:e2e")
 	h.KindLoad("toolbox:e2e")
 	h.KindLoad("service-portal-controller:e2e")
 
@@ -1891,7 +1891,7 @@ spec:
       hostNetwork: true
       initContainers:
       - name: node-init
-        image: portal-nri-plugin:e2e
+        image: service-portal-nri-plugin:e2e
         imagePullPolicy: Never
         args: ["init", "-ca-dir=/etc/service-portal/ca", "-socket-dir=/run/service-portal", "-proxy-uid=65532", "-proxy-gid=65532"]
         volumeMounts:
@@ -1951,7 +1951,7 @@ spec:
         - name: socket-volume
           mountPath: /run/service-portal
       - name: nri-plugin
-        image: portal-nri-plugin:e2e
+        image: service-portal-nri-plugin:e2e
         imagePullPolicy: Never
         securityContext:
           capabilities:
@@ -2127,7 +2127,7 @@ spec:
 		t.Logf("unbound pod request denied as expected: %v (output: %s)", err, out)
 	})
 
-	// 8. Bind pod to user identity and egress policy via PodBindService using portal-nri-plugin CLI
+	// 8. Bind pod to user identity and egress policy via PodBindService using service-portal-nri-plugin CLI
 	policyJSON := `{
   "rules": [
     {
@@ -2161,22 +2161,22 @@ spec:
   ]
 }`
 	bindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
-		"portal-nri-plugin", "bind-service", "bind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--identity", "test-user-alice", "--policy-file", "-")
+		"service-portal-nri-plugin", "bind-service", "bind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--identity", "test-user-alice", "--policy-file", "-")
 	bindCmd.Stdin = strings.NewReader(policyJSON)
 	bindOut, err := bindCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("failed to bind pod %s via portal-nri-plugin bind-service bind: %v (output: %s)", clientUID, err, bindOut)
+		t.Fatalf("failed to bind pod %s via service-portal-nri-plugin bind-service bind: %v (output: %s)", clientUID, err, bindOut)
 	}
 	t.Logf("Successfully bound pod %s via node agent bind-service: %s", clientUID, bindOut)
 
 	// Inject named secret over PodBindService. Secret value is passed via standard input and never as an argument or logged.
 	secretJSON := `{"backend-token": "gemini-nri-token"}`
 	injectCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
-		"portal-nri-plugin", "bind-service", "inject-secrets", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--secrets-file", "-")
+		"service-portal-nri-plugin", "bind-service", "inject-secrets", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID, "--secrets-file", "-")
 	injectCmd.Stdin = strings.NewReader(secretJSON)
 	injectOut, err := injectCmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("failed to inject secrets for pod %s via portal-nri-plugin bind-service inject-secrets: %v (output: %s)", clientUID, err, injectOut)
+		t.Fatalf("failed to inject secrets for pod %s via service-portal-nri-plugin bind-service inject-secrets: %v (output: %s)", clientUID, err, injectOut)
 	}
 	t.Logf("Successfully injected secrets for pod %s via node agent bind-service", clientUID)
 
@@ -2292,10 +2292,10 @@ spec:
 	// 14. Unbind the pod and assert same request is then rejected
 	t.Run("Unbind_RevertsToDenied", func(t *testing.T) {
 		unbindCmd := exec.Command("kubectl", "exec", "-i", "daemonset/portal-node-agent", "-c", "nri-plugin", "--",
-			"portal-nri-plugin", "bind-service", "unbind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID)
+			"service-portal-nri-plugin", "bind-service", "unbind", "--socket", "/run/service-portal/bind.sock", "--uid", clientUID)
 		unbindOut, err := unbindCmd.CombinedOutput()
 		if err != nil {
-			t.Fatalf("failed to unbind pod %s via portal-nri-plugin bind-service unbind: %v (output: %s)", clientUID, err, unbindOut)
+			t.Fatalf("failed to unbind pod %s via service-portal-nri-plugin bind-service unbind: %v (output: %s)", clientUID, err, unbindOut)
 		}
 		t.Logf("Successfully unbound pod %s via node agent bind-service: %s", clientUID, unbindOut)
 

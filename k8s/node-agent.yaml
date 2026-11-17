@@ -46,8 +46,8 @@
 # Before applying this manifest to your cluster, verify or update the following values:
 # 1. images:
 #    In the container specs, set "image" to the appropriate container images:
-#    - node-init and nri-plugin: location of the portal-nri-plugin image
-#      (e.g. "gcr.io/PROJECT/portal-nri-plugin:TAG").
+#    - node-init and nri-plugin: location of the service-portal-nri-plugin image
+#      (e.g. "gcr.io/PROJECT/service-portal-nri-plugin:TAG").
 #    - proxy: location of the service-portal-agent image
 #      (e.g. "gcr.io/PROJECT/service-portal-agent:TAG").
 # 2. audience:
@@ -124,7 +124,7 @@ spec:
       hostNetwork: true
       initContainers:
       - name: node-init
-        image: portal-nri-plugin:latest
+        image: service-portal-nri-plugin:latest
         imagePullPolicy: IfNotPresent
         args:
         - "init"
@@ -209,7 +209,7 @@ spec:
         - name: socket-volume
           mountPath: /run/service-portal
       - name: nri-plugin
-        image: portal-nri-plugin:latest
+        image: service-portal-nri-plugin:latest
         imagePullPolicy: IfNotPresent
         securityContext:
           capabilities:

@@ -785,7 +785,7 @@ func main() {
 
 	p.startProxySyncLoop(ctx)
 
-	klog.Infof("Starting portal-nri-plugin (name=%s, index=%s, socket=%s, proxyHost=%s, adminURL=%s)...", cfg.pluginName, cfg.pluginIndex, cfg.socketPath, cfg.proxyHost, cfg.adminURL)
+	klog.Infof("Starting service-portal-nri-plugin (name=%s, index=%s, socket=%s, proxyHost=%s, adminURL=%s)...", cfg.pluginName, cfg.pluginIndex, cfg.socketPath, cfg.proxyHost, cfg.adminURL)
 	if err := s.Run(ctx); err != nil {
 		klog.Fatalf("NRI stub run failed: %v", err)
 	}

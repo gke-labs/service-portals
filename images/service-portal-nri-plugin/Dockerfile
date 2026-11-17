@@ -22,7 +22,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o portal-nri-plugin ./cmd/portal-nri-plugin
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o service-portal-nri-plugin ./cmd/service-portal-nri-plugin
 
 FROM debian:bookworm-slim
 
@@ -30,6 +30,6 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends iptables iproute2 util-linux && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/portal-nri-plugin /usr/local/bin/portal-nri-plugin
+COPY --from=builder /app/service-portal-nri-plugin /usr/local/bin/service-portal-nri-plugin
 
-ENTRYPOINT ["/usr/local/bin/portal-nri-plugin"]
+ENTRYPOINT ["/usr/local/bin/service-portal-nri-plugin"]

@@ -30,12 +30,12 @@ test -S /var/run/nri/nri.sock && echo "NRI is enabled"
 NRI mode requires three images built from the repository root:
 1. `service-portal-controller`: Central gRPC controller (`images/service-portal-controller/Dockerfile`).
 2. `service-portal-agent`: Node proxy engine (`images/service-portal-agent/Dockerfile`).
-3. `portal-nri-plugin`: NRI lifecycle plugin and node init container (`images/portal-nri-plugin/Dockerfile`).
+3. `service-portal-nri-plugin`: NRI lifecycle plugin and node init container (`images/service-portal-nri-plugin/Dockerfile`).
 
 ```bash
 docker build -f images/service-portal-controller/Dockerfile -t <REG>/service-portal-controller:<TAG> .
 docker build -f images/service-portal-agent/Dockerfile -t <REG>/service-portal-agent:<TAG> .
-docker build -f images/portal-nri-plugin/Dockerfile -t <REG>/portal-nri-plugin:<TAG> .
+docker build -f images/service-portal-nri-plugin/Dockerfile -t <REG>/service-portal-nri-plugin:<TAG> .
 ```
 Push all three images to a registry accessible by your cluster nodes.
 
@@ -69,7 +69,7 @@ Apply: `kubectl apply -f k8s/controller.yaml`
 
 ### Step 3c: Configure and Apply `k8s/node-agent.yaml`
 In `k8s/node-agent.yaml`, configure:
-- Container images: `node-init` and `nri-plugin` to `<REG>/portal-nri-plugin:<TAG>`; `proxy` to `<REG>/service-portal-agent:<TAG>`
+- Container images: `node-init` and `nri-plugin` to `<REG>/service-portal-nri-plugin:<TAG>`; `proxy` to `<REG>/service-portal-agent:<TAG>`
 - `audience`: In volume `controller-token`, set `audience` to match `--audience` (e.g. `https://service-portal-controller`)
 
 Apply: `kubectl apply -f k8s/node-agent.yaml`
@@ -150,13 +150,13 @@ Shortest complete policy (`policy.json`) and secrets (`secrets.json`):
 {"api-token": "secret-credential-value"}
 ```
 
-To bind directly for manual testing via `portal-nri-plugin bind-service` on the node:
+To bind directly for manual testing via `service-portal-nri-plugin bind-service` on the node:
 ```bash
 POD_UID=$(kubectl get pod sandbox-workload -o jsonpath='{.metadata.uid}')
 kubectl exec -i -n service-portal-system daemonset/portal-node-agent -c nri-plugin -- \
-  portal-nri-plugin bind-service bind --socket /run/service-portal/bind.sock --uid "$POD_UID" --policy-file - < policy.json
+  service-portal-nri-plugin bind-service bind --socket /run/service-portal/bind.sock --uid "$POD_UID" --policy-file - < policy.json
 kubectl exec -i -n service-portal-system daemonset/portal-node-agent -c nri-plugin -- \
-  portal-nri-plugin bind-service inject-secrets --socket /run/service-portal/bind.sock --uid "$POD_UID" --secrets-file - < secrets.json
+  service-portal-nri-plugin bind-service inject-secrets --socket /run/service-portal/bind.sock --uid "$POD_UID" --secrets-file - < secrets.json
 ```
 
 ### Verifying Swapped Credentials
