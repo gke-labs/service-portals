@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Use the official Golang image to create a build artifact.
-FROM golang:1.27.4 AS builder
+# Cross-compile on the build platform so multi-arch builds need no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS builder
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /app
 
@@ -27,7 +29,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o /gitproxy-server ./cmd/gitproxy-server/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /gitproxy-server ./cmd/gitproxy-server/main.go
 
 # Use a minimal base image to package the application
 FROM gcr.io/distroless/static:nonroot
