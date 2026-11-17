@@ -76,7 +76,7 @@ func withBindClient(ctx context.Context, sock string, fn func(context.Context, p
 
 func runBindServiceCommand(ctx context.Context, args []string, stdout io.Writer, stdin io.Reader) error {
 	if len(args) == 0 {
-		return errors.New("usage: portal-nri-plugin bind-service <bind|inject-secrets|get|unbind> [flags]")
+		return errors.New("usage: service-portal-nri-plugin bind-service <bind|inject-secrets|get|unbind> [flags]")
 	}
 	switch args[0] {
 	case "bind":

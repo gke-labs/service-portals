@@ -37,7 +37,7 @@ The `service-portal-controller` binary accepts the following flags:
 
 ### What the Node Agent Needs
 
-The node agent DaemonSet pod runs two containers: the node proxy (`service-portal-agent`) and the NRI plugin (`portal-nri-plugin`). The controller connection and binding persistence belong to the **node proxy container (`service-portal-agent`)**, not `portal-nri-plugin`.
+The node agent DaemonSet pod runs two containers: the node proxy (`service-portal-agent`) and the NRI plugin (`service-portal-nri-plugin`). The controller connection and binding persistence belong to the **node proxy container (`service-portal-agent`)**, not `service-portal-nri-plugin`.
 
 The `service-portal-agent` container requires the following environment variables and volume mounts:
 
