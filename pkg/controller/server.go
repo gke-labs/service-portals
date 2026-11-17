@@ -18,13 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
+	"github.com/gke-labs/service-portals/pkg/scoped"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -120,7 +120,8 @@ func (s *Server) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 	}
 	s.nodes[node] = ns
 	s.mu.Unlock()
-	log.Printf("controller: node %s stream connected", node)
+	log := scoped.Log(ctx)
+	log.Info("controller: node stream connected", "node", node)
 
 	defer func() {
 		s.mu.Lock()
@@ -129,7 +130,7 @@ func (s *Server) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 			s.resetStreamLocked(ns)
 		}
 		s.mu.Unlock()
-		log.Printf("controller: node %s stream disconnected", node)
+		log.Info("controller: node stream disconnected", "node", node)
 	}()
 
 	errCh := make(chan error, 1)
@@ -140,7 +141,7 @@ func (s *Server) Stream(stream portalsv1.NodeStreamService_StreamServer) error {
 				errCh <- err
 				return
 			}
-			s.handleMessage(ns, msg)
+			s.handleMessage(ctx, ns, msg)
 		}
 	}()
 
@@ -188,7 +189,7 @@ func (s *Server) resetStreamLocked(ns *nodeStream) {
 	}
 }
 
-func (s *Server) handleMessage(ns *nodeStream, msg *portalsv1.NodeMessage) {
+func (s *Server) handleMessage(ctx context.Context, ns *nodeStream, msg *portalsv1.NodeMessage) {
 	var uids []string
 	s.mu.Lock()
 	switch p := msg.GetPayload().(type) {
@@ -223,7 +224,7 @@ func (s *Server) handleMessage(ns *nodeStream, msg *portalsv1.NodeMessage) {
 			case cur.answerCh <- ans:
 			default:
 			}
-			log.Printf("controller: pod %s node %s: outcome %s", ans.GetPodUid(), ns.node, ans.GetStatus())
+			scoped.Log(ctx).Info("controller: push outcome", "node", ns.node, "podUID", ans.GetPodUid(), "pushID", ans.GetPushId(), "status", ans.GetStatus().String())
 		}
 	}
 	s.mu.Unlock()
@@ -245,6 +246,7 @@ func (s *Server) Push(ctx context.Context, push *portalsv1.ControllerPush, wait 
 	if push.GetPushId() == "" {
 		push.PushId = fmt.Sprintf("push-%d", atomic.AddUint64(&s.nextID, 1))
 	}
+	pushID := push.GetPushId()
 	p := &pendingPush{push: push, podUID: uid, answerCh: make(chan *portalsv1.PushAnswer, 1)}
 	p.timer = time.AfterFunc(s.pushTimeout, func() {
 		s.mu.Lock()
@@ -254,7 +256,7 @@ func (s *Server) Push(ctx context.Context, push *portalsv1.ControllerPush, wait 
 			case p.answerCh <- nil:
 			default:
 			}
-			log.Printf("controller: pod %s node %s: outcome timed out", p.podUID, p.sentNode)
+			scoped.Log(ctx).Info("controller: push outcome timed out", "node", p.sentNode, "podUID", p.podUID, "pushID", pushID, "status", "timed out")
 		}
 		s.mu.Unlock()
 	})

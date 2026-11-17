@@ -17,12 +17,12 @@ package portals
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
 
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
+	"github.com/gke-labs/service-portals/pkg/scoped"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -38,20 +38,21 @@ type controllerClientConfig struct {
 }
 
 func runControllerClient(ctx context.Context, cfg controllerClientConfig) {
+	log := scoped.Log(ctx)
 	creds, err := credentials.NewClientTLSFromFile(cfg.caCertPath, "")
 	if err != nil {
-		log.Printf("controller: failed to load CA cert from %s: %v", cfg.caCertPath, err)
+		log.Error(err, "controller: failed to load CA cert", "path", cfg.caCertPath)
 		return
 	}
 
 	conn, err := grpc.NewClient(cfg.addr, grpc.WithTransportCredentials(creds))
 	if err != nil {
-		log.Printf("controller: failed to create gRPC client: %v", err)
+		log.Error(err, "controller: failed to create gRPC client", "address", cfg.addr)
 		return
 	}
 	defer func() {
 		if cErr := conn.Close(); cErr != nil {
-			log.Printf("warning: closing controller connection: %v", cErr)
+			log.Error(cErr, "closing controller connection")
 		}
 	}()
 
@@ -72,7 +73,7 @@ func runControllerClient(ctx context.Context, cfg controllerClientConfig) {
 
 		tokenBytes, err := os.ReadFile(cfg.tokenPath)
 		if err != nil {
-			log.Printf("controller: failed to read token file: %v", err)
+			log.Error(err, "controller: failed to read token file")
 			sleepBackoff(ctx, &backoff, maxBackoff)
 			continue
 		}
@@ -82,7 +83,7 @@ func runControllerClient(ctx context.Context, cfg controllerClientConfig) {
 		stream, err := client.Stream(streamCtx)
 		if err != nil {
 			cancel()
-			log.Printf("controller: failed to open stream: %v", err)
+			log.Error(err, "controller: failed to open stream", "address", cfg.addr)
 			sleepBackoff(ctx, &backoff, maxBackoff)
 			continue
 		}
@@ -98,18 +99,18 @@ func runControllerClient(ctx context.Context, cfg controllerClientConfig) {
 
 		if err := sendDeclaration(stream, cfg.pm); err != nil {
 			cancel()
-			log.Printf("controller: failed to send declaration: %v", err)
+			log.Error(err, "controller: failed to send declaration", "address", cfg.addr)
 			sleepBackoff(ctx, &backoff, maxBackoff)
 			continue
 		}
 
-		log.Printf("controller: stream connected to %s", cfg.addr)
+		log.Info("controller: stream connected", "address", cfg.addr)
 
 		backoff = 50 * time.Millisecond
 		err = handleStream(streamCtx, stream, cfg, changeCh)
 		cancel()
 		if err != nil && ctx.Err() == nil {
-			log.Printf("controller: stream ended: %v", err)
+			log.Error(err, "controller: stream ended", "address", cfg.addr)
 			sleepBackoff(ctx, &backoff, maxBackoff)
 		}
 	}
@@ -148,7 +149,7 @@ func handleStream(ctx context.Context, stream portalsv1.NodeStreamService_Stream
 			if push == nil {
 				continue
 			}
-			ans := handlePush(cfg.pm, cfg.store, push)
+			ans := handlePush(ctx, cfg.pm, cfg.store, push)
 			select {
 			case ansCh <- ans:
 			case <-ctx.Done():
@@ -195,16 +196,15 @@ func extractPodUID(push *portalsv1.ControllerPush) string {
 	return ""
 }
 
-func handlePush(pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.ControllerPush) *portalsv1.PushAnswer {
+func handlePush(ctx context.Context, pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.ControllerPush) *portalsv1.PushAnswer {
 	podUID := extractPodUID(push)
 	if podUID == "" {
-		return pushRefused(push.GetPushId(), "", "missing pod UID")
+		return pushRefused(ctx, push.GetPushId(), "", "missing pod UID")
 	}
 	if !pm.HasPod(podUID) {
-		return pushRefused(push.GetPushId(), podUID, fmt.Sprintf("pod %q not found on node", podUID))
+		return pushRefused(ctx, push.GetPushId(), podUID, fmt.Sprintf("pod %q not found on node", podUID))
 	}
 
-	ctx := context.Background()
 	var err error
 	switch act := push.GetAction().(type) {
 	case *portalsv1.ControllerPush_Policy:
@@ -213,19 +213,19 @@ func handlePush(pm *PodMap, store *portalsv1.BindingStore, push *portalsv1.Contr
 		_, err = store.InjectSecrets(ctx, act.Secrets)
 	case *portalsv1.ControllerPush_Unbind:
 		if _, err = store.Unbind(ctx, act.Unbind); err == nil {
-			log.Printf("controller push %s for pod %s: accepted unbind", push.GetPushId(), podUID)
+			scoped.Log(ctx).Info("controller push: accepted unbind", "podUID", podUID, "pushID", push.GetPushId(), "status", portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED.String())
 			return &portalsv1.PushAnswer{PushId: push.GetPushId(), PodUid: podUID, Status: portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED}
 		}
 	}
 	if err != nil {
-		return pushRefused(push.GetPushId(), podUID, status.Convert(err).Message())
+		return pushRefused(ctx, push.GetPushId(), podUID, status.Convert(err).Message())
 	}
 	accStatus, missing := store.Acceptance(podUID)
-	log.Printf("controller push %s for pod %s: %s", push.GetPushId(), podUID, accStatus)
+	scoped.Log(ctx).Info("controller push: outcome", "podUID", podUID, "pushID", push.GetPushId(), "status", accStatus.String())
 	return &portalsv1.PushAnswer{PushId: push.GetPushId(), PodUid: podUID, Status: accStatus, MissingSecrets: missing}
 }
 
-func pushRefused(pushID, podUID, reason string) *portalsv1.PushAnswer {
-	log.Printf("controller push %s for pod %s: refused (%s)", pushID, podUID, reason)
+func pushRefused(ctx context.Context, pushID, podUID, reason string) *portalsv1.PushAnswer {
+	scoped.Log(ctx).Info("controller push: refused", "podUID", podUID, "pushID", pushID, "status", portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED.String(), "reason", reason)
 	return &portalsv1.PushAnswer{PushId: pushID, PodUid: podUID, Status: portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED, RefusalReason: reason}
 }
