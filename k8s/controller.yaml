@@ -14,39 +14,40 @@
 
 # Reference manifest for the Service Portal Controller.
 #
+# Installation & Configuration:
+# Install this manifest unchanged (for example with `ap deploy` or `kubectl apply -f k8s/controller.yaml`).
+# Note: `ap deploy` automatically builds and sets the placeholder image, whereas a plain
+# `kubectl apply` user must set the container "image" field to a published image.
+# After deployment, configure the controller by creating a ConfigMap named
+# "service-portal-config" in the "service-portal-system" namespace (for example
+# using the helper script `dev/tasks/configure`).
+# Until this ConfigMap exists, the controller pod does not start (remaining in
+# CreateContainerConfigError), signaling that the installation is not yet configured.
+#
 # Namespace:
 # All controller components are deployed into the "service-portal-system" namespace.
 #
 # TLS Certificate and Key:
 # The controller serves gRPC over TLS. The serving certificate and private key
 # come from a Kubernetes TLS Secret named "service-portal-controller-tls" that
-# the deployer must supply in the "service-portal-system" namespace before deploying
-# this manifest, containing "tls.crt" and "tls.key".
+# the deployer must supply in the "service-portal-system" namespace,
+# containing "tls.crt" and "tls.key".
 #
-# Required Configuration Values:
-# Before applying this manifest to your cluster, set the following four values:
-# 1. image:
-#    In the Deployment container spec, set "image" to the location of the
-#    service-portal-controller container image
-#    (e.g. "gcr.io/PROJECT/service-portal-controller:TAG").
-# 2. audience:
-#    In the container args, set "--audience=<audience>" to the expected
-#    TokenReview audience used to authenticate incoming tokens from clients
-#    and node agents (e.g. "https://service-portal-controller" or your
+# Configuration Values (supplied via the "service-portal-config" ConfigMap):
+# 1. audience:
+#    The expected TokenReview audience used to authenticate incoming tokens from
+#    clients and node agents (e.g. "https://service-portal-controller" or your
 #    cluster's token audience).
-# 3. node agent service account:
-#    In the container args, set "--node-agent-account=<sa>" to the Kubernetes
-#    service account identity of the node agent in
+# 2. node-agent-account:
+#    The Kubernetes service account identity of the node agent in
 #    "system:serviceaccount:<namespace>:<name>" format
-#    (e.g. "system:serviceaccount:service-portals:portal-node-agent").
-# 4. client allowlist:
-#    In the container args, set "--client-allowlist=<sa1,sa2,...>" to a
-#    comma-separated list of permitted client service accounts in
+#    (e.g. "system:serviceaccount:service-portal-system:portal-node-agent").
+# 3. client-allowlist:
+#    A comma-separated list of permitted client service accounts in
 #    "system:serviceaccount:<namespace>:<name>" format
 #    (e.g. "system:serviceaccount:default:sandbox-controller").
-#    When applied as is with an empty allowlist ("--client-allowlist="),
-#    the controller starts with an empty allowlist and all client calls
-#    are refused.
+#    If empty (""), the controller starts with an empty allowlist and all client
+#    calls are refused.
 
 # Also declared in k8s/node-agent.yaml; the privileged label is needed by the node agent.
 apiVersion: v1
@@ -130,13 +131,26 @@ spec:
         readinessProbe:
           tcpSocket:
             port: 8443
+        env:
+        - name: AUDIENCE
+          valueFrom:
+            configMapKeyRef:
+              name: service-portal-config
+              key: audience
+        - name: NODE_AGENT_ACCOUNT
+          valueFrom:
+            configMapKeyRef:
+              name: service-portal-config
+              key: node-agent-account
+        - name: CLIENT_ALLOWLIST
+          valueFrom:
+            configMapKeyRef:
+              name: service-portal-config
+              key: client-allowlist
         args:
         - "--listen-address=:8443"
         - "--tls-cert-file=/etc/service-portal-controller/certs/tls.crt"
         - "--tls-key-file=/etc/service-portal-controller/certs/tls.key"
-        - "--audience="
-        - "--node-agent-account="
-        - "--client-allowlist="
         volumeMounts:
         - name: tls-certs
           mountPath: /etc/service-portal-controller/certs

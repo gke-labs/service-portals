@@ -481,3 +481,43 @@ func TestParseFlags(t *testing.T) {
 		t.Errorf("expected 30s, got %v", cfg.PushTimeout)
 	}
 }
+
+func TestParseFlags_EnvVars(t *testing.T) {
+	t.Setenv("AUDIENCE", "env-audience")
+	t.Setenv("NODE_AGENT_ACCOUNT", "env-node-agent")
+	t.Setenv("CLIENT_ALLOWLIST", "env-client-1, env-client-2")
+
+	// 1. When flags are omitted, env vars are used.
+	cfg, err := parseFlags([]string{})
+	if err != nil {
+		t.Fatalf("parseFlags failed: %v", err)
+	}
+	if cfg.Audience != "env-audience" {
+		t.Errorf("expected env-audience, got %s", cfg.Audience)
+	}
+	if cfg.NodeAgentAccount != "env-node-agent" {
+		t.Errorf("expected env-node-agent, got %s", cfg.NodeAgentAccount)
+	}
+	if len(cfg.ClientAllowlist) != 2 || cfg.ClientAllowlist[0] != "env-client-1" || cfg.ClientAllowlist[1] != "env-client-2" {
+		t.Errorf("expected [env-client-1, env-client-2], got %v", cfg.ClientAllowlist)
+	}
+
+	// 2. Flags override environment variables.
+	cfgWithFlags, err := parseFlags([]string{
+		"-audience", "flag-audience",
+		"-node-agent-account", "flag-node-agent",
+		"-client-allowlist", "flag-client-1",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags with flags failed: %v", err)
+	}
+	if cfgWithFlags.Audience != "flag-audience" {
+		t.Errorf("expected flag-audience, got %s", cfgWithFlags.Audience)
+	}
+	if cfgWithFlags.NodeAgentAccount != "flag-node-agent" {
+		t.Errorf("expected flag-node-agent, got %s", cfgWithFlags.NodeAgentAccount)
+	}
+	if len(cfgWithFlags.ClientAllowlist) != 1 || cfgWithFlags.ClientAllowlist[0] != "flag-client-1" {
+		t.Errorf("expected [flag-client-1], got %v", cfgWithFlags.ClientAllowlist)
+	}
+}

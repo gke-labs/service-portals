@@ -1720,11 +1720,34 @@ data:
 	}
 	controllerManifest := string(bCtrl)
 	controllerManifest = strings.ReplaceAll(controllerManifest, "image: service-portal-controller:latest", "image: service-portal-controller:e2e\n        imagePullPolicy: Never")
-	controllerManifest = strings.ReplaceAll(controllerManifest, `"--audience="`, fmt.Sprintf(`"--audience=%s"`, controllerAudience))
-	controllerManifest = strings.ReplaceAll(controllerManifest, `"--node-agent-account="`, fmt.Sprintf(`"--node-agent-account=%s"`, nodeAgentAccount))
-	controllerManifest = strings.ReplaceAll(controllerManifest, `"--client-allowlist="`, fmt.Sprintf(`"--client-allowlist=%s"`, allowedClientAccount))
 
 	h.KubectlApplyContent(controllerManifest)
+
+	// Assert once before running configure that the controller pod is not running and its status names the missing ConfigMap.
+	var statusOutput string
+	isNotRunningAndNamesConfigMap := false
+	startWaitConfigMap := time.Now()
+	for time.Since(startWaitConfigMap) < 30*time.Second {
+		out, err := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller", "-o", "yaml").CombinedOutput()
+		if err == nil {
+			statusOutput = string(out)
+			if strings.Contains(statusOutput, "service-portal-config") && !strings.Contains(statusOutput, "phase: Running") {
+				isNotRunningAndNamesConfigMap = true
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !isNotRunningAndNamesConfigMap {
+		t.Fatalf("expected controller pod not to be running and status to name missing ConfigMap 'service-portal-config', got:\n%s", statusOutput)
+	}
+
+	h.RunCommand(filepath.Join(gitRoot, "dev/tasks/configure"),
+		"--audience="+controllerAudience,
+		"--node-agent-account="+nodeAgentAccount,
+		"--client-allowlist="+allowedClientAccount,
+	)
+
 	h.WaitForDeploymentInNamespace("service-portal-system", "service-portal-controller", 2*time.Minute)
 	h.WaitForPodReady("app=service-portal-controller", 2*time.Minute)
 
