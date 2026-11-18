@@ -16,8 +16,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -25,15 +27,19 @@ import (
 	"github.com/gke-labs/service-portals/pkg/portals"
 )
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+func parseFlags(args []string, output io.Writer) (portals.Config, error) {
+	fs := flag.NewFlagSet("service-portal-agent", flag.ContinueOnError)
+	if output != nil {
+		fs.SetOutput(output)
+	}
+	rulesDir := fs.String("rules-dir", "", "Directory containing configuration rules")
+	serveDNSFlag := fs.Bool("serve-dns", false, "Serve bounded DNS for configured rule hosts")
+	dnsBindAddr := fs.String("dns-bind-addr", "", "Address to bind DNS server")
+	dnsPort := fs.String("dns-port", portals.ResolveDNSPort(""), "Port to bind DNS server")
 
-	rulesDir := flag.String("rules-dir", "", "Directory containing configuration rules")
-	serveDNSFlag := flag.Bool("serve-dns", false, "Serve bounded DNS for configured rule hosts")
-	dnsBindAddr := flag.String("dns-bind-addr", "", "Address to bind DNS server")
-	dnsPort := flag.String("dns-port", "", fmt.Sprintf("Port to bind DNS server (default %s)", portals.DefaultProxyDNSPort))
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return portals.Config{}, err
+	}
 
 	serveDNS := *serveDNSFlag
 	if env := os.Getenv("SERVE_DNS"); env != "" {
@@ -47,6 +53,20 @@ func main() {
 	}
 	if *rulesDir != "" {
 		config.RulesDir = *rulesDir
+	}
+	return config, nil
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	config, err := parseFlags(os.Args[1:], os.Stderr)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		os.Exit(2)
 	}
 
 	if err := portals.Run(ctx, config); err != nil {

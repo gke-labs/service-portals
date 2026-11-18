@@ -15,25 +15,101 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"flag"
-	"os"
+	"strings"
 	"testing"
+
+	"github.com/gke-labs/service-portals/pkg/portals"
 )
 
-func TestFlags(t *testing.T) {
-	// Backup original args and reset flags
-	origArgs := os.Args
-	defer func() { os.Args = origArgs }()
+func TestParseFlags(t *testing.T) {
+	var buf bytes.Buffer
+	cfg, err := parseFlags([]string{"-rules-dir", "/tmp/rules"}, &buf)
+	if err != nil {
+		t.Fatalf("parseFlags failed: %v", err)
+	}
+	if cfg.RulesDir != "/tmp/rules" {
+		t.Errorf("expected rules-dir to be /tmp/rules, got %q", cfg.RulesDir)
+	}
+}
 
-	os.Args = []string{"cmd", "-rules-dir", "/tmp/rules"}
+func TestDNSPortPrecedence(t *testing.T) {
+	var buf bytes.Buffer
 
-	// Reset CommandLine so we can redefine/reparse flags
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	// 1. Flag takes precedence over environment variables
+	t.Run("FlagTakesPrecedence", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "8053")
+		t.Setenv("DNS_PORT", "7053")
+		buf.Reset()
+		cfg, err := parseFlags([]string{"-dns-port", "9053"}, &buf)
+		if err != nil {
+			t.Fatalf("parseFlags failed: %v", err)
+		}
+		if cfg.ProxyDNSPort != "9053" {
+			t.Errorf("ProxyDNSPort = %q, want 9053", cfg.ProxyDNSPort)
+		}
+	})
 
-	rulesDir := flag.String("rules-dir", "", "Directory containing configuration rules")
-	flag.Parse()
+	// 2. PROXY_DNS_PORT environment variable takes precedence over DNS_PORT and default
+	t.Run("ProxyDNSPortEnvTakesPrecedence", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "8053")
+		t.Setenv("DNS_PORT", "7053")
+		buf.Reset()
+		cfg, err := parseFlags([]string{}, &buf)
+		if err != nil {
+			t.Fatalf("parseFlags failed: %v", err)
+		}
+		if cfg.ProxyDNSPort != "8053" {
+			t.Errorf("ProxyDNSPort = %q, want 8053", cfg.ProxyDNSPort)
+		}
+	})
 
-	if *rulesDir != "/tmp/rules" {
-		t.Errorf("expected rules-dir to be /tmp/rules, got %q", *rulesDir)
+	// 3. DNS_PORT environment variable takes precedence over default when PROXY_DNS_PORT unset
+	t.Run("DNSPortEnvUsedWhenNoProxyDNSPort", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "")
+		t.Setenv("DNS_PORT", "7053")
+		buf.Reset()
+		cfg, err := parseFlags([]string{}, &buf)
+		if err != nil {
+			t.Fatalf("parseFlags failed: %v", err)
+		}
+		if cfg.ProxyDNSPort != "7053" {
+			t.Errorf("ProxyDNSPort = %q, want 7053", cfg.ProxyDNSPort)
+		}
+	})
+
+	// 4. DefaultProxyDNSPort used when neither flag nor env is set
+	t.Run("DefaultUsedWhenUnset", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "")
+		t.Setenv("DNS_PORT", "")
+		buf.Reset()
+		cfg, err := parseFlags([]string{}, &buf)
+		if err != nil {
+			t.Fatalf("parseFlags failed: %v", err)
+		}
+		if cfg.ProxyDNSPort != portals.DefaultProxyDNSPort {
+			t.Errorf("ProxyDNSPort = %q, want %q", cfg.ProxyDNSPort, portals.DefaultProxyDNSPort)
+		}
+	})
+}
+
+func TestDNSPortHelp(t *testing.T) {
+	t.Setenv("PROXY_DNS_PORT", "")
+	t.Setenv("DNS_PORT", "")
+
+	var buf bytes.Buffer
+	_, err := parseFlags([]string{"-h"}, &buf)
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected ErrHelp, got: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, `Port to bind DNS server (default "1053")`) {
+		t.Errorf("expected help output to contain default port once, got:\n%s", output)
+	}
+	if count := strings.Count(output, "1053"); count != 1 {
+		t.Errorf("expected default port 1053 to appear exactly once, got count %d in:\n%s", count, output)
 	}
 }
