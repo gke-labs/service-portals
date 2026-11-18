@@ -27,14 +27,10 @@ import (
 	"github.com/gke-labs/service-portals/pkg/portals"
 )
 
-func parseFlags(args []string) (portals.Config, error) {
-	return parseFlagsWithOutput(args, nil)
-}
-
-func parseFlagsWithOutput(args []string, out io.Writer) (portals.Config, error) {
+func parseFlags(args []string, output io.Writer) (portals.Config, error) {
 	fs := flag.NewFlagSet("service-portal-agent", flag.ContinueOnError)
-	if out != nil {
-		fs.SetOutput(out)
+	if output != nil {
+		fs.SetOutput(output)
 	}
 	rulesDir := fs.String("rules-dir", "", "Directory containing configuration rules")
 	serveDNSFlag := fs.Bool("serve-dns", false, "Serve bounded DNS for configured rule hosts")
@@ -65,7 +61,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	config, err := parseFlags(os.Args[1:])
+	config, err := parseFlags(os.Args[1:], os.Stderr)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			os.Exit(0)

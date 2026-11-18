@@ -25,7 +25,8 @@ import (
 )
 
 func TestParseFlags(t *testing.T) {
-	cfg, err := parseFlags([]string{"-rules-dir", "/tmp/rules"})
+	var buf bytes.Buffer
+	cfg, err := parseFlags([]string{"-rules-dir", "/tmp/rules"}, &buf)
 	if err != nil {
 		t.Fatalf("parseFlags failed: %v", err)
 	}
@@ -35,11 +36,14 @@ func TestParseFlags(t *testing.T) {
 }
 
 func TestDNSPortPrecedence(t *testing.T) {
+	var buf bytes.Buffer
+
 	// 1. Flag takes precedence over environment variables
 	t.Run("FlagTakesPrecedence", func(t *testing.T) {
 		t.Setenv("PROXY_DNS_PORT", "8053")
 		t.Setenv("DNS_PORT", "7053")
-		cfg, err := parseFlags([]string{"-dns-port", "9053"})
+		buf.Reset()
+		cfg, err := parseFlags([]string{"-dns-port", "9053"}, &buf)
 		if err != nil {
 			t.Fatalf("parseFlags failed: %v", err)
 		}
@@ -52,7 +56,8 @@ func TestDNSPortPrecedence(t *testing.T) {
 	t.Run("ProxyDNSPortEnvTakesPrecedence", func(t *testing.T) {
 		t.Setenv("PROXY_DNS_PORT", "8053")
 		t.Setenv("DNS_PORT", "7053")
-		cfg, err := parseFlags([]string{})
+		buf.Reset()
+		cfg, err := parseFlags([]string{}, &buf)
 		if err != nil {
 			t.Fatalf("parseFlags failed: %v", err)
 		}
@@ -65,7 +70,8 @@ func TestDNSPortPrecedence(t *testing.T) {
 	t.Run("DNSPortEnvUsedWhenNoProxyDNSPort", func(t *testing.T) {
 		t.Setenv("PROXY_DNS_PORT", "")
 		t.Setenv("DNS_PORT", "7053")
-		cfg, err := parseFlags([]string{})
+		buf.Reset()
+		cfg, err := parseFlags([]string{}, &buf)
 		if err != nil {
 			t.Fatalf("parseFlags failed: %v", err)
 		}
@@ -78,7 +84,8 @@ func TestDNSPortPrecedence(t *testing.T) {
 	t.Run("DefaultUsedWhenUnset", func(t *testing.T) {
 		t.Setenv("PROXY_DNS_PORT", "")
 		t.Setenv("DNS_PORT", "")
-		cfg, err := parseFlags([]string{})
+		buf.Reset()
+		cfg, err := parseFlags([]string{}, &buf)
 		if err != nil {
 			t.Fatalf("parseFlags failed: %v", err)
 		}
@@ -93,7 +100,7 @@ func TestDNSPortHelp(t *testing.T) {
 	t.Setenv("DNS_PORT", "")
 
 	var buf bytes.Buffer
-	_, err := parseFlagsWithOutput([]string{"-h"}, &buf)
+	_, err := parseFlags([]string{"-h"}, &buf)
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("expected ErrHelp, got: %v", err)
 	}
