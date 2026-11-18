@@ -1720,11 +1720,42 @@ data:
 	}
 	controllerManifest := string(bCtrl)
 	controllerManifest = strings.ReplaceAll(controllerManifest, "image: service-portal-controller:latest", "image: service-portal-controller:e2e\n        imagePullPolicy: Never")
-	controllerManifest = strings.ReplaceAll(controllerManifest, `"--audience="`, fmt.Sprintf(`"--audience=%s"`, controllerAudience))
-	controllerManifest = strings.ReplaceAll(controllerManifest, `"--node-agent-account="`, fmt.Sprintf(`"--node-agent-account=%s"`, nodeAgentAccount))
-	controllerManifest = strings.ReplaceAll(controllerManifest, `"--client-allowlist="`, fmt.Sprintf(`"--client-allowlist=%s"`, allowedClientAccount))
 
 	h.KubectlApplyContent(controllerManifest)
+
+	// Assert once before running configure that the controller container is in CreateContainerConfigError naming the missing ConfigMap.
+	var waitingReason string
+	var waitingMessage string
+	foundExpectedStatus := false
+	startWaitConfigMap := time.Now()
+	for time.Since(startWaitConfigMap) < 30*time.Second {
+		cmdReason := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller",
+			"-o", "jsonpath={.items[*].status.containerStatuses[*].state.waiting.reason}")
+		outReason, _ := cmdReason.CombinedOutput()
+		waitingReason = strings.TrimSpace(string(outReason))
+
+		cmdMsg := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller",
+			"-o", "jsonpath={.items[*].status.containerStatuses[*].state.waiting.message}")
+		outMsg, _ := cmdMsg.CombinedOutput()
+		waitingMessage = strings.TrimSpace(string(outMsg))
+
+		if waitingReason == "CreateContainerConfigError" && strings.Contains(waitingMessage, "service-portal-config") {
+			foundExpectedStatus = true
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !foundExpectedStatus {
+		t.Fatalf("expected controller container to be waiting with reason CreateContainerConfigError and message naming 'service-portal-config', got reason=%q, message=%q",
+			waitingReason, waitingMessage)
+	}
+
+	h.RunCommand(filepath.Join(gitRoot, "dev/tasks/configure"),
+		"--audience="+controllerAudience,
+		"--node-agent-account="+nodeAgentAccount,
+		"--client-allowlist="+allowedClientAccount,
+	)
+
 	h.WaitForDeploymentInNamespace("service-portal-system", "service-portal-controller", 2*time.Minute)
 	h.WaitForPodReady("app=service-portal-controller", 2*time.Minute)
 

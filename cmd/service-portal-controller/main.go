@@ -59,14 +59,24 @@ func parseFlags(args []string) (Config, error) {
 	fs.StringVar(&cfg.ListenAddr, "listen-address", ":8443", "Address and port to listen on")
 	fs.StringVar(&cfg.TLSCertFile, "tls-cert-file", "", "Path to TLS server certificate file")
 	fs.StringVar(&cfg.TLSKeyFile, "tls-key-file", "", "Path to TLS server private key file")
-	fs.StringVar(&cfg.Audience, "audience", "", "TokenReview audience for the controller")
-	fs.StringVar(&cfg.NodeAgentAccount, "node-agent-account", "", "Service account allowed for node agents")
-	fs.StringVar(&clientAllowlist, "client-allowlist", "", "Comma-separated list of permitted client service accounts")
+	fs.StringVar(&cfg.Audience, "audience", "", "TokenReview audience for the controller (fallback: AUDIENCE env var)")
+	fs.StringVar(&cfg.NodeAgentAccount, "node-agent-account", "", "Service account allowed for node agents (fallback: NODE_AGENT_ACCOUNT env var)")
+	fs.StringVar(&clientAllowlist, "client-allowlist", "", "Comma-separated list of permitted client service accounts (fallback: CLIENT_ALLOWLIST env var)")
 	fs.StringVar(&cfg.Kubeconfig, "kubeconfig", "", "Path to kubeconfig file (optional, uses in-cluster config if empty)")
 	fs.DurationVar(&cfg.PushTimeout, "push-timeout", time.Minute, "Push timeout waiting for node acceptance")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
+	}
+
+	if cfg.Audience == "" {
+		cfg.Audience = os.Getenv("AUDIENCE")
+	}
+	if cfg.NodeAgentAccount == "" {
+		cfg.NodeAgentAccount = os.Getenv("NODE_AGENT_ACCOUNT")
+	}
+	if clientAllowlist == "" {
+		clientAllowlist = os.Getenv("CLIENT_ALLOWLIST")
 	}
 
 	if clientAllowlist != "" {
