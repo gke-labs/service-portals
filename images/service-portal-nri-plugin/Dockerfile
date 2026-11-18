@@ -22,6 +22,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+RUN git config --global --add safe.directory /app && git status
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o service-portal-nri-plugin ./cmd/service-portal-nri-plugin
 
 FROM debian:bookworm-slim
