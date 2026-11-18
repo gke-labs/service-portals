@@ -1723,23 +1723,31 @@ data:
 
 	h.KubectlApplyContent(controllerManifest)
 
-	// Assert once before running configure that the controller pod is not running and its status names the missing ConfigMap.
-	var statusOutput string
-	isNotRunningAndNamesConfigMap := false
+	// Assert once before running configure that the controller container is in CreateContainerConfigError naming the missing ConfigMap.
+	var waitingReason string
+	var waitingMessage string
+	foundExpectedStatus := false
 	startWaitConfigMap := time.Now()
 	for time.Since(startWaitConfigMap) < 30*time.Second {
-		out, err := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller", "-o", "yaml").CombinedOutput()
-		if err == nil {
-			statusOutput = string(out)
-			if strings.Contains(statusOutput, "service-portal-config") && !strings.Contains(statusOutput, "phase: Running") {
-				isNotRunningAndNamesConfigMap = true
-				break
-			}
+		cmdReason := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller",
+			"-o", "jsonpath={.items[*].status.containerStatuses[*].state.waiting.reason}")
+		outReason, _ := cmdReason.CombinedOutput()
+		waitingReason = strings.TrimSpace(string(outReason))
+
+		cmdMsg := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller",
+			"-o", "jsonpath={.items[*].status.containerStatuses[*].state.waiting.message}")
+		outMsg, _ := cmdMsg.CombinedOutput()
+		waitingMessage = strings.TrimSpace(string(outMsg))
+
+		if waitingReason == "CreateContainerConfigError" && strings.Contains(waitingMessage, "service-portal-config") {
+			foundExpectedStatus = true
+			break
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	if !isNotRunningAndNamesConfigMap {
-		t.Fatalf("expected controller pod not to be running and status to name missing ConfigMap 'service-portal-config', got:\n%s", statusOutput)
+	if !foundExpectedStatus {
+		t.Fatalf("expected controller container to be waiting with reason CreateContainerConfigError and message naming 'service-portal-config', got reason=%q, message=%q",
+			waitingReason, waitingMessage)
 	}
 
 	h.RunCommand(filepath.Join(gitRoot, "dev/tasks/configure"),
