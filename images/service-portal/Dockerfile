@@ -28,6 +28,8 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
+RUN git config --global --add safe.directory /app && git status
+
 # Build the application
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /service-portal ./cmd/service-portal/main.go
 
