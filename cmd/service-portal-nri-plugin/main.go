@@ -91,7 +91,7 @@ func parseFlags() (pluginConfig, error) {
 	flag.StringVar(&cfg.proxyHostV6, "proxy-host-v6", envOrDefault("PROXY_HOST_V6", ""), "Proxy destination IPv6 host or node IPv6")
 	flag.StringVar(&cfg.proxyPort, "proxy-port", envOrDefault("PROXY_PORT", "8080"), "Proxy HTTP port")
 	flag.StringVar(&cfg.proxyHTTPSPort, "proxy-https-port", envOrDefault("PROXY_HTTPS_PORT", "8443"), "Proxy HTTPS port")
-	flag.StringVar(&cfg.proxyDNSPort, "proxy-dns-port", envOrDefault("PROXY_DNS_PORT", envOrDefault("DNS_PORT", "53")), "Proxy DNS port")
+	flag.StringVar(&cfg.proxyDNSPort, "proxy-dns-port", portals.ResolveDNSPort(""), "Proxy DNS port")
 	flag.StringVar(&cfg.adminURL, "admin-url", envOrDefault("ADMIN_URL", "unix://"+portals.DefaultAdminSocketPath), "URL or unix domain socket of the node proxy admin server")
 	flag.StringVar(&cfg.caCertPath, "ca-cert-path", envOrDefault("CA_CERT_PATH", "/etc/service-portal/ca/tls.crt"), "Host path to CA certificate bundle")
 	flag.Parse()
@@ -205,7 +205,7 @@ func (p *portalPlugin) findNetnsPath(pod *api.PodSandbox) (string, error) {
 
 func buildHostNetfilterRules(isIPv6 bool, hostIface, proxyHost, proxyPort, proxyHTTPSPort, proxyDNSPort string) [][]string {
 	if proxyDNSPort == "" {
-		proxyDNSPort = "53"
+		proxyDNSPort = portals.ResolveDNSPort("")
 	}
 	prChain := "PORTAL_PR_" + hostIface
 	egChain := "PORTAL_EG_" + hostIface

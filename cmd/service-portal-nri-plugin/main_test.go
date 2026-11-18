@@ -518,6 +518,105 @@ func TestBuildHostIp6tablesRules(t *testing.T) {
 	}
 }
 
+func TestBuildHostIptablesRules_DefaultPort(t *testing.T) {
+	hostIface := "veth12345"
+	proxyHost := "192.168.1.10"
+	proxyPort := "8080"
+	proxyHTTPSPort := "8443"
+
+	// Passing empty proxyDNSPort must default to portals.DefaultProxyDNSPort ("1053")
+	rules := buildHostIptablesRules(hostIface, proxyHost, proxyPort, proxyHTTPSPort, "")
+
+	expectedDNATUDP := "-p udp --dport 53 -j DNAT --to-destination 192.168.1.10:" + portals.DefaultProxyDNSPort
+	expectedDNATTCP := "-p tcp --dport 53 -j DNAT --to-destination 192.168.1.10:" + portals.DefaultProxyDNSPort
+	expectedAcceptUDP := "-d 192.168.1.10 -p udp --dport " + portals.DefaultProxyDNSPort + " -j ACCEPT"
+	expectedAcceptTCP := "-d 192.168.1.10 -p tcp --dport " + portals.DefaultProxyDNSPort + " -j ACCEPT"
+
+	hasDNATUDP := false
+	hasDNATTCP := false
+	hasAcceptUDP := false
+	hasAcceptTCP := false
+
+	for _, r := range rules {
+		ruleStr := strings.Join(r, " ")
+		if strings.Contains(ruleStr, expectedDNATUDP) {
+			hasDNATUDP = true
+		}
+		if strings.Contains(ruleStr, expectedDNATTCP) {
+			hasDNATTCP = true
+		}
+		if strings.Contains(ruleStr, expectedAcceptUDP) {
+			hasAcceptUDP = true
+		}
+		if strings.Contains(ruleStr, expectedAcceptTCP) {
+			hasAcceptTCP = true
+		}
+	}
+
+	if !hasDNATUDP {
+		t.Errorf("missing default DNAT rule for port 53 UDP redirecting to %s", expectedDNATUDP)
+	}
+	if !hasDNATTCP {
+		t.Errorf("missing default DNAT rule for port 53 TCP redirecting to %s", expectedDNATTCP)
+	}
+	if !hasAcceptUDP {
+		t.Errorf("missing default accept rule for proxy DNS UDP on %s", expectedAcceptUDP)
+	}
+	if !hasAcceptTCP {
+		t.Errorf("missing default accept rule for proxy DNS TCP on %s", expectedAcceptTCP)
+	}
+}
+
+func TestBuildHostIp6tablesRules_DefaultPort(t *testing.T) {
+	hostIface := "veth12345"
+	proxyHostV6 := "fd00:10:244::1"
+	proxyPort := "8080"
+	proxyHTTPSPort := "8443"
+
+	// Passing empty proxyDNSPort must default to portals.DefaultProxyDNSPort ("1053")
+	rules := buildHostIp6tablesRules(hostIface, proxyHostV6, proxyPort, proxyHTTPSPort, "")
+
+	dest := net.JoinHostPort(proxyHostV6, portals.DefaultProxyDNSPort)
+	expectedDNATUDP := "-p udp --dport 53 -j DNAT --to-destination " + dest
+	expectedDNATTCP := "-p tcp --dport 53 -j DNAT --to-destination " + dest
+	expectedAcceptUDP := "-d " + proxyHostV6 + " -p udp --dport " + portals.DefaultProxyDNSPort + " -j ACCEPT"
+	expectedAcceptTCP := "-d " + proxyHostV6 + " -p tcp --dport " + portals.DefaultProxyDNSPort + " -j ACCEPT"
+
+	hasDNATUDP := false
+	hasDNATTCP := false
+	hasAcceptUDP := false
+	hasAcceptTCP := false
+
+	for _, r := range rules {
+		ruleStr := strings.Join(r, " ")
+		if strings.Contains(ruleStr, expectedDNATUDP) {
+			hasDNATUDP = true
+		}
+		if strings.Contains(ruleStr, expectedDNATTCP) {
+			hasDNATTCP = true
+		}
+		if strings.Contains(ruleStr, expectedAcceptUDP) {
+			hasAcceptUDP = true
+		}
+		if strings.Contains(ruleStr, expectedAcceptTCP) {
+			hasAcceptTCP = true
+		}
+	}
+
+	if !hasDNATUDP {
+		t.Errorf("missing default IPv6 DNAT rule for port 53 UDP redirecting to %s", expectedDNATUDP)
+	}
+	if !hasDNATTCP {
+		t.Errorf("missing default IPv6 DNAT rule for port 53 TCP redirecting to %s", expectedDNATTCP)
+	}
+	if !hasAcceptUDP {
+		t.Errorf("missing default IPv6 accept rule for proxy DNS UDP on %s", expectedAcceptUDP)
+	}
+	if !hasAcceptTCP {
+		t.Errorf("missing default IPv6 accept rule for proxy DNS TCP on %s", expectedAcceptTCP)
+	}
+}
+
 func TestBuildHostCleanupRules(t *testing.T) {
 	hostIface := "vethtest"
 	rules := buildHostCleanupRules(hostIface)
