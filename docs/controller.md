@@ -10,7 +10,34 @@ For architectural background and rationale, see the design records:
 
 ## Deploying the Controller
 
-The controller runs as a single-replica Deployment, configured via the reference manifest at `k8s/controller.yaml`.
+The controller reference manifest is designed to be applied unchanged via `ap deploy` (or `kubectl apply -f k8s/controller.yaml`):
+
+```bash
+ap deploy k8s/controller.yaml
+```
+
+The controller Deployment (`k8s/controller.yaml`) reads its audience, node agent service account, and client allowlist from a ConfigMap named `service-portal-config` in the `service-portal-system` namespace through non-optional `configMapKeyRef` environment variables.
+
+Until the ConfigMap exists, the controller pod does not start and remains in `CreateContainerConfigError` (with the error message naming the missing ConfigMap), signaling that the controller is not configured yet.
+
+After `ap deploy`, configure the controller by running `dev/tasks/configure` (or creating the ConfigMap directly):
+
+```bash
+dev/tasks/configure \
+  --audience="https://service-portal-controller" \
+  --node-agent-account="system:serviceaccount:service-portal-system:portal-node-agent" \
+  --client-allowlist="system:serviceaccount:default:sandbox-controller"
+```
+
+Once the ConfigMap is created, Kubernetes starts the controller pod.
+
+### ConfigMap Keys (`service-portal-config`)
+
+| Key | Description |
+|---|---|
+| `audience` | Expected TokenReview audience for validating caller tokens. |
+| `node-agent-account` | Permitted node agent service account in `system:serviceaccount:<namespace>:<name>` format. |
+| `client-allowlist` | Comma-separated list of permitted client service accounts (`system:serviceaccount:<namespace>:<name>`). If empty, all client calls are refused. |
 
 ### TLS Secret
 
@@ -20,20 +47,20 @@ The CA certificate that signed the controller's certificate must be distributed 
 - Sandbox controllers, to verify the controller's TLS certificate when dialing `PodBindService`.
 - Node agents, to verify the controller's TLS certificate when establishing the outbound node stream.
 
-### Controller Flags
+### Controller Configuration
 
-The `service-portal-controller` binary accepts the following flags:
+The `service-portal-controller` binary accepts flags or environment variables:
 
-| Flag | Type | Default | Description |
+| Flag | Environment Variable | Default | Description |
 |---|---|---|---|
-| `-listen-address` | string | `:8443` | Address and TCP port on which the controller serves gRPC over TLS. |
-| `-tls-cert-file` | string | `""` | File path to the TLS server certificate PEM file (**required**). |
-| `-tls-key-file` | string | `""` | File path to the TLS server private key PEM file (**required**). |
-| `-audience` | string | `""` | Expected TokenReview audience for validating caller tokens (**required**). Both client and node agent tokens must match this audience. |
-| `-node-agent-account` | string | `""` | Kubernetes service account permitted for node agents (**required**), formatted as `system:serviceaccount:<namespace>:<name>`. |
-| `-client-allowlist` | string | `""` | Comma-separated list of permitted client service accounts (`system:serviceaccount:<namespace>:<name>`). If empty, all client calls are refused. |
-| `-kubeconfig` | string | `""` | Path to kubeconfig file. If omitted, uses in-cluster config. Requires RBAC permissions to read pods (`get`, `list`, `watch`) and `create` on `tokenreviews`. |
-| `-push-timeout` | duration | `1m` | Timeout waiting for a node agent to accept a push before returning `DeadlineExceeded`. |
+| `-listen-address` | | `:8443` | Address and TCP port on which the controller serves gRPC over TLS. |
+| `-tls-cert-file` | | `""` | File path to the TLS server certificate PEM file (**required**). |
+| `-tls-key-file` | | `""` | File path to the TLS server private key PEM file (**required**). |
+| `-audience` | `AUDIENCE` | `""` | Expected TokenReview audience for validating caller tokens (**required**; falls back to `AUDIENCE` env var). Both client and node agent tokens must match this audience. |
+| `-node-agent-account` | `NODE_AGENT_ACCOUNT` | `""` | Kubernetes service account permitted for node agents (**required**; falls back to `NODE_AGENT_ACCOUNT` env var), formatted as `system:serviceaccount:<namespace>:<name>`. |
+| `-client-allowlist` | `CLIENT_ALLOWLIST` | `""` | Comma-separated list of permitted client service accounts (`system:serviceaccount:<namespace>:<name>`; falls back to `CLIENT_ALLOWLIST` env var). If empty, all client calls are refused. |
+| `-kubeconfig` | | `""` | Path to kubeconfig file. If omitted, uses in-cluster config. Requires RBAC permissions to read pods (`get`, `list`, `watch`) and `create` on `tokenreviews`. |
+| `-push-timeout` | | `1m` | Timeout waiting for a node agent to accept a push before returning `DeadlineExceeded`. |
 
 ### What the Node Agent Needs
 

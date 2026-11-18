@@ -1,0 +1,94 @@
+#!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o errexit
+set -o nounset
+set -o pipefail
+
+NAMESPACE="service-portal-system"
+CONFIGMAP_NAME="service-portal-config"
+AUDIENCE=""
+NODE_AGENT_ACCOUNT=""
+CLIENT_ALLOWLIST=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --audience=*)
+      AUDIENCE="${1#*=}"
+      shift
+      ;;
+    --audience)
+      AUDIENCE="$2"
+      shift 2
+      ;;
+    --node-agent-account=*)
+      NODE_AGENT_ACCOUNT="${1#*=}"
+      shift
+      ;;
+    --node-agent-account)
+      NODE_AGENT_ACCOUNT="$2"
+      shift 2
+      ;;
+    --client-allowlist=*)
+      CLIENT_ALLOWLIST="${1#*=}"
+      shift
+      ;;
+    --client-allowlist)
+      CLIENT_ALLOWLIST="$2"
+      shift 2
+      ;;
+    -n|--namespace)
+      NAMESPACE="$2"
+      shift 2
+      ;;
+    --namespace=*)
+      NAMESPACE="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: $0 [options]"
+      echo "Creates the service-portal configuration ConfigMap after ap deploy."
+      echo ""
+      echo "Options:"
+      echo "  --audience <aud>             TokenReview audience (default: https://service-portal-controller)"
+      echo "  --node-agent-account <sa>    Node agent service account (default: system:serviceaccount:<namespace>:portal-node-agent)"
+      echo "  --client-allowlist <sa,...>  Comma-separated list of permitted client service accounts"
+      echo "  -n, --namespace <ns>         Namespace for ConfigMap (default: service-portal-system)"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "${AUDIENCE}" ]]; then
+  AUDIENCE="https://service-portal-controller"
+  echo "Using default audience: ${AUDIENCE}"
+fi
+
+if [[ -z "${NODE_AGENT_ACCOUNT}" ]]; then
+  NODE_AGENT_ACCOUNT="system:serviceaccount:${NAMESPACE}:portal-node-agent"
+  echo "Using default node agent account: ${NODE_AGENT_ACCOUNT}"
+fi
+
+echo "Creating ConfigMap '${CONFIGMAP_NAME}' in namespace '${NAMESPACE}'..."
+kubectl create configmap "${CONFIGMAP_NAME}" \
+  --namespace="${NAMESPACE}" \
+  --from-literal=audience="${AUDIENCE}" \
+  --from-literal=node-agent-account="${NODE_AGENT_ACCOUNT}" \
+  --from-literal=client-allowlist="${CLIENT_ALLOWLIST}" \
+  --dry-run=client -o yaml | kubectl apply -f -
