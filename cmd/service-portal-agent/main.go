@@ -32,7 +32,7 @@ func main() {
 	rulesDir := flag.String("rules-dir", "", "Directory containing configuration rules")
 	serveDNSFlag := flag.Bool("serve-dns", false, "Serve bounded DNS for configured rule hosts")
 	dnsBindAddr := flag.String("dns-bind-addr", "", "Address to bind DNS server")
-	dnsPort := flag.String("dns-port", "", "Port to bind DNS server (default 53)")
+	dnsPort := flag.String("dns-port", "", fmt.Sprintf("Port to bind DNS server (default %s)", portals.DefaultProxyDNSPort))
 	flag.Parse()
 
 	serveDNS := *serveDNSFlag

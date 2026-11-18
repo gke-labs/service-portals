@@ -1904,8 +1904,9 @@ spec:
         image: service-portal-agent:e2e
         imagePullPolicy: Never
         securityContext:
-          capabilities:
-            add: ["NET_BIND_SERVICE"]
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
         env:
         - name: PORT
           value: "8080"

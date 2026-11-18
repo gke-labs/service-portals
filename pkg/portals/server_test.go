@@ -377,3 +377,41 @@ func TestRun_PodMapWithRulesDir_FailsStartup(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveDNSPort(t *testing.T) {
+	// 1. Explicit configured port takes precedence over everything
+	t.Run("ConfiguredPort_TakesPrecedence", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "5353")
+		t.Setenv("DNS_PORT", "5354")
+		if got := ResolveDNSPort("1053"); got != "1053" {
+			t.Errorf("ResolveDNSPort(1053) = %q, want 1053", got)
+		}
+	})
+
+	// 2. PROXY_DNS_PORT takes precedence over DNS_PORT and default
+	t.Run("PROXY_DNS_PORT_TakesPrecedence", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "8053")
+		t.Setenv("DNS_PORT", "5354")
+		if got := ResolveDNSPort(""); got != "8053" {
+			t.Errorf("ResolveDNSPort(\"\") = %q, want 8053", got)
+		}
+	})
+
+	// 3. DNS_PORT takes precedence over default when PROXY_DNS_PORT is empty
+	t.Run("DNS_PORT_UsedWhenNoProxyDNSPort", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "")
+		t.Setenv("DNS_PORT", "5354")
+		if got := ResolveDNSPort(""); got != "5354" {
+			t.Errorf("ResolveDNSPort(\"\") = %q, want 5354", got)
+		}
+	})
+
+	// 4. DefaultProxyDNSPort ("1053") used when neither is set
+	t.Run("DefaultProxyDNSPort_UsedWhenUnset", func(t *testing.T) {
+		t.Setenv("PROXY_DNS_PORT", "")
+		t.Setenv("DNS_PORT", "")
+		if got := ResolveDNSPort(""); got != DefaultProxyDNSPort {
+			t.Errorf("ResolveDNSPort(\"\") = %q, want %q", got, DefaultProxyDNSPort)
+		}
+	})
+}

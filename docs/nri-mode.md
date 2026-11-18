@@ -95,6 +95,21 @@ kubectl logs -n service-portal-system -l app=portal-node-agent -c nri-plugin
 # Output contains registration with containerd /var/run/nri/nri.sock
 ```
 
+### Real-Node Verification (Unprivileged DNS Port)
+On real Linux nodes (e.g. GKE Standard with Container-Optimized OS or Ubuntu), the host network namespace enforces `net.ipv4.ip_unprivileged_port_start = 1024`. Because `proxy` runs as non-root (UID 65532) without added capabilities, verify that the proxy binds the unprivileged DNS port (`1053`) successfully:
+1. Verify node unprivileged port threshold:
+   ```bash
+   sysctl net.ipv4.ip_unprivileged_port_start
+   # Output: net.ipv4.ip_unprivileged_port_start = 1024
+   ```
+2. Verify `proxy` starts without permission errors:
+   ```bash
+   kubectl logs -n service-portal-system -l app=portal-node-agent -c proxy
+   # Output contains: "Starting node DNS server on <nodeIP>:1053"
+   ```
+   Confirm no `bind: permission denied` errors appear.
+3. Verify intercepted DNS reachability: Opted-in pod queries to port 53 (cluster DNS or external) are redirected by NRI netfilter rules to `<nodeIP>:1053` and answered by the proxy.
+
 ---
 
 ## 5. Opting In Workload Pods

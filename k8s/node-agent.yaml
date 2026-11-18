@@ -67,8 +67,8 @@
 #   Ensures the hostNetwork pod can resolve in-cluster DNS records, including the
 #   Service Portal Controller service (service-portal-controller.service-portal-system.svc).
 # - Capabilities:
-#   - proxy: NET_BIND_SERVICE allows the non-root process (UID 65532) to bind to
-#     privileged DNS port 53.
+#   - proxy: runs as non-root (UID 65532) with no added capabilities; binds to
+#     unprivileged ports (HTTP 8080, HTTPS 8443, DNS 1053).
 #   - nri-plugin: NET_ADMIN is required to manage iptables and ip6tables PREROUTING
 #     chains on host interfaces for intercepted pods. SYS_ADMIN is required to inspect
 #     pod network namespaces in /run/netns and bind-mount certificates into sandbox
@@ -149,15 +149,18 @@ spec:
           runAsNonRoot: true
           runAsUser: 65532
           runAsGroup: 65532
-          capabilities:
-            add:
-            - NET_BIND_SERVICE
         ports:
         - name: http
           containerPort: 8080
           protocol: TCP
         - name: https
           containerPort: 8443
+          protocol: TCP
+        - name: dns
+          containerPort: 1053
+          protocol: UDP
+        - name: dns-tcp
+          containerPort: 1053
           protocol: TCP
         readinessProbe:
           tcpSocket:

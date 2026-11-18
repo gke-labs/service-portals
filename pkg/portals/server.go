@@ -48,6 +48,25 @@ const DefaultAdminSocketPath = "/run/service-portal/portal.sock"
 // DefaultBindSocketPath is the default Unix domain socket path for the local node agent PodBindService gRPC API.
 const DefaultBindSocketPath = "/run/service-portal/bind.sock"
 
+// DefaultProxyDNSPort is the default unprivileged port for the proxy DNS server.
+const DefaultProxyDNSPort = "1053"
+
+// ResolveDNSPort returns the DNS port to use, checking the provided port,
+// the PROXY_DNS_PORT environment variable, the DNS_PORT environment variable,
+// and finally falling back to DefaultProxyDNSPort ("1053").
+func ResolveDNSPort(configuredPort string) string {
+	if configuredPort != "" {
+		return configuredPort
+	}
+	if env := os.Getenv("PROXY_DNS_PORT"); env != "" {
+		return env
+	}
+	if env := os.Getenv("DNS_PORT"); env != "" {
+		return env
+	}
+	return DefaultProxyDNSPort
+}
+
 type CertificateProvider interface {
 	GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificate, error)
 }
@@ -446,13 +465,7 @@ func Run(ctx context.Context, config Config) error {
 
 	var dnsServers []*dns.Server
 	if serveDNS {
-		dnsPort := config.ProxyDNSPort
-		if dnsPort == "" {
-			dnsPort = os.Getenv("DNS_PORT")
-		}
-		if dnsPort == "" {
-			dnsPort = "53"
-		}
+		dnsPort := ResolveDNSPort(config.ProxyDNSPort)
 
 		defaultAction := config.DefaultAction
 		if defaultAction == "" {
