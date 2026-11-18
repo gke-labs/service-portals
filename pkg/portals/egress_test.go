@@ -16,9 +16,14 @@ package portals
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1682,4 +1687,424 @@ func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
 		resp := sendDNSQueryFromPacketConn(t, connUnknown, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA)
 		assertNXDOMAIN(t, resp)
 	})
+}
+
+func TestEgressHandler_ShortNameResolution_PodNamespaceIsolation(t *testing.T) {
+	var nsACalls atomic.Int32
+	var nsBCalls atomic.Int32
+	var agentNSCalls atomic.Int32
+
+	upstreamNSA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nsACalls.Add(1)
+		if r.Host != "backend" {
+			t.Errorf("upstreamNSA expected Host 'backend', got %q", r.Host)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("response from ns-a"))
+	}))
+	defer upstreamNSA.Close()
+
+	upstreamNSB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nsBCalls.Add(1)
+		if r.Host != "backend" {
+			t.Errorf("upstreamNSB expected Host 'backend', got %q", r.Host)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("response from ns-b"))
+	}))
+	defer upstreamNSB.Close()
+
+	upstreamAgentNS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentNSCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("response from service-portal-system"))
+	}))
+	defer upstreamAgentNS.Close()
+
+	// Transport routes based on dialed req.URL.Host to simulate cluster DNS resolution
+	routingTransport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			switch addr {
+			case "backend.ns-a.svc.cluster.local:80":
+				return (&net.Dialer{}).DialContext(ctx, network, upstreamNSA.Listener.Addr().String())
+			case "backend.ns-b.svc.cluster.local:80":
+				return (&net.Dialer{}).DialContext(ctx, network, upstreamNSB.Listener.Addr().String())
+			case "backend.service-portal-system.svc.cluster.local:80":
+				return (&net.Dialer{}).DialContext(ctx, network, upstreamAgentNS.Listener.Addr().String())
+			default:
+				return nil, fmt.Errorf("unexpected dial destination %s", addr)
+			}
+		},
+	}
+
+	pm, store := newTestEnv(t)
+
+	podAIP := "10.244.1.10"
+	podAUID := "pod-caller-a"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podAUID,
+		Namespace: "ns-a",
+		Name:      "client-a",
+		IPs:       []string{podAIP},
+	})
+
+	podBIP := "10.244.1.20"
+	podBUID := "pod-caller-b"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podBUID,
+		Namespace: "ns-b",
+		Name:      "client-b",
+		IPs:       []string{podBIP},
+	})
+
+	// Both pods have a policy allowing short name "backend"
+	policy := &portalsv1.EgressPolicy{
+		Rules: []*portalsv1.EgressRule{
+			{
+				Http: &portalsv1.HttpRule{
+					Hostnames: []string{"backend"},
+					Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+				},
+			},
+		},
+	}
+
+	if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podAUID, Policy: policy}); err != nil {
+		t.Fatalf("bind pod A failed: %v", err)
+	}
+	if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podBUID, Policy: policy}); err != nil {
+		t.Fatalf("bind pod B failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, routingTransport, nil)
+	handler.clusterDomain = "cluster.local"
+	handler.podSearchRest = "svc.cluster.local"
+
+	// 1. Pod A in ns-a requests http://backend/
+	reqA := httptest.NewRequest("GET", "http://backend/data", nil)
+	reqA.RemoteAddr = podAIP + ":12345"
+	recA := httptest.NewRecorder()
+	handler.ServeHTTP(recA, reqA)
+
+	respA := recA.Result()
+	defer respA.Body.Close()
+	bodyA, _ := io.ReadAll(respA.Body)
+
+	if respA.StatusCode != http.StatusOK {
+		t.Fatalf("Pod A request failed with status %d: %s", respA.StatusCode, string(bodyA))
+	}
+	if string(bodyA) != "response from ns-a" {
+		t.Errorf("Pod A expected response from ns-a, got %q", string(bodyA))
+	}
+	if nsACalls.Load() != 1 {
+		t.Errorf("expected 1 call to ns-a upstream, got %d", nsACalls.Load())
+	}
+
+	// 2. Pod B in ns-b requests http://backend/
+	reqB := httptest.NewRequest("GET", "http://backend/data", nil)
+	reqB.RemoteAddr = podBIP + ":23456"
+	recB := httptest.NewRecorder()
+	handler.ServeHTTP(recB, reqB)
+
+	respB := recB.Result()
+	defer respB.Body.Close()
+	bodyB, _ := io.ReadAll(respB.Body)
+
+	if respB.StatusCode != http.StatusOK {
+		t.Fatalf("Pod B request failed with status %d: %s", respB.StatusCode, string(bodyB))
+	}
+	if string(bodyB) != "response from ns-b" {
+		t.Errorf("Pod B expected response from ns-b, got %q", string(bodyB))
+	}
+	if nsBCalls.Load() != 1 {
+		t.Errorf("expected 1 call to ns-b upstream, got %d", nsBCalls.Load())
+	}
+
+	// 3. Crucial assertion: Upstream in agent's namespace (service-portal-system) must NEVER be dialed
+	if agentNSCalls.Load() != 0 {
+		t.Errorf("expected 0 calls to node agent namespace upstream, got %d", agentNSCalls.Load())
+	}
+}
+
+func TestEgressHandler_ShortNameResolution_FailClosed(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	policy := &portalsv1.EgressPolicy{
+		Rules: []*portalsv1.EgressRule{
+			{
+				Http: &portalsv1.HttpRule{
+					Hostnames: []string{"backend"},
+					Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+				},
+			},
+		},
+	}
+
+	// Pod without namespace metadata cannot have short in-cluster name resolved
+	t.Run("missing namespace fails closed", func(t *testing.T) {
+		podNoNSIP := "10.244.1.30"
+		podNoNSUID := "pod-no-ns"
+		pm.AddOrUpdatePod(&PodInfo{
+			UID:       podNoNSUID,
+			Namespace: "", // missing namespace
+			Name:      "pod-missing-ns",
+			IPs:       []string{podNoNSIP},
+		})
+
+		if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podNoNSUID, Policy: policy}); err != nil {
+			t.Fatalf("bind failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, nil, nil)
+		handler.clusterDomain = "cluster.local"
+		handler.podSearchRest = "svc.cluster.local"
+
+		req := httptest.NewRequest("GET", "http://backend/test", nil)
+		req.RemoteAddr = podNoNSIP + ":34567"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		resp := rec.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden for pod with missing namespace, got %d", resp.StatusCode)
+		}
+	})
+
+	// Pod with valid namespace but handler missing resolv.conf cluster search domain fails closed
+	t.Run("missing cluster search domain fails closed", func(t *testing.T) {
+		podValidIP := "10.244.1.31"
+		podValidUID := "pod-valid-ns"
+		pm.AddOrUpdatePod(&PodInfo{
+			UID:       podValidUID,
+			Namespace: "ns-a",
+			Name:      "pod-valid-ns",
+			IPs:       []string{podValidIP},
+		})
+		if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podValidUID, Policy: policy}); err != nil {
+			t.Fatalf("bind failed: %v", err)
+		}
+
+		hNoCluster := NewEgressHandler(pm, store, nil, nil)
+		hNoCluster.clusterDomain = ""
+		hNoCluster.podSearchRest = "" // no cluster search domain in resolv.conf
+
+		req := httptest.NewRequest("GET", "http://backend/test", nil)
+		req.RemoteAddr = podValidIP + ":34568"
+		rec := httptest.NewRecorder()
+		hNoCluster.ServeHTTP(rec, req)
+
+		resp := rec.Result()
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden for missing cluster search domain, got %d", resp.StatusCode)
+		}
+	})
+}
+
+func TestEgressHandler_ShortNameResolution_TLSUpstreamVerification(t *testing.T) {
+	// Generate a test CA
+	caPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed generating CA key: %v", err)
+	}
+	caTemplate := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test Upstream CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("failed creating CA cert: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("failed parsing CA cert: %v", err)
+	}
+	caPool := x509.NewCertPool()
+	caPool.AddCert(caCert)
+
+	// Server cert is issued strictly for "backend.ns-a.svc.cluster.local", NOT for bare "backend".
+	serverPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed generating server key: %v", err)
+	}
+	serverTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "backend.ns-a.svc.cluster.local"},
+		DNSNames:     []string{"backend.ns-a.svc.cluster.local"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	serverDER, err := x509.CreateCertificate(rand.Reader, &serverTemplate, &caTemplate, &serverPriv.PublicKey, caPriv)
+	if err != nil {
+		t.Fatalf("failed creating server cert: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Assert that the upstream sees the original Host header as sent by the pod
+		if r.Host != "backend" {
+			t.Errorf("upstream expected Host 'backend', got %q", r.Host)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("tls response from ns-a"))
+	}))
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{
+			{
+				Certificate: [][]byte{serverDER},
+				PrivateKey:  serverPriv,
+			},
+		},
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	// Transport verifies TLS against the completed URL host using the CA pool
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+		},
+		TLSClientConfig: &tls.Config{
+			RootCAs: caPool,
+		},
+	}
+
+	pm, store := newTestEnv(t)
+
+	podAIP := "10.244.1.10"
+	podAUID := "pod-tls-a"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podAUID,
+		Namespace: "ns-a",
+		Name:      "client-a",
+		IPs:       []string{podAIP},
+	})
+
+	podBIP := "10.244.1.20"
+	podBUID := "pod-tls-b"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       podBUID,
+		Namespace: "ns-b",
+		Name:      "client-b",
+		IPs:       []string{podBIP},
+	})
+
+	policy := &portalsv1.EgressPolicy{
+		Rules: []*portalsv1.EgressRule{
+			{
+				Https: &portalsv1.HttpsRule{
+					Hostnames: []string{"backend"},
+					Ports:     &portalsv1.Ports{Numbers: []int32{443}},
+				},
+			},
+		},
+	}
+
+	if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podAUID, Policy: policy}); err != nil {
+		t.Fatalf("bind pod A failed: %v", err)
+	}
+	if _, err := store.Bind(t.Context(), &portalsv1.PodPolicy{PodUid: podBUID, Policy: policy}); err != nil {
+		t.Fatalf("bind pod B failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, transport, nil)
+	handler.clusterDomain = "cluster.local"
+	handler.podSearchRest = "svc.cluster.local"
+
+	// 1. Pod A (in ns-a) requests https://backend/
+	// Upstream TLS cert verification validates against backend.ns-a.svc.cluster.local (succeeds)
+	reqA := httptest.NewRequest("GET", "https://backend/path", nil)
+	reqA.RemoteAddr = podAIP + ":12345"
+	recA := httptest.NewRecorder()
+	handler.ServeHTTP(recA, reqA)
+
+	respA := recA.Result()
+	defer respA.Body.Close()
+	bodyA, _ := io.ReadAll(respA.Body)
+
+	if respA.StatusCode != http.StatusOK {
+		t.Fatalf("Pod A request failed with status %d: %s", respA.StatusCode, string(bodyA))
+	}
+	if string(bodyA) != "tls response from ns-a" {
+		t.Errorf("expected 'tls response from ns-a', got %q", string(bodyA))
+	}
+
+	// 2. Pod B (in ns-b) requests https://backend/
+	// Upstream TLS cert verification validates against backend.ns-b.svc.cluster.local.
+	// Since server cert is only valid for backend.ns-a.svc.cluster.local, verification fails.
+	reqB := httptest.NewRequest("GET", "https://backend/path", nil)
+	reqB.RemoteAddr = podBIP + ":23456"
+	recB := httptest.NewRecorder()
+	handler.ServeHTTP(recB, reqB)
+
+	respB := recB.Result()
+	defer respB.Body.Close()
+
+	if respB.StatusCode != http.StatusBadGateway {
+		t.Fatalf("Pod B request expected 502 Bad Gateway due to TLS SAN mismatch, got %d", respB.StatusCode)
+	}
+}
+
+func TestParseResolvConf(t *testing.T) {
+	tmp, err := os.CreateTemp("", "resolv-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmp.Name())
+
+	content := `nameserver 10.96.0.10
+search service-portal-system.svc.custom.internal svc.custom.internal custom.internal extra.search.domain
+options ndots:5
+`
+	if _, err := tmp.WriteString(content); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	tmp.Close()
+
+	searches, domain, podRest := parseResolvConf(tmp.Name())
+	if len(searches) != 4 {
+		t.Errorf("expected 4 search domains, got %d (%v)", len(searches), searches)
+	}
+	if domain != "custom.internal" {
+		t.Errorf("expected cluster domain 'custom.internal', got %q", domain)
+	}
+	if podRest != "svc.custom.internal" {
+		t.Errorf("expected pod search rest 'svc.custom.internal', got %q", podRest)
+	}
+
+	// File with search line but no cluster domain entry (no <namespace>.svc.<domain>)
+	tmpNoCluster, err := os.CreateTemp("", "resolv-test-nocluster-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpNoCluster.Name())
+	if _, err := tmpNoCluster.WriteString("search mycorp.local external.domain\n"); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	tmpNoCluster.Close()
+
+	searchesNoCluster, domainNoCluster, podRestNoCluster := parseResolvConf(tmpNoCluster.Name())
+	if len(searchesNoCluster) != 2 {
+		t.Errorf("expected 2 search domains, got %d", len(searchesNoCluster))
+	}
+	if domainNoCluster != "" {
+		t.Errorf("expected empty cluster domain, got %q", domainNoCluster)
+	}
+	if podRestNoCluster != "" {
+		t.Errorf("expected empty pod search rest, got %q", podRestNoCluster)
+	}
+
+	// Nonexistent file returns empty values with no fallback
+	searchesNone, domainNone, podRestNone := parseResolvConf("/nonexistent/file/path")
+	if searchesNone != nil || domainNone != "" || podRestNone != "" {
+		t.Errorf("expected nil/empty for nonexistent file, got %v, %q, %q", searchesNone, domainNone, podRestNone)
+	}
 }

@@ -21,6 +21,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -34,22 +35,132 @@ var _ dns.RuleMatcher = (*EgressHandler)(nil)
 
 // EgressHandler decides intercepted requests against the caller pod's bound egress policy.
 type EgressHandler struct {
-	podMap    *PodMap
-	store     *portalsv1.BindingStore
-	transport http.RoundTripper
-	signer    *proxy.CertSigner
+	podMap        *PodMap
+	store         *portalsv1.BindingStore
+	transport     http.RoundTripper
+	signer        *proxy.CertSigner
+	searchDomains []string // all entries from /etc/resolv.conf search line
+	clusterDomain string   // cluster domain parsed from <namespace>.svc.<domain>
+	podSearchRest string   // search suffix after namespace from entry 0, e.g. "svc.cluster.local"
 }
 
 // NewEgressHandler creates an EgressHandler that resolves caller pods via podMap,
 // looks up egress policies and secrets in store, signs TLS certificates via signer,
 // and forwards allowed traffic via transport.
 func NewEgressHandler(podMap *PodMap, store *portalsv1.BindingStore, transport http.RoundTripper, signer *proxy.CertSigner) *EgressHandler {
-	return &EgressHandler{
-		podMap:    podMap,
-		store:     store,
-		transport: transport,
-		signer:    signer,
+	searches, clusterDomain, podSearchRest := parseResolvConf("/etc/resolv.conf")
+	if podSearchRest == "" {
+		log.Printf("Warning: /etc/resolv.conf search line has no cluster search entry (<namespace>.svc.<domain>); short in-cluster names will be refused")
 	}
+	return &EgressHandler{
+		podMap:        podMap,
+		store:         store,
+		transport:     transport,
+		signer:        signer,
+		searchDomains: searches,
+		clusterDomain: clusterDomain,
+		podSearchRest: podSearchRest,
+	}
+}
+
+// parseResolvConf extracts the search list from a resolv.conf file and parses
+// the cluster domain and per-pod search suffix.
+//
+// In Kubernetes (pkg/kubelet/network/dns/dns.go: (*Configurer).generateSearchesForDNSClusterFirst),
+// kubelet generates the search list for ClusterFirst and ClusterFirstWithHostNet pods as:
+//
+//	[0]: <namespace>.svc.<clusterDomain>
+//	[1]: svc.<clusterDomain>
+//	[2]: <clusterDomain>
+//	followed by the node's search domains.
+//
+// Because the node agent runs with dnsPolicy: ClusterFirstWithHostNet in its own namespace,
+// entry 0 is <agentNamespace>.svc.<clusterDomain>. The cluster domain is extracted from
+// entry 0, and the remainder after the namespace ("svc.<clusterDomain>") is saved to complete
+// short in-cluster names for calling pods without hard-coding ".svc" or "cluster.local".
+// If the search line contains no entry of the form <namespace>.svc.<domain>, no fallback
+// is applied and short in-cluster names fail closed.
+func parseResolvConf(path string) (searches []string, clusterDomain, podSearchRest string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 1 && fields[0] == "search" {
+			searches = fields[1:]
+			break
+		}
+	}
+	if len(searches) == 0 {
+		return nil, "", ""
+	}
+
+	parts := strings.Split(searches[0], ".")
+	if len(parts) >= 3 && parts[1] == "svc" {
+		clusterDomain = strings.Join(parts[2:], ".")
+		podSearchRest = strings.Join(parts[1:], ".")
+	}
+	return searches, clusterDomain, podSearchRest
+}
+
+// resolveUpstreamHost completes short or partly qualified in-cluster names with
+// the calling pod's namespace and the cluster's search path, not the node agent's.
+// Fully qualified and external names are unaffected.
+//
+// In Kubernetes (pkg/kubelet/network/dns/dns.go: (*Configurer).generateSearchesForDNSClusterFirst),
+// kubelet generates the search list for ClusterFirst and ClusterFirstWithHostNet pods as:
+//
+//	<namespace>.svc.<clusterDomain>, svc.<clusterDomain>, <clusterDomain>, then host searches.
+//
+// Because the node agent runs with dnsPolicy: ClusterFirstWithHostNet, its own /etc/resolv.conf
+// search list matches the calling pod's search list with only the namespace in the first entry
+// differing. The suffix for a calling pod is derived by replacing the node agent's namespace in
+// the first search entry with the calling pod's namespace.
+//
+// For single-label names (e.g. "backend"), only the calling pod's own namespace
+// is tried: the rest of a pod's search path (and any node search domains) is
+// deliberately not emulated, so a single-label name that is not a Service in the
+// pod's namespace is refused. If the node agent's resolv.conf has no cluster search
+// entry (<namespace>.svc.<domain>), single-label names are refused (fail closed).
+//
+// For TLS (https) upstreams reached by short name, setting outReq.URL.Host to the
+// completed name means upstream TLS certificate verification validates against
+// <name>.<namespace>.svc.<clusterDomain>, not <name>; the Host header the upstream
+// sees is still what the pod sent. Keying outReq.URL.Host by the completed name
+// ensures pooled connections are isolated per namespace and cannot be reused
+// across pods in different namespaces.
+func (h *EgressHandler) resolveUpstreamHost(targetHost string, pod *PodInfo) (string, error) {
+	host := proxy.HostWithoutPort(targetHost)
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "" {
+		return "", errors.New("empty host")
+	}
+	if net.ParseIP(host) != nil || host == "localhost" {
+		return host, nil
+	}
+
+	if h.clusterDomain != "" {
+		clusterSuffix := "." + h.clusterDomain
+		if strings.HasSuffix(host, clusterSuffix) {
+			return host, nil
+		}
+		if strings.HasSuffix(host, ".svc") {
+			return host + clusterSuffix, nil
+		}
+	}
+
+	if !strings.Contains(host, ".") {
+		if pod == nil || pod.Namespace == "" {
+			return "", errors.New("cannot resolve short name for caller: pod namespace unknown")
+		}
+		if h.podSearchRest == "" {
+			return "", errors.New("cannot resolve short in-cluster name: no cluster search domain found in resolv.conf")
+		}
+		return host + "." + pod.Namespace + "." + h.podSearchRest, nil
+	}
+
+	return host, nil
 }
 
 // GetCertificate implements CertificateProvider to answer TLS handshakes with
@@ -148,10 +259,17 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dialHost, err := h.resolveUpstreamHost(targetHost, pod)
+	if err != nil {
+		log.Printf("Request: %s %s:%d | Caller: %s | Action: denied (resolve error: %v)", r.Method, targetHost, port, caller, err)
+		http.Error(w, "Access Denied: cannot resolve host for caller", http.StatusForbidden)
+		return
+	}
+
 	outReq := r.Clone(r.Context())
 	outReq.RequestURI = ""
 	outReq.URL.Scheme = string(proto)
-	outReq.URL.Host = net.JoinHostPort(targetHost, strconv.Itoa(int(port)))
+	outReq.URL.Host = net.JoinHostPort(dialHost, strconv.Itoa(int(port)))
 	outReq.Host = r.Host
 
 	err = rule.ApplyEffects(outReq.Header, func(name string) ([]byte, error) {
