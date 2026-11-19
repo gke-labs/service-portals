@@ -24,7 +24,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -33,26 +32,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/service-portals/pkg/client"
 	"github.com/gke-labs/service-portals/pkg/controller"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // BindAndReleaseSandbox demonstrates the recommended pattern for a sandbox controller
-// configuring egress policy and credentials for a sandbox pod via the Service Portal Controller.
+// configuring egress policy and credentials for a sandbox pod via the Service Portal Controller client.
 //
 // Flow:
-// 1. Establish gRPC connection over TLS using the controller's CA certificate.
-// 2. Attach a projected service account token for the controller's audience on each call.
-// 3. Call Bind with wait=true to push the egress policy to the pod's node.
-// 4. Call InjectSecrets with wait=true to push named secrets to the pod's node.
-// 5. Release the sandbox only when the node has accepted policy and all required secrets.
+//  1. Construct a client from the controller address, CA certificate, and projected token file.
+//  2. Call Bind with the pod UID, egress policy, and companion secrets. Bind executes the complete
+//     sequence synchronously and returns success only when the node agent accepts all configurations.
+//  3. Release the sandbox only when Bind succeeds.
 func BindAndReleaseSandbox(
 	ctx context.Context,
 	controllerAddr string,
@@ -63,78 +59,20 @@ func BindAndReleaseSandbox(
 	secrets map[string][]byte,
 	releaseSandbox func(),
 ) error {
-	// 1. Establish gRPC connection using TLS with the controller CA certificate.
-	creds, err := credentials.NewClientTLSFromFile(caCertPath, "")
-	if err != nil {
-		return fmt.Errorf("loading CA cert from %s: %w", caCertPath, err)
-	}
-
-	conn, err := grpc.NewClient(controllerAddr, grpc.WithTransportCredentials(creds))
-	if err != nil {
-		return fmt.Errorf("connecting to controller at %s: %w", controllerAddr, err)
-	}
-	defer conn.Close()
-
-	client := portalsv1.NewPodBindServiceClient(conn)
-
-	// Helper to attach a fresh service account token for the controller's audience to each call.
-	callContext := func(parent context.Context) (context.Context, error) {
-		tokenBytes, err := os.ReadFile(tokenPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading service account token from %s: %w", tokenPath, err)
-		}
-		token := strings.TrimSpace(string(tokenBytes))
-		return metadata.AppendToOutgoingContext(parent, "authorization", "Bearer "+token), nil
-	}
-
-	// 2. Push policy with wait=true.
-	bindCtx, err := callContext(ctx)
+	c, err := client.New(client.Options{
+		ControllerAddr: controllerAddr,
+		CAFile:         caCertPath,
+		TokenFile:      tokenPath,
+	})
 	if err != nil {
 		return err
 	}
-	bindResp, err := client.Bind(bindCtx, &portalsv1.PodPolicy{
-		PodUid: podUID,
-		Policy: policy,
-		Wait:   true,
-	})
-	if err != nil {
-		if status.Code(err) == codes.DeadlineExceeded {
-			return fmt.Errorf("bind timed out waiting for node acceptance: %w", err)
-		}
-		return fmt.Errorf("bind RPC failed: %w", err)
-	}
-	if bindResp.GetStatus() == portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED {
-		return fmt.Errorf("bind refused: %s", bindResp.GetRefusalReason())
+	defer c.Close()
+
+	if err := c.Bind(ctx, podUID, policy, secrets); err != nil {
+		return err
 	}
 
-	// 3. Push named secrets with wait=true (if any are referenced by the policy).
-	if len(secrets) > 0 {
-		injectCtx, err := callContext(ctx)
-		if err != nil {
-			return err
-		}
-		injectResp, err := client.InjectSecrets(injectCtx, &portalsv1.PodSecrets{
-			PodUid:  podUID,
-			Secrets: secrets,
-			Wait:    true,
-		})
-		if err != nil {
-			if status.Code(err) == codes.DeadlineExceeded {
-				return fmt.Errorf("inject secrets timed out waiting for node acceptance: %w", err)
-			}
-			return fmt.Errorf("inject secrets RPC failed: %w", err)
-		}
-		if injectResp.GetStatus() == portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_REFUSED {
-			return fmt.Errorf("inject secrets refused: %s", injectResp.GetRefusalReason())
-		}
-		if injectResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
-			return fmt.Errorf("expected status ACCEPTED after secret injection, got %v", injectResp.GetStatus())
-		}
-	} else if bindResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
-		return fmt.Errorf("expected status ACCEPTED for policy, got %v", bindResp.GetStatus())
-	}
-
-	// 4. Release the sandbox pod: policy and all named secrets are active on the node.
 	if releaseSandbox != nil {
 		releaseSandbox()
 	}
@@ -145,7 +83,7 @@ func BindAndReleaseSandbox(
 // a sandbox controller binds policy and secrets before releasing a sandbox pod.
 func ExamplePodBindServiceClient() {
 	ctx := context.Background()
-	controllerAddr := "service-portal-controller.service-portal.svc:8443"
+	controllerAddr := "service-portal-controller.service-portal-system.svc:8443"
 	caCertPath := "/etc/service-portal/ca/tls.crt"
 	tokenPath := "/var/run/secrets/tokens/service-portal-token"
 	podUID := "12345678-1234-1234-1234-123456789abc"
