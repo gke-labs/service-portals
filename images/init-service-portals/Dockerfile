@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Cross-compile on the build platform so multi-arch builds need no emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
