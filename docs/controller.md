@@ -10,17 +10,11 @@ For architectural background and rationale, see the design records:
 
 ## Deploying the Controller
 
-The controller reference manifest is designed to be applied unchanged (for example with `ap deploy` or `kubectl apply -f k8s/controller.yaml`):
-
-```bash
-ap deploy k8s/controller.yaml
-```
-
 The controller Deployment (`k8s/controller.yaml`) reads its audience, node agent service account, and client allowlist from a ConfigMap named `service-portal-config` in the `service-portal-system` namespace through non-optional `configMapKeyRef` environment variables.
 
-Until the ConfigMap exists, the controller pod does not start and remains in `CreateContainerConfigError` (with the error message naming the missing ConfigMap), signaling that the controller is not configured yet.
+Before configuring or deploying, the `service-portal-system` namespace must exist (it is created with the TLS Secrets in `docs/nri-mode.md` step 3a).
 
-After deployment, configure the controller by running `dev/tasks/configure` (or creating the ConfigMap directly):
+Configure the controller by running `dev/tasks/configure` (or creating the ConfigMap directly):
 
 ```bash
 dev/tasks/configure \
@@ -29,7 +23,13 @@ dev/tasks/configure \
 
 The audience and node agent account default to the fixed values `https://service-portal-controller` and `system:serviceaccount:service-portal-system:portal-node-agent`, matching `k8s/node-agent.yaml`.
 
-Once the ConfigMap is created, Kubernetes starts the controller pod.
+Then apply the controller reference manifest unchanged (for example with `ap deploy` or `kubectl apply -f k8s/controller.yaml`):
+
+```bash
+ap deploy k8s/controller.yaml
+```
+
+Configuration comes before `ap deploy` because `ap deploy` waits for applied workloads to become ready. (With a plain `kubectl apply`, if manifests are applied before configuring, the controller pod does not start and remains in `CreateContainerConfigError` naming the missing ConfigMap until configured.)
 
 ### ConfigMap Keys (`service-portal-config`)
 

@@ -221,6 +221,22 @@ func (h *Harness) KindLoad(tag string) {
 	h.RunCommand("kind", "load", "docker-image", tag, "--name", h.ClusterName)
 }
 
+func (h *Harness) ApDeploy(manifests ...string) {
+	h.t.Helper()
+	h.t.Logf("Deploying via ap deploy: %v", manifests)
+	name := "ap"
+	args := append([]string{"deploy"}, manifests...)
+	if _, err := exec.LookPath("ap"); err != nil {
+		name = "go"
+		args = append([]string{"run", "github.com/gke-labs/gke-labs-infra/ap@latest", "deploy"}, manifests...)
+	}
+	cmd := exec.Command(name, args...)
+	cmd.Dir = h.GetGitRoot()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		h.t.Fatalf("Command failed: %s %v\nOutput: %s", name, args, out)
+	}
+}
+
 func (h *Harness) KubectlApplyContent(content string) {
 	h.t.Helper()
 	h.t.Logf("Applying manifest content")

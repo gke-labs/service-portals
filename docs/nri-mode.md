@@ -66,10 +66,19 @@ kubectl create secret generic service-portal-controller-ca -n service-portal-sys
 ```
 *(The server certificate must include SAN `service-portal-controller.service-portal-system.svc`.)*
 
-### Step 3b: Apply Manifests
+### Step 3b: Configure the Controller
+Create the `service-portal-config` ConfigMap using `dev/tasks/configure`, specifying the client allowlist:
+```bash
+dev/tasks/configure --client-allowlist="system:serviceaccount:default:sandbox-controller"
+```
+The token audience defaults to the fixed value `https://service-portal-controller`, matching the projected token audience in `k8s/node-agent.yaml`. The node agent account defaults to `system:serviceaccount:service-portal-system:portal-node-agent`, matching `k8s/node-agent.yaml`.
+
+Configuration comes before applying manifests because `ap deploy` waits for applied workloads to become ready. (With a plain `kubectl apply`, applying manifests before configuring causes the controller Deployment to sit in `CreateContainerConfigError` until `dev/tasks/configure` is run.)
+
+### Step 3c: Apply Manifests
 Apply both `k8s/controller.yaml` and `k8s/node-agent.yaml`:
 
-- **Using `ap deploy` (recommended)**: Apply both manifests unchanged; `ap deploy` builds the images and applies the manifests directly to your active cluster:
+- **Using `ap deploy` (recommended)**: Apply both manifests unchanged; `ap deploy` builds the images, applies the manifests directly to your active cluster, and waits for workloads to become ready:
   ```bash
   ap deploy k8s/controller.yaml k8s/node-agent.yaml
   ```
@@ -79,15 +88,6 @@ Apply both `k8s/controller.yaml` and `k8s/node-agent.yaml`:
   ```bash
   kubectl apply -f k8s/controller.yaml -f k8s/node-agent.yaml
   ```
-
-The controller Deployment starts in `CreateContainerConfigError` until configured in step 3c, signaling that the installation is not yet configured.
-
-### Step 3c: Configure the Controller
-Create the `service-portal-config` ConfigMap using `dev/tasks/configure`, specifying the client allowlist:
-```bash
-dev/tasks/configure --client-allowlist="system:serviceaccount:default:sandbox-controller"
-```
-The token audience defaults to the fixed value `https://service-portal-controller`, matching the projected token audience in `k8s/node-agent.yaml`. The node agent account defaults to `system:serviceaccount:service-portal-system:portal-node-agent`, matching `k8s/node-agent.yaml`. Once the ConfigMap is created, the controller pod starts.
 
 ### Step 3d: Trust Private Upstream CAs (Optional)
 If in-cluster services or internal API gateways use TLS certificates issued by a private Certificate Authority, you can configure the node agent's proxy to trust that CA without modifying the manifests.
