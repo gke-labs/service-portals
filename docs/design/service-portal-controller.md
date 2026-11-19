@@ -57,7 +57,7 @@ A push may ask to wait. The call then returns only when the node has accepted, o
 ## Security
 
 - **Do not trust a node's claim about its pods.** If the controller sent a pod's secrets to whichever node declared that pod, a compromised node could claim any pod UID and collect its credentials. The controller routes by the pod's node as recorded in the Kubernetes API, and delivers only to the connection authenticated as that node. A node's declaration is used only to know when delivery can happen.
-- **Nodes authenticate as a node.** The controller must be able to tie a connection to one node name. The mechanism is an open question below.
+- **Nodes authenticate as a node.** The node's identity is attested by kubelet: kubelet mints a projected service account token bound to the node agent's own pod, and the controller validates it using `TokenReview`, reading the node name from the `authentication.kubernetes.io/node-name` claim. The token's audience is a fixed name (`https://service-portal-controller`), not a secret; it only identifies the intended recipient. Because the token is minted by kubelet and bound to the agent's pod rather than requested via API by the agent itself, the node agent cannot choose or forge the node identity. A compromised node agent can only authenticate as its own node and receive policies and secrets destined for pods scheduled on that node; it cannot claim to be another node or obtain credentials belonging to workloads on other nodes.
 - **Clients are authorised.** Pushing policy and secrets for a pod is a privileged act. Clients authenticate, and an allowlist says who may push; an empty allowlist allows nobody. Whether authorisation is narrower than "may push for any pod" (per namespace, for example) is an open question.
 - **Fail closed everywhere.** A pod with no accepted policy reaches nothing. A controller with no route to the node holds or fails the push; it never reports acceptance it did not get.
 - **Secrets are never logged**, by the controller or the node, and the controller keeps them in memory only and only while a push is pending.
@@ -96,7 +96,7 @@ A push may ask to wait. The call then returns only when the node has accepted, o
 
 ## Open questions
 
-1. **Node identity.** How does a node agent prove which node it is? Candidates are a projected service account token checked with TokenReview, if the token can be tied to the node the agent's pod runs on, or per-node client certificates. Not yet verified: whether bound service account tokens carry the node name on the Kubernetes versions we target.
+1. **Node identity.** (Resolved) Kubelet mints a projected service account token bound to the node agent pod, which TokenReview validates with the `authentication.kubernetes.io/node-name` claim (stable in Kubernetes 1.32+). The token audience is a fixed value (`https://service-portal-controller`).
 2. **Node reboot.** With state under `/run`, a reboot loses bindings and the controller must push again. Is that acceptable, or do some users need bindings to survive a reboot, which means persistent disk and the at-rest exposure that comes with it?
 3. **More than one controller replica.** A node is connected to one replica; a client may reach another. A single replica with leader election is the simple answer; routing between replicas is more work.
 4. **Time limit for pending pushes.** How long the controller holds a push for a pod that has not arrived, and whether the client can set it.

@@ -36,12 +36,16 @@
 # Configuration Values (supplied via the "service-portal-config" ConfigMap):
 # 1. audience:
 #    The expected TokenReview audience used to authenticate incoming tokens from
-#    clients and node agents (e.g. "https://service-portal-controller" or your
-#    cluster's token audience).
+#    clients and node agents. Defaults to the fixed value
+#    "https://service-portal-controller" (configured by dev/tasks/configure),
+#    matching the fixed projected token audience in k8s/node-agent.yaml.
+#    It names the recipient of the token, is not a secret, and requires no
+#    per-install configuration.
 # 2. node-agent-account:
 #    The Kubernetes service account identity of the node agent in
-#    "system:serviceaccount:<namespace>:<name>" format
-#    (e.g. "system:serviceaccount:service-portal-system:portal-node-agent").
+#    "system:serviceaccount:<namespace>:<name>" format (defaults to
+#    "system:serviceaccount:service-portal-system:portal-node-agent" in
+#    dev/tasks/configure, matching k8s/node-agent.yaml).
 # 3. client-allowlist:
 #    A comma-separated list of permitted client service accounts in
 #    "system:serviceaccount:<namespace>:<name>" format

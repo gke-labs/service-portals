@@ -24,10 +24,10 @@ After deployment, configure the controller by running `dev/tasks/configure` (or 
 
 ```bash
 dev/tasks/configure \
-  --audience="https://service-portal-controller" \
-  --node-agent-account="system:serviceaccount:service-portal-system:portal-node-agent" \
   --client-allowlist="system:serviceaccount:default:sandbox-controller"
 ```
+
+The audience and node agent account default to the fixed values `https://service-portal-controller` and `system:serviceaccount:service-portal-system:portal-node-agent`, matching `k8s/node-agent.yaml`.
 
 Once the ConfigMap is created, Kubernetes starts the controller pod.
 
@@ -35,8 +35,8 @@ Once the ConfigMap is created, Kubernetes starts the controller pod.
 
 | Key | Description |
 |---|---|
-| `audience` | Expected TokenReview audience for validating caller tokens. |
-| `node-agent-account` | Permitted node agent service account in `system:serviceaccount:<namespace>:<name>` format. |
+| `audience` | Expected TokenReview audience for validating caller tokens (defaults to `https://service-portal-controller`, matching `k8s/node-agent.yaml`). |
+| `node-agent-account` | Permitted node agent service account in `system:serviceaccount:<namespace>:<name>` format (defaults to `system:serviceaccount:service-portal-system:portal-node-agent`, matching `k8s/node-agent.yaml`). |
 | `client-allowlist` | Comma-separated list of permitted client service accounts (`system:serviceaccount:<namespace>:<name>`). If empty, all client calls are refused. |
 
 ### TLS Secret
@@ -77,7 +77,7 @@ The `service-portal-agent` container requires the following environment variable
 #### Volume Mounts (mounted into `service-portal-agent`)
 - **CA Certificate Volume**: Mounts the CA certificate used to verify the controller's server certificate at the path matching `CONTROLLER_CA_CERT_PATH`.
 - **Token Volume**: A Kubernetes projected volume mount providing a service account token at the path matching `CONTROLLER_TOKEN_PATH`, configured with:
-  - `audience` matching the controller's `-audience` flag.
+  - `audience` matching the controller's audience (fixed default: `https://service-portal-controller`, matching `k8s/node-agent.yaml`).
   - Bound to the node agent pod on that node so the Kubernetes API returns the `authentication.kubernetes.io/node-name` claim during TokenReview.
 - **Store Volume**: A `hostPath` volume on the node's memory-backed `/run` (tmpfs, e.g. `/run/service-portal/store`), restricted to the proxy UID and root (mode `0700` / `0600`), mounted at the path matching `STORE_DIR`. Bindings written here survive node proxy container crashes and DaemonSet rolling updates without requiring the sandbox controller to re-push.
 
