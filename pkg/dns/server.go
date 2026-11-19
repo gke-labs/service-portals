@@ -42,6 +42,11 @@ func (f RuleMatcherFunc) MatchHost(host string, clientAddr net.Addr) bool {
 	return f(host, clientAddr)
 }
 
+// DropEvaluator checks if a given query should be dropped without an answer for the caller.
+type DropEvaluator interface {
+	ShouldDrop(host string, clientAddr net.Addr) bool
+}
+
 // Config specifies the configuration for the sidecar DNS server.
 type Config struct {
 	// BindAddr is the listen address for the DNS server (e.g. "127.0.0.1:53" or ":53").
@@ -52,6 +57,8 @@ type Config struct {
 	ProxyIPv6 net.IP
 	// Matcher determines if a hostname matches a configured rule.
 	Matcher RuleMatcher
+	// DropEvaluator determines if a query should be silently dropped without an answer for the caller.
+	DropEvaluator DropEvaluator
 	// DefaultAction specifies what to do when a hostname does not match a rule.
 	// Defaults to "Deny" (return NXDOMAIN). If "Allow", forwards to UpstreamServers.
 	DefaultAction string
@@ -113,6 +120,10 @@ func (s *Server) handleQuery(reqBytes []byte, clientAddr net.Addr, isTCP bool) (
 
 	q := msg.Questions[0]
 	qname := strings.TrimSuffix(strings.ToLower(q.Name.String()), ".")
+
+	if s.config.DropEvaluator != nil && s.config.DropEvaluator.ShouldDrop(qname, clientAddr) {
+		return nil, nil
+	}
 
 	matched := false
 	if s.config.Matcher != nil {
@@ -407,6 +418,9 @@ func (s *Server) Start(ctx context.Context) error {
 					log.Printf("DNS UDP handle error: %v", err)
 					return
 				}
+				if len(respBytes) == 0 {
+					return
+				}
 				if _, err := udpConn.WriteTo(respBytes, addr); err != nil {
 					log.Printf("DNS UDP write error: %v", err)
 				}
@@ -438,6 +452,10 @@ func (s *Server) Start(ctx context.Context) error {
 						log.Printf("DNS TCP handle error: %v", err)
 						return
 					}
+					if len(respBytes) == 0 {
+						HoldConnection(ctx, c)
+						return
+					}
 					binary.BigEndian.PutUint16(lenBuf, uint16(len(respBytes)))
 					if _, err := c.Write(lenBuf); err != nil {
 						return
@@ -458,6 +476,32 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+// HoldConnection holds a connection open without sending data until the peer closes it
+// or ctx is cancelled. Any data sent by the peer while held is discarded.
+func HoldConnection(ctx context.Context, c net.Conn) {
+	done := make(chan struct{})
+	go func() {
+		// Use a standard read buffer to efficiently drain and discard any data
+		// the peer sends while the connection is held.
+		buf := make([]byte, 4096)
+		for {
+			if _, err := c.Read(buf); err != nil {
+				close(done)
+				return
+			}
+		}
+	}()
+
+	if ctx != nil && ctx.Done() != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
+	} else {
+		<-done
+	}
 }
 
 // UDPAddr returns the bound local UDP address.

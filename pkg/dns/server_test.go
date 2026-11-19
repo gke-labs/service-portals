@@ -569,3 +569,228 @@ func TestDNSServer_Forward_Truncation(t *testing.T) {
 		t.Errorf("expected 30 answers over UDP with EDNS, got %d", len(respEDNS.Answers))
 	}
 }
+
+type dropAndMatch struct {
+	dropHosts  map[string]bool
+	matchHosts map[string]bool
+}
+
+func (d *dropAndMatch) MatchHost(host string, _ net.Addr) bool {
+	return d.matchHosts[host]
+}
+
+func (d *dropAndMatch) ShouldDrop(host string, _ net.Addr) bool {
+	return d.dropHosts[host]
+}
+
+func TestDNSServer_Drop_UDP(t *testing.T) {
+	matcher := &dropAndMatch{
+		dropHosts:  map[string]bool{"unbound.example.com": true},
+		matchHosts: map[string]bool{"allowed.example.com": true},
+	}
+
+	srv, err := NewServer(Config{
+		BindAddr:      "127.0.0.1:0",
+		DefaultAction: "Deny",
+		Matcher:       matcher,
+		DropEvaluator: matcher,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(t.Context()) }()
+
+	addr := srv.UDPAddr().String()
+
+	// 1. Dropped host: no answer sent, client read times out
+	conn, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatalf("failed to dial UDP: %v", err)
+	}
+	defer conn.Close()
+
+	req := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:               1111,
+			RecursionDesired: true,
+		},
+		Questions: []dnsmessage.Question{
+			{
+				Name:  dnsmessage.MustNewName("unbound.example.com."),
+				Type:  dnsmessage.TypeA,
+				Class: dnsmessage.ClassINET,
+			},
+		},
+	}
+	packed, err := req.Pack()
+	if err != nil {
+		t.Fatalf("failed to pack query: %v", err)
+	}
+	if _, err := conn.Write(packed); err != nil {
+		t.Fatalf("failed to send query: %v", err)
+	}
+
+	buf := make([]byte, 512)
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	n, err := conn.Read(buf)
+	if err == nil {
+		t.Fatalf("expected read timeout for dropped host, got %d bytes", n)
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+
+	// 2. Allowed host: answered with proxy IP
+	resp := sendDNSQueryUDP(t, addr, "allowed.example.com.", dnsmessage.TypeA)
+	if resp.RCode != dnsmessage.RCodeSuccess {
+		t.Fatalf("expected NOERROR for allowed host, got %v", resp.RCode)
+	}
+	if len(resp.Answers) != 1 {
+		t.Fatalf("expected 1 answer for allowed host, got %d", len(resp.Answers))
+	}
+
+	// 3. Denied host: answered with NXDOMAIN
+	respDenied := sendDNSQueryUDP(t, addr, "denied.example.com.", dnsmessage.TypeA)
+	if respDenied.RCode != dnsmessage.RCodeNameError {
+		t.Fatalf("expected NXDOMAIN for denied host, got %v", respDenied.RCode)
+	}
+}
+
+func TestDNSServer_Drop_TCP(t *testing.T) {
+	evaluator := &dropAndMatch{
+		dropHosts:  map[string]bool{"unbound.example.com": true},
+		matchHosts: map[string]bool{"allowed.example.com": true},
+	}
+
+	srv, err := NewServer(Config{
+		BindAddr:      "127.0.0.1:0",
+		DefaultAction: "Deny",
+		Matcher:       evaluator,
+		DropEvaluator: evaluator,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(t.Context()) }()
+
+	addr := srv.TCPAddr().String()
+
+	// 1. Dropped host: no answer sent, held without reset until client closes
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("failed to dial TCP: %v", err)
+	}
+	defer conn.Close()
+
+	req := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:               2222,
+			RecursionDesired: true,
+		},
+		Questions: []dnsmessage.Question{
+			{
+				Name:  dnsmessage.MustNewName("unbound.example.com."),
+				Type:  dnsmessage.TypeA,
+				Class: dnsmessage.ClassINET,
+			},
+		},
+	}
+	packed, err := req.Pack()
+	if err != nil {
+		t.Fatalf("failed to pack query: %v", err)
+	}
+	lenBuf := make([]byte, 2)
+	binary.BigEndian.PutUint16(lenBuf, uint16(len(packed)))
+	if _, err := conn.Write(lenBuf); err != nil {
+		t.Fatalf("failed to write len: %v", err)
+	}
+	if _, err := conn.Write(packed); err != nil {
+		t.Fatalf("failed to write query: %v", err)
+	}
+
+	// Read should time out with no data sent by server (held, not closed or reset)
+	buf := make([]byte, 512)
+	_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	n, err := conn.Read(buf)
+	if err == nil {
+		t.Fatalf("expected timeout reading from held TCP conn, got %d bytes", n)
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+
+	// Client closes connection; server must cleanly release HoldConnection
+	_ = conn.Close()
+
+	// 2. Allowed host over TCP: answered
+	respTCP := sendDNSQueryTCP(t, addr, "allowed.example.com.", dnsmessage.TypeA)
+	if respTCP.RCode != dnsmessage.RCodeSuccess {
+		t.Fatalf("expected NOERROR for allowed host over TCP, got %v", respTCP.RCode)
+	}
+}
+
+func TestHoldConnection(t *testing.T) {
+	t.Run("unblocks when peer closes", func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer serverConn.Close()
+
+		done := make(chan struct{})
+		go func() {
+			HoldConnection(t.Context(), serverConn)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			t.Fatal("expected HoldConnection to block while connection is open")
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		_ = clientConn.Close()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("expected HoldConnection to unblock after peer closed connection")
+		}
+	})
+
+	t.Run("unblocks when context is cancelled", func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() {
+			HoldConnection(ctx, serverConn)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			t.Fatal("expected HoldConnection to block while connection is open")
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("expected HoldConnection to unblock after context cancelled")
+		}
+	})
+}

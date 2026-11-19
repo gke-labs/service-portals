@@ -285,17 +285,30 @@ func TestEgressHandler_RefusalsReachNothingUpstream(t *testing.T) {
 
 		handler := NewEgressHandler(pm, store, transport, nil)
 
-		req := httptest.NewRequest("GET", "http://api.example.com/test", nil)
+		ctx, cancel := context.WithCancel(t.Context())
+		req := httptest.NewRequest("GET", "http://api.example.com/test", nil).WithContext(ctx)
 		req.RemoteAddr = podIP + ":50000"
 
 		w := httptest.NewRecorder()
-		handler.ServeHTTP(w, req)
+		done := make(chan struct{})
+		go func() {
+			handler.ServeHTTP(w, req)
+			close(done)
+		}()
 
-		resp := w.Result()
-		defer resp.Body.Close()
+		// Handler must hold the request without returning an immediate 403 response
+		select {
+		case <-done:
+			t.Fatal("expected ServeHTTP to hold request for unbound pod, but it returned immediately")
+		case <-time.After(50 * time.Millisecond):
+		}
 
-		if resp.StatusCode != http.StatusForbidden {
-			t.Errorf("expected 403 Forbidden, got %d", resp.StatusCode)
+		// When client times out / cancels connection, handler exits cleanly
+		cancel()
+		<-done
+
+		if w.Body.Len() != 0 {
+			t.Errorf("expected 0 response bytes, got %d (body: %s)", w.Body.Len(), w.Body.String())
 		}
 		if upstreamCalled.Load() != 0 {
 			t.Errorf("expected 0 calls reaching upstream, got %d", upstreamCalled.Load())
@@ -976,6 +989,13 @@ func (c *mockConn) RemoteAddr() net.Addr {
 	return c.remoteAddr
 }
 
+func (c *mockConn) Read(b []byte) (n int, err error) {
+	if c.Conn != nil {
+		return c.Conn.Read(b)
+	}
+	return 0, io.EOF
+}
+
 func TestEgressHandler_GetCertificate(t *testing.T) {
 	caCertPath, caKeyPath := createTestCA(t)
 	signer, err := proxy.NewCertSigner(caCertPath, caKeyPath)
@@ -1085,6 +1105,37 @@ func TestEgressHandler_GetCertificate(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "unbound pod") {
 			t.Errorf("expected error to mention unbound pod, got: %v", err)
+		}
+	})
+
+	t.Run("unbound pod holds TLS connection without immediate error", func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		info := &tls.ClientHelloInfo{
+			ServerName: "api.example.com",
+			Conn:       &mockConn{Conn: serverConn, remoteAddr: mockAddr{addr: unboundIP + ":12345"}},
+		}
+
+		done := make(chan struct{})
+		go func() {
+			_, _ = handler.GetCertificate(info)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			t.Fatal("expected GetCertificate to hold connection for unbound pod, but returned immediately")
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		// Client closes connection; GetCertificate unblocks cleanly
+		_ = clientConn.Close()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("expected GetCertificate to return after client closed connection")
 		}
 	})
 
@@ -1391,6 +1442,72 @@ func TestEgressHandler_MatchHost(t *testing.T) {
 	}
 }
 
+func TestEgressHandler_ShouldDrop(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundIP := "10.244.1.10"
+	boundUID := "pod-bound"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "default",
+		Name:      "pod-bound",
+		IPs:       []string{boundIP},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"example.com"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	unboundIP := "10.244.1.20"
+	unboundUID := "pod-unbound"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       unboundUID,
+		Namespace: "default",
+		Name:      "pod-unbound",
+		IPs:       []string{unboundIP},
+	})
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+
+	addrBound := &net.UDPAddr{IP: net.ParseIP(boundIP), Port: 12345}
+	addrUnbound := &net.UDPAddr{IP: net.ParseIP(unboundIP), Port: 23456}
+	addrUnknown := &net.UDPAddr{IP: net.ParseIP("10.244.1.99"), Port: 34567}
+
+	tests := []struct {
+		name     string
+		addr     net.Addr
+		host     string
+		expected bool
+	}{
+		{"unbound pod is dropped", addrUnbound, "example.com", true},
+		{"unbound pod any host is dropped", addrUnbound, "any.other.host", true},
+		{"bound pod is not dropped", addrBound, "example.com", false},
+		{"bound pod unlisted host is not dropped (handled by MatchHost)", addrBound, "other.com", false},
+		{"unknown caller is not dropped (handled by DefaultAction / 403)", addrUnknown, "example.com", false},
+		{"nil client address is not dropped", nil, "example.com", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := handler.ShouldDrop(tc.host, tc.addr)
+			if got != tc.expected {
+				t.Errorf("ShouldDrop(%q, %v) = %v; expected %v", tc.host, tc.addr, got, tc.expected)
+			}
+		})
+	}
+}
+
 func sendDNSQueryFromPacketConn(t *testing.T, conn net.PacketConn, serverAddr, qname string, qtype dnsmessage.Type) dnsmessage.Message {
 	t.Helper()
 	serverUDP, err := net.ResolveUDPAddr("udp", serverAddr)
@@ -1433,6 +1550,47 @@ func sendDNSQueryFromPacketConn(t *testing.T, conn net.PacketConn, serverAddr, q
 		t.Fatalf("failed to unpack DNS response: %v", err)
 	}
 	return resp
+}
+
+func sendDNSQueryFromPacketConnExpectTimeout(t *testing.T, conn net.PacketConn, serverAddr, qname string, qtype dnsmessage.Type, timeout time.Duration) {
+	t.Helper()
+	serverUDP, err := net.ResolveUDPAddr("udp", serverAddr)
+	if err != nil {
+		t.Fatalf("failed to resolve server UDP addr %s: %v", serverAddr, err)
+	}
+
+	req := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:               4321,
+			RecursionDesired: true,
+		},
+		Questions: []dnsmessage.Question{
+			{
+				Name:  dnsmessage.MustNewName(qname),
+				Type:  qtype,
+				Class: dnsmessage.ClassINET,
+			},
+		},
+	}
+	packed, err := req.Pack()
+	if err != nil {
+		t.Fatalf("failed to pack query: %v", err)
+	}
+	if _, err := conn.WriteTo(packed, serverUDP); err != nil {
+		t.Fatalf("failed to send query: %v", err)
+	}
+
+	buf := make([]byte, 4096)
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("failed to set read deadline: %v", err)
+	}
+	n, _, err := conn.ReadFrom(buf)
+	if err == nil {
+		t.Fatalf("expected query to be dropped (timeout), but got response (%d bytes)", n)
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("expected timeout error, got: %v", err)
+	}
 }
 
 func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
@@ -1536,6 +1694,7 @@ func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
 		ProxyIPv4:     proxyIPv4,
 		ProxyIPv6:     proxyIPv6,
 		Matcher:       handler,
+		DropEvaluator: handler,
 		DefaultAction: "Deny",
 	})
 	if err != nil {
@@ -1676,10 +1835,30 @@ func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
 		assertAnswerA(t, resp)
 	})
 
-	// 9. Unbound pod C queries: gets NXDOMAIN
-	t.Run("unbound pod gets NXDOMAIN", func(t *testing.T) {
+	// 9. Unbound pod C queries: gets no answer (dropped)
+	t.Run("unbound pod gets no answer then succeeds after bind", func(t *testing.T) {
+		sendDNSQueryFromPacketConnExpectTimeout(t, connC, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA, 100*time.Millisecond)
+
+		// Once policy is bound, retry succeeds
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podCUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Http: &portalsv1.HttpRule{
+							Hostnames: []string{"http-exact.example.com"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed for pod C: %v", err)
+		}
+
 		resp := sendDNSQueryFromPacketConn(t, connC, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA)
-		assertNXDOMAIN(t, resp)
+		assertAnswerA(t, resp)
 	})
 
 	// 10. Unknown source address: gets NXDOMAIN

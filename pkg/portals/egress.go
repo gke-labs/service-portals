@@ -32,6 +32,7 @@ import (
 
 var _ CertificateProvider = (*EgressHandler)(nil)
 var _ dns.RuleMatcher = (*EgressHandler)(nil)
+var _ dns.DropEvaluator = (*EgressHandler)(nil)
 
 // EgressHandler decides intercepted requests against the caller pod's bound egress policy.
 type EgressHandler struct {
@@ -176,6 +177,12 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 
 	pod, policy, err := h.resolveCaller(remoteAddr)
 	if err != nil {
+		if pod != nil {
+			caller := podCaller(pod)
+			remoteIP := clientIP(remoteAddr)
+			log.Printf("TLS handshake | Caller: %s (%s) | State: unbound | Action: drop", caller, remoteIP)
+			dns.HoldConnection(info.Context(), info.Conn)
+		}
 		return nil, err
 	}
 
@@ -198,6 +205,22 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 	}
 
 	return h.signer.GetCertificate(info)
+}
+
+// ShouldDrop reports whether DNS queries or connections from clientAddr should be silently
+// dropped without response. Intercepted pods that have no bound policy yet return true,
+// so the client times out and retries instead of receiving NXDOMAIN or 403.
+func (h *EgressHandler) ShouldDrop(_ string, clientAddr net.Addr) bool {
+	var remoteAddr string
+	if clientAddr != nil {
+		remoteAddr = clientAddr.String()
+	}
+
+	pod, policy, err := h.resolveCaller(remoteAddr)
+	if err != nil && pod != nil && policy == nil {
+		return true
+	}
+	return false
 }
 
 // MatchHost reports whether host matches an http or https rule in the caller pod's egress policy,
@@ -232,8 +255,14 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Access Denied: unknown caller", http.StatusForbidden)
 		} else {
 			caller := podCaller(pod)
-			log.Printf("Request: %s %s | Caller: %s (%s) | State: unbound | Action: denied", r.Method, r.Host, caller, remoteIP)
-			http.Error(w, "Access Denied: unbound pod", http.StatusForbidden)
+			log.Printf("Request: %s %s | Caller: %s (%s) | State: unbound | Action: drop", r.Method, r.Host, caller, remoteIP)
+			// Hold the request with no response until the client's connection closes
+			// or the request is cancelled, so an unbound pod sees a timeout and retries
+			// rather than receiving a 403. By the time ServeHTTP returns, the client has
+			// gone, so no response is written.
+			if ctx := r.Context(); ctx != nil && ctx.Done() != nil {
+				<-ctx.Done()
+			}
 		}
 		return
 	}

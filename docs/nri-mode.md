@@ -167,11 +167,17 @@ spec:
 NRI intercepts container creation, mounts the node CA at `/etc/service-portal/ca/tls.crt`, sets `SSL_CERT_FILE=/etc/service-portal/ca/tls.crt`, and installs host netfilter redirection.
 
 ### What You See Before Binding
-Outbound traffic from an unbound opted-in pod fails closed. Because no policy rule exists for `httpbin.org`, DNS resolution fails:
+Outbound traffic from an unbound opted-in pod fails closed by silence rather than refusal: until an egress policy is bound, the node agent drops outbound traffic. DNS queries get no answer and proxied connections get no response (not `NXDOMAIN`, not `403 Access Denied`, and not a TCP reset).
+
+This appears to client workloads as packet loss, so standard network timeouts and retry logic apply automatically (e.g., in init containers running `git clone` or package managers) without terminating early on a negative answer or caching a negative DNS lookup:
 ```bash
 kubectl exec sandbox-workload -- wget -T 5 -qO- http://httpbin.org/headers
 ```
-**What you see**: `wget: bad address 'httpbin.org'`. Unlisted hostnames return `NXDOMAIN` at the node DNS proxy. See [What Happens to Unallowed Traffic](controller.md#what-happens-to-unallowed-traffic) for other protocols and port outcomes.
+**What you see**: `wget: download timed out`. The request times out because the node agent drops traffic from unbound pods until a policy is bound. Once a policy is bound via the controller, new requests and retries flow according to that policy without restarting the pod.
+
+Workloads should therefore retry network calls rather than failing fast on the initial attempt.
+
+In contrast, once a policy is bound, requests for unlisted hostnames outside that policy are actively refused with `NXDOMAIN` for DNS or HTTP `403 Forbidden` at the proxy. See [What Happens to Unallowed Traffic](controller.md#what-happens-to-unallowed-traffic) for post-binding protocol and port outcomes.
 
 ---
 

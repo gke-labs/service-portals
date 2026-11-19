@@ -2019,15 +2019,40 @@ spec:
 	}
 	nodeIP := strings.TrimSpace(string(outNodeIP))
 
-	// 7. Verify unbound opted-in pod fails closed by default
+	// 7. Verify unbound opted-in pod fails closed by default: traffic is dropped (times out), not answered with NXDOMAIN or 403
 	t.Run("UnboundPod_Denied", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "-qO-", "http://backend/unbound-check")
+			"wget", "-T", "3", "-O-", "http://backend/unbound-check")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("expected unbound pod request to be denied, but succeeded: %s", out)
 		}
-		t.Logf("unbound pod request denied as expected: %v (output: %s)", err, out)
+		outStr := string(out)
+		if strings.Contains(outStr, "403") || strings.Contains(outStr, "bad address") || strings.Contains(outStr, "NXDOMAIN") {
+			t.Fatalf("expected unbound pod request to be dropped (timed out), not refused with 403 or NXDOMAIN, got: %s", outStr)
+		}
+		if !strings.Contains(outStr, "timed out") {
+			t.Fatalf("expected timeout for unbound pod request, got: %s", outStr)
+		}
+		t.Logf("unbound pod request dropped (timed out) as expected: %v (output: %s)", err, out)
+	})
+
+	// Direct to proxy before bind: reaches proxy without DNS, must be held and time out with no HTTP status
+	t.Run("DirectToProxy_UnboundPod_HeldWithoutHTTPStatus", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-t", "1", "-T", "3", "-O-", "--header=Host: backend", fmt.Sprintf("http://%s:8080/direct-unbound", nodeIP))
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected direct-to-proxy request for unbound pod to be dropped, but succeeded: %s", out)
+		}
+		outStr := string(out)
+		if strings.Contains(outStr, "403") || strings.Contains(outStr, "Forbidden") {
+			t.Fatalf("expected direct-to-proxy request to be held without 403, got refusal: %s", outStr)
+		}
+		if !strings.Contains(outStr, "timed out") {
+			t.Fatalf("expected timeout for direct-to-proxy unbound pod request, got: %s", outStr)
+		}
+		t.Logf("direct-to-proxy unbound pod request held and timed out as expected: %v (output: %s)", err, out)
 	})
 
 	// 8. Bind pod to user identity and egress policy via PodBindService using service-portal-nri-plugin CLI
@@ -2082,6 +2107,17 @@ spec:
 		t.Fatalf("failed to inject secrets for pod %s via service-portal-nri-plugin bind-service inject-secrets: %v (output: %s)", clientUID, err, injectOut)
 	}
 	t.Logf("Successfully injected secrets for pod %s via node agent bind-service", clientUID)
+
+	// Verify retry of request after bind succeeds without pod restart
+	t.Run("RetryAfterBind_Succeeds", func(t *testing.T) {
+		cmd := exec.Command("kubectl", "exec", clientPodName, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", "--header=Authorization: placeholder-token", "http://backend/unbound-check")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("expected retry after bind to succeed, failed: %v (output: %s)", err, out)
+		}
+		t.Logf("retry after bind succeeded as expected: %s", out)
+	})
 
 	// 9. Assert standard egress deny suite and positive controls succeed when bound
 	runEgressDeniedAssertions(t, h, clientPodName, backendIPv4ClusterIP, "backend", "unlisted-backend")
@@ -2287,15 +2323,22 @@ spec:
 		t.Fatalf("failed to unmarshal policyJSON: %v", err)
 	}
 
-	// Subtest: a pod with no binding is denied (fail closed)
+	// Subtest: a pod with no binding is denied (fail closed): dropped/timed out, not answered with NXDOMAIN or 403
 	t.Run("Controller_UnboundPod_Denied", func(t *testing.T) {
 		cmd := exec.Command("kubectl", "exec", controllerPodName, "-c", "workload", "--",
-			"wget", "-T", "5", "-qO-", "http://backend/controller-unbound-check")
+			"wget", "-T", "3", "-O-", "http://backend/controller-unbound-check")
 		out, err := cmd.CombinedOutput()
 		if err == nil {
 			t.Fatalf("expected unbound pod request through controller to be denied, but succeeded: %s", out)
 		}
-		t.Logf("unbound pod request denied as expected: %v (output: %s)", err, out)
+		outStr := string(out)
+		if strings.Contains(outStr, "403") || strings.Contains(outStr, "bad address") || strings.Contains(outStr, "NXDOMAIN") {
+			t.Fatalf("expected unbound pod request to be dropped (timed out), not refused with 403 or NXDOMAIN, got: %s", outStr)
+		}
+		if !strings.Contains(outStr, "timed out") {
+			t.Fatalf("expected timeout for unbound pod request, got: %s", outStr)
+		}
+		t.Logf("unbound pod request dropped (timed out) as expected: %v (output: %s)", err, out)
 	})
 
 	// Subtest: a client whose service account is not on the allowlist gets PermissionDenied and the pod stays denied
