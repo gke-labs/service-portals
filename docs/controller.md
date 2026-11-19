@@ -89,19 +89,19 @@ Node agents are identified from the node name that `TokenReview` returns for a p
 
 ## Calling the Controller from a Sandbox Controller
 
-Sandbox controllers use the generated `PodBindServiceClient` (`github.com/gke-labs/service-portals/pkg/portals/v1`) to push policy and secrets.
+Sandbox controllers use the Go client package ([`pkg/client`](../pkg/client), `github.com/gke-labs/service-portals/pkg/client`) to bind egress policies and inject credentials for sandbox pods.
+
+The client encapsulates TLS verification against the controller's CA certificate, per-call projected service account token rotation, synchronous pushes with `wait = true`, and acceptance verification.
 
 ### Connection & Calling Sequence
 
-1. **Establish TLS Connection**: Establish a gRPC connection over TLS using the CA certificate that signed the controller's server certificate.
-2. **Attach Token Metadata**: Read a projected service account token minted for the controller's audience, and attach it to the gRPC outgoing metadata (`authorization: Bearer <token>`) on each call.
-3. **Push Policy (`Bind`)**: Call `Bind` with `wait = true` passing the pod UID and `EgressPolicy`.
-4. **Push Secrets (`InjectSecrets`)**: Call `InjectSecrets` with `wait = true` passing the pod UID and named secrets map (if any are referenced by `secret://<name>` in the policy).
-5. **Verify Acceptance**: Check the returned status. Release and unpause the sandbox container **only** when the status is `ACCEPTANCE_STATUS_ACCEPTED`. If the status is `ACCEPTANCE_STATUS_REFUSED` or an error is returned, do not release the sandbox.
+1. **Construct Client**: Construct a client using `client.New` with `client.Options` containing the controller address (`ControllerAddr`), CA certificate file (`CAFile`), and projected service account token file (`TokenFile`).
+2. **Bind Policy and Secrets (`Bind`)**: Call `client.Bind` passing the pod UID, `EgressPolicy`, and companion secrets map (or `nil` if none). The client executes the complete step synchronously: pushing the policy, then pushing secrets when provided, and returning success only when the node agent accepts all configurations.
+3. **Verify Acceptance**: Only `ACCEPTANCE_STATUS_ACCEPTED` is treated as success (returning `nil`). Any pending or refused final outcome is returned as a `*client.StatusError` that exposes the acceptance status, refusal reason, and missing secret names without leaking secret values. Release and unpause the sandbox container **only** when `Bind` succeeds.
 
-### Tested Go Implementation
+### Example Go Implementation
 
-A complete, runnable implementation of this sequence is maintained in [`pkg/controller/example_test.go`](../pkg/controller/example_test.go) (`BindAndReleaseSandbox` and `ExamplePodBindServiceClient`), which is compiled and tested in presubmit CI.
+A complete, runnable example using the client package is maintained in [`pkg/controller/example_test.go`](../pkg/controller/example_test.go) (`ExamplePodBindServiceClient`), which is compiled and tested in presubmit CI.
 
 ---
 
