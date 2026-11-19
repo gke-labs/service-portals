@@ -1641,7 +1641,6 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 
 	const (
 		controllerAudience   = "https://service-portal-controller"
-		nodeAgentAccount     = "system:serviceaccount:service-portal-system:portal-node-agent"
 		allowedClientSA      = "sandbox-controller"
 		unauthorizedClientSA = "unauthorized-controller"
 		allowedClientAccount = "system:serviceaccount:default:sandbox-controller"
@@ -1751,8 +1750,6 @@ data:
 	}
 
 	h.RunCommand(filepath.Join(gitRoot, "dev/tasks/configure"),
-		"--audience="+controllerAudience,
-		"--node-agent-account="+nodeAgentAccount,
 		"--client-allowlist="+allowedClientAccount,
 	)
 
@@ -1906,10 +1903,7 @@ spec:` + serviceIPFamilies + `
 	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "image: service-portal-agent:latest", "image: service-portal-agent:e2e")
 	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "imagePullPolicy: IfNotPresent", "imagePullPolicy: Never")
 
-	// 2. Token audience: match the controller's expected token audience
-	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, `audience: ""`, fmt.Sprintf(`audience: %s`, controllerAudience))
-
-	// 3. Backend CA trust: configure proxy to trust the test backend's self-signed CA certificate
+	// 2. Backend CA trust: configure proxy to trust the test backend's self-signed CA certificate
 	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
 		"        - name: CA_KEY_PATH\n          value: \"/etc/service-portal/ca/tls.key\"",
 		"        - name: CA_KEY_PATH\n          value: \"/etc/service-portal/ca/tls.key\"\n        - name: SSL_CERT_FILE\n          value: \"/etc/service-portal/backend-ca/tls.crt\"")
@@ -1920,7 +1914,7 @@ spec:` + serviceIPFamilies + `
 		"      volumes:\n      - name: controller-ca-volume",
 		"      volumes:\n      - name: backend-ca-volume\n        secret:\n          secretName: backend-ca\n      - name: controller-ca-volume")
 
-	// 4. IPv6 proxy address on dual-stack cluster: pass node IPv6 address to proxy and nri-plugin
+	// 3. IPv6 proxy address on dual-stack cluster: pass node IPv6 address to proxy and nri-plugin
 	if proxyHostV6Env != "" {
 		nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
 			`value: "/etc/service-portal/controller-ca/tls.crt"`,

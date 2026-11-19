@@ -71,8 +71,8 @@ while [[ $# -gt 0 ]]; do
       echo "Creates the service-portal configuration ConfigMap after deploying the controller manifest."
       echo ""
       echo "Options:"
-      echo "  --audience <aud>             TokenReview audience (default: https://service-portal-controller)"
-      echo "  --node-agent-account <sa>    Node agent service account (default: system:serviceaccount:<namespace>:portal-node-agent)"
+      echo "  --audience <aud>             TokenReview audience (default: https://service-portal-controller, matching k8s/node-agent.yaml)"
+      echo "  --node-agent-account <sa>    Node agent service account (default: system:serviceaccount:<namespace>:portal-node-agent, matching k8s/node-agent.yaml)"
       echo "  --client-allowlist <sa,...>  Comma-separated list of permitted client service accounts"
       echo "  -n, --namespace <ns>         Namespace for ConfigMap (default: service-portal-system)"
       exit 0
@@ -85,6 +85,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${AUDIENCE_SET}" != "true" ]]; then
+  # Fixed audience matching k8s/node-agent.yaml.
   AUDIENCE="https://service-portal-controller"
   echo "Using default audience: ${AUDIENCE}"
 fi

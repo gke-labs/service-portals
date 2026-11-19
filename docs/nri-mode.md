@@ -25,9 +25,17 @@ test -S /var/run/nri/nri.sock && echo "NRI is enabled"
 
 ---
 
-## 2. Building or Obtaining Container Images
+## Deployment Path: `ap deploy` vs. `kubectl apply`
 
-NRI mode requires three images built from the repository root:
+Choose your deployment method before proceeding:
+- **With `ap deploy` (recommended)**: Section 2 is not needed. `ap deploy` automatically builds the container images referenced by the manifests, pushes them using `IMAGE_PREFIX` (or loads them directly when targeting a local `kind` cluster), and applies the manifests unchanged to your active Kubernetes cluster context. Proceed directly to [Section 3](#3-configuring-secrets-and-applying-manifests).
+- **With plain `kubectl apply`**: Follow [Section 2](#2-building-or-obtaining-container-images-plain-kubectl-apply-only) to build and push images with Docker, set the container `image` fields in both manifests to your published tags, and then proceed to Section 3.
+
+---
+
+## 2. Building or Obtaining Container Images (Plain `kubectl apply` only)
+
+When deploying with plain `kubectl apply`, build the three required images from the repository root:
 1. `service-portal-controller`: Central gRPC controller (`images/service-portal-controller/Dockerfile`).
 2. `service-portal-agent`: Node proxy engine (`images/service-portal-agent/Dockerfile`).
 3. `service-portal-nri-plugin`: NRI lifecycle plugin and node init container (`images/service-portal-nri-plugin/Dockerfile`).
@@ -37,7 +45,7 @@ docker build -f images/service-portal-controller/Dockerfile -t <REG>/service-por
 docker build -f images/service-portal-agent/Dockerfile -t <REG>/service-portal-agent:<TAG> .
 docker build -f images/service-portal-nri-plugin/Dockerfile -t <REG>/service-portal-nri-plugin:<TAG> .
 ```
-Push all three images to a registry accessible by your cluster nodes.
+Push all three images to a registry accessible by your cluster nodes, and set the container `image` fields in `k8s/controller.yaml` and `k8s/node-agent.yaml` to point to your published images.
 
 ---
 
@@ -58,21 +66,28 @@ kubectl create secret generic service-portal-controller-ca -n service-portal-sys
 ```
 *(The server certificate must include SAN `service-portal-controller.service-portal-system.svc`.)*
 
-### Step 3b: Configure and Apply `k8s/controller.yaml`
-In `k8s/controller.yaml`, configure:
-- `image`: `<REG>/service-portal-controller:<TAG>`
-- `--audience`: Expected TokenReview audience (e.g. `--audience=https://service-portal-controller`)
-- `--node-agent-account`: `system:serviceaccount:service-portal-system:portal-node-agent`
-- `--client-allowlist`: Permitted client service accounts (e.g. `system:serviceaccount:default:sandbox-controller`)
+### Step 3b: Apply Manifests
+Apply both `k8s/controller.yaml` and `k8s/node-agent.yaml`:
 
-Apply: `kubectl apply -f k8s/controller.yaml`
+- **Using `ap deploy` (recommended)**: Apply both manifests unchanged; `ap deploy` builds the images and applies the manifests directly to your active cluster:
+  ```bash
+  ap deploy k8s/controller.yaml k8s/node-agent.yaml
+  ```
+  *(If pushing to a remote registry, set `IMAGE_PREFIX=<REG>`, e.g. `IMAGE_PREFIX=gcr.io/my-project ap deploy k8s/controller.yaml k8s/node-agent.yaml`.)*
 
-### Step 3c: Configure and Apply `k8s/node-agent.yaml`
-In `k8s/node-agent.yaml`, configure:
-- Container images: `node-init` and `nri-plugin` to `<REG>/service-portal-nri-plugin:<TAG>`; `proxy` to `<REG>/service-portal-agent:<TAG>`
-- `audience`: In volume `controller-token`, set `audience` to match `--audience` (e.g. `https://service-portal-controller`)
+- **Using `kubectl apply`**: After setting the container `image` fields in both manifests to your published images from Section 2, apply both manifests:
+  ```bash
+  kubectl apply -f k8s/controller.yaml -f k8s/node-agent.yaml
+  ```
 
-Apply: `kubectl apply -f k8s/node-agent.yaml`
+The controller Deployment starts in `CreateContainerConfigError` until configured in step 3c, signaling that the installation is not yet configured.
+
+### Step 3c: Configure the Controller
+Create the `service-portal-config` ConfigMap using `dev/tasks/configure`, specifying the client allowlist:
+```bash
+dev/tasks/configure --client-allowlist="system:serviceaccount:default:sandbox-controller"
+```
+The token audience defaults to the fixed value `https://service-portal-controller`, matching the projected token audience in `k8s/node-agent.yaml`. The node agent account defaults to `system:serviceaccount:service-portal-system:portal-node-agent`, matching `k8s/node-agent.yaml`. Once the ConfigMap is created, the controller pod starts.
 
 ---
 

@@ -14,6 +14,13 @@
 
 # Reference manifest for the Service Portal Node Agent (NRI mode with bound egress policy).
 #
+# Installation & Configuration:
+# Install this manifest unchanged (for example with `ap deploy k8s/node-agent.yaml` or
+# `kubectl apply -f k8s/node-agent.yaml`).
+# Note: `ap deploy` automatically builds and sets the placeholder images, whereas a plain
+# `kubectl apply` user must set container "image" fields to published images.
+# No edit to this manifest is needed to install.
+#
 # Node Prerequisite:
 # Every node running this agent must have containerd configured with the Node
 # Resource Interface (NRI) enabled ("disable = false" under
@@ -35,28 +42,19 @@
 # Secret named "service-portal-controller-ca" (containing "tls.crt") in the
 # "service-portal-system" namespace.
 #
+# Token Audience:
+# The projected volume ("controller-token") uses the fixed audience
+# "https://service-portal-controller", matching the default controller audience
+# configured by dev/tasks/configure and expected by k8s/controller.yaml. The
+# audience names the recipient of the token, is not a secret, and requires no
+# per-install configuration.
+#
 # Node Agent Service Account:
 # The DaemonSet runs with the "portal-node-agent" ServiceAccount in the
-# "service-portal-system" namespace. The deployer supplies this identity to the
-# Service Portal Controller's "--node-agent-account" flag in
-# "system:serviceaccount:<namespace>:<name>" format:
+# "service-portal-system" namespace, matching the default "node-agent-account"
+# configured for the Service Portal Controller in dev/tasks/configure and
+# k8s/controller.yaml:
 #   system:serviceaccount:service-portal-system:portal-node-agent
-#
-# Required Configuration Values:
-# Before applying this manifest to your cluster, verify or update the following values:
-# 1. images:
-#    In the container specs, set "image" to the appropriate container images:
-#    - node-init and nri-plugin: location of the service-portal-nri-plugin image
-#      (e.g. "gcr.io/PROJECT/service-portal-nri-plugin:TAG").
-#    - proxy: location of the service-portal-agent image
-#      (e.g. "gcr.io/PROJECT/service-portal-agent:TAG").
-# 2. audience:
-#    In the projected volume ("controller-token"), set "audience" to the expected
-#    TokenReview audience configured on the Service Portal Controller (matching the
-#    controller's "--audience" argument, e.g. "https://service-portal-controller").
-#    When applied as is with an empty audience ("audience: \"\""), the projected
-#    token is issued for the API server's own audience; the value must match the
-#    controller's "--audience".
 #
 # Elevated Privileges Rationale:
 # - hostNetwork: true:
@@ -258,7 +256,7 @@ spec:
           - serviceAccountToken:
               path: token
               expirationSeconds: 3600
-              audience: ""
+              audience: "https://service-portal-controller"
       - name: ca-volume
         hostPath:
           path: /etc/service-portal/ca
