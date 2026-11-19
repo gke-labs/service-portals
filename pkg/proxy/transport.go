@@ -16,15 +16,112 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gke-labs/service-portals/pkg/cache"
 )
+
+// NewUpstreamTransport creates an http.RoundTripper suitable for upstream requests.
+// If caDir is empty, it returns http.DefaultTransport without accessing the filesystem.
+// If caDir contains certificate files, the transport's TLSClientConfig.RootCAs is configured
+// with the host system roots plus those certificates.
+// An empty directory means no additional CAs were supplied (the state of an optional ConfigMap
+// volume when the ConfigMap is absent) and returns http.DefaultTransport.
+// Any non-hidden file that cannot be parsed as a certificate returns an error.
+func NewUpstreamTransport(caDir string) (http.RoundTripper, error) {
+	if caDir == "" {
+		return http.DefaultTransport, nil
+	}
+
+	pool, err := loadUpstreamCertPool(caDir)
+	if err != nil {
+		return nil, err
+	}
+	if pool == nil {
+		return http.DefaultTransport, nil
+	}
+
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("http.DefaultTransport is not an *http.Transport: %T", http.DefaultTransport)
+	}
+
+	transport := baseTransport.Clone()
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.RootCAs = pool
+
+	return transport, nil
+}
+
+// loadUpstreamCertPool loads a certificate pool containing the host system's root certificates
+// plus any additional CA certificates found in caDir.
+// If caDir contains no non-hidden files, it returns (nil, nil), signaling that no extra CAs
+// were supplied (the state of an optional ConfigMap volume when the ConfigMap is absent).
+func loadUpstreamCertPool(caDir string) (*x509.CertPool, error) {
+	entries, err := os.ReadDir(caDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read upstream CA directory %q: %w", caDir, err)
+	}
+
+	var certFiles []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		filePath := filepath.Join(caDir, entry.Name())
+		fi, err := os.Stat(filePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to stat upstream CA file %q: %w", filePath, err)
+		}
+		if fi.IsDir() {
+			continue
+		}
+		certFiles = append(certFiles, filePath)
+	}
+	// An empty directory means no additional CAs were supplied (the state of an optional
+	// ConfigMap volume when the ConfigMap is absent).
+	if len(certFiles) == 0 {
+		return nil, nil
+	}
+
+	rootPool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load system root certificate pool: %w", err)
+	}
+	if rootPool == nil {
+		return nil, errors.New("system root certificate pool is not available")
+	}
+
+	for _, certFile := range certFiles {
+		data, err := os.ReadFile(certFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read upstream CA cert file %q: %w", certFile, err)
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			return nil, fmt.Errorf("upstream CA cert file %q is empty", certFile)
+		}
+		if !rootPool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("no valid CA certificates found in %q", certFile)
+		}
+	}
+
+	return rootPool, nil
+}
 
 // CachedResponse represents the structure we store in the cache.
 type CachedResponse struct {

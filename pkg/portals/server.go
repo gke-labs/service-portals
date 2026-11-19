@@ -199,6 +199,20 @@ func Run(ctx context.Context, config Config) error {
 	caCertPath := os.Getenv("CA_CERT_PATH")
 	caKeyPath := os.Getenv("CA_KEY_PATH")
 
+	upstreamCACertPath := os.Getenv("UPSTREAM_CA_CERT_PATH")
+	if pm == nil && upstreamCACertPath != "" {
+		return fmt.Errorf("UPSTREAM_CA_CERT_PATH is only supported with pod map enabled (NRI mode)")
+	}
+
+	if upstreamCACertPath != "" && caCertPath != "" {
+		cleanUpstream := filepath.Clean(upstreamCACertPath)
+		cleanCA := filepath.Clean(caCertPath)
+		cleanCADir := filepath.Clean(filepath.Dir(caCertPath))
+		if cleanUpstream == cleanCA || cleanUpstream == cleanCADir {
+			return fmt.Errorf("upstream CA cert path %q must not point to interception CA %q", upstreamCACertPath, caCertPath)
+		}
+	}
+
 	var target string
 	var fallback *proxy.HTTPProxy
 	var c *cache.InMemoryCache
@@ -391,7 +405,10 @@ func Run(ctx context.Context, config Config) error {
 
 	var handler http.Handler
 	if pm != nil {
-		var transport http.RoundTripper = http.DefaultTransport
+		transport, err := proxy.NewUpstreamTransport(upstreamCACertPath)
+		if err != nil {
+			return fmt.Errorf("failed to configure upstream transport: %w", err)
+		}
 		if os.Getenv("OTEL_INSTRUMENTATION_ENABLED") == "true" {
 			transport = otelhttp.NewTransport(transport)
 		}

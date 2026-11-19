@@ -42,6 +42,19 @@
 # Secret named "service-portal-controller-ca" (containing "tls.crt") in the
 # "service-portal-system" namespace.
 #
+# Upstream CA Certificates:
+# If in-cluster or private upstreams use certificates issued by a private CA,
+# the cluster administrator can supply a PEM certificate bundle in a Kubernetes
+# ConfigMap named "service-portal-upstream-ca" in the "service-portal-system"
+# namespace (for example via dev/tasks/configure --upstream-ca-file=... or
+# kubectl create configmap service-portal-upstream-ca).
+# The volume is optional: if omitted, the node agent verifies upstream TLS
+# against system roots only. When supplied, the bundle is added to the system
+# roots so both public and private upstreams verify.
+# The bundle is read once at proxy startup; if added or modified after the node
+# agent is already running, restart the DaemonSet (kubectl rollout restart
+# daemonset/portal-node-agent -n service-portal-system) for changes to take effect.
+#
 # Token Audience:
 # The projected volume ("controller-token") uses the fixed audience
 # "https://service-portal-controller", matching the default controller audience
@@ -197,6 +210,8 @@ spec:
           value: "/var/run/secrets/tokens/controller/token"
         - name: CONTROLLER_CA_CERT_PATH
           value: "/etc/service-portal/controller-ca/tls.crt"
+        - name: UPSTREAM_CA_CERT_PATH
+          value: "/etc/service-portal/upstream-ca"
         volumeMounts:
         - name: ca-volume
           mountPath: /etc/service-portal/ca
@@ -209,6 +224,9 @@ spec:
           readOnly: true
         - name: socket-volume
           mountPath: /run/service-portal
+        - name: upstream-ca-volume
+          mountPath: /etc/service-portal/upstream-ca
+          readOnly: true
       - name: nri-plugin
         image: service-portal-nri-plugin:latest
         imagePullPolicy: IfNotPresent
@@ -271,3 +289,7 @@ spec:
         hostPath:
           path: /run/service-portal
           type: DirectoryOrCreate
+      - name: upstream-ca-volume
+        configMap:
+          name: service-portal-upstream-ca
+          optional: true

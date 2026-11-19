@@ -1782,11 +1782,11 @@ data:
   tls.key: %s
 ---
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
-  name: backend-ca
+  name: service-portal-upstream-ca
   namespace: service-portal-system
-data:
+binaryData:
   tls.crt: %s
 `, base64.StdEncoding.EncodeToString(backendCert),
 		base64.StdEncoding.EncodeToString(backendKey),
@@ -1903,18 +1903,7 @@ spec:` + serviceIPFamilies + `
 	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "image: service-portal-agent:latest", "image: service-portal-agent:e2e")
 	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "imagePullPolicy: IfNotPresent", "imagePullPolicy: Never")
 
-	// 2. Backend CA trust: configure proxy to trust the test backend's self-signed CA certificate
-	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
-		"        - name: CA_KEY_PATH\n          value: \"/etc/service-portal/ca/tls.key\"",
-		"        - name: CA_KEY_PATH\n          value: \"/etc/service-portal/ca/tls.key\"\n        - name: SSL_CERT_FILE\n          value: \"/etc/service-portal/backend-ca/tls.crt\"")
-	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
-		"        volumeMounts:\n        - name: ca-volume\n          mountPath: /etc/service-portal/ca\n          readOnly: true",
-		"        volumeMounts:\n        - name: ca-volume\n          mountPath: /etc/service-portal/ca\n          readOnly: true\n        - name: backend-ca-volume\n          mountPath: /etc/service-portal/backend-ca\n          readOnly: true")
-	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
-		"      volumes:\n      - name: controller-ca-volume",
-		"      volumes:\n      - name: backend-ca-volume\n        secret:\n          secretName: backend-ca\n      - name: controller-ca-volume")
-
-	// 3. IPv6 proxy address on dual-stack cluster: pass node IPv6 address to proxy and nri-plugin
+	// 2. IPv6 proxy address on dual-stack cluster: pass node IPv6 address to proxy and nri-plugin
 	if proxyHostV6Env != "" {
 		nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
 			`value: "/etc/service-portal/controller-ca/tls.crt"`,
