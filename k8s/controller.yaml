@@ -15,14 +15,16 @@
 # Reference manifest for the Service Portal Controller.
 #
 # Installation & Configuration:
-# Install this manifest unchanged (for example with `ap deploy` or `kubectl apply -f k8s/controller.yaml`).
+# Configure the controller by creating a ConfigMap named "service-portal-config"
+# in the "service-portal-system" namespace (for example using the helper script
+# `dev/tasks/configure`), then install this manifest unchanged (for example
+# with `ap deploy` or `kubectl apply -f k8s/controller.yaml`).
+# Configuration comes before `ap deploy` because `ap deploy` waits for applied
+# workloads to become ready. (With a plain `kubectl apply`, if manifests are applied
+# before configuring, the controller pod remains in CreateContainerConfigError
+# until the ConfigMap is created.)
 # Note: `ap deploy` automatically builds and sets the placeholder image, whereas a plain
 # `kubectl apply` user must set the container "image" field to a published image.
-# After deployment, configure the controller by creating a ConfigMap named
-# "service-portal-config" in the "service-portal-system" namespace (for example
-# using the helper script `dev/tasks/configure`).
-# Until this ConfigMap exists, the controller pod does not start (remaining in
-# CreateContainerConfigError), signaling that the installation is not yet configured.
 #
 # Namespace:
 # All controller components are deployed into the "service-portal-system" namespace.

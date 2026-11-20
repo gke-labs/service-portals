@@ -1619,16 +1619,9 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 
 	gitRoot := h.GetGitRoot()
 
-	// Build and load images
-	h.DockerBuild("service-portal-agent:e2e", filepath.Join(gitRoot, "images/service-portal-agent/Dockerfile"), gitRoot)
-	h.DockerBuild("service-portal-nri-plugin:e2e", filepath.Join(gitRoot, "images/service-portal-nri-plugin/Dockerfile"), gitRoot)
+	// Build and load toolbox test image (controller and node agent are deployed via ap deploy)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
-	h.DockerBuild("service-portal-controller:e2e", filepath.Join(gitRoot, "images/service-portal-controller/Dockerfile"), gitRoot)
-
-	h.KindLoad("service-portal-agent:e2e")
-	h.KindLoad("service-portal-nri-plugin:e2e")
 	h.KindLoad("toolbox:e2e")
-	h.KindLoad("service-portal-controller:e2e")
 
 	serviceIPFamilies := ""
 	if h.IsDualStack() {
@@ -1712,49 +1705,14 @@ data:
 `, base64.StdEncoding.EncodeToString(controllerCACert))
 	h.KubectlApplyContent(controllerCAManifest)
 
-	controllerManifestPath := filepath.Join(gitRoot, "k8s/controller.yaml")
-	bCtrl, err := os.ReadFile(controllerManifestPath)
-	if err != nil {
-		t.Fatalf("Failed to read controller manifest: %v", err)
-	}
-	controllerManifest := string(bCtrl)
-	controllerManifest = strings.ReplaceAll(controllerManifest, "image: service-portal-controller:latest", "image: service-portal-controller:e2e\n        imagePullPolicy: Never")
-
-	h.KubectlApplyContent(controllerManifest)
-
-	// Assert once before running configure that the controller container is in CreateContainerConfigError naming the missing ConfigMap.
-	var waitingReason string
-	var waitingMessage string
-	foundExpectedStatus := false
-	startWaitConfigMap := time.Now()
-	for time.Since(startWaitConfigMap) < 30*time.Second {
-		cmdReason := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller",
-			"-o", "jsonpath={.items[*].status.containerStatuses[*].state.waiting.reason}")
-		outReason, _ := cmdReason.CombinedOutput()
-		waitingReason = strings.TrimSpace(string(outReason))
-
-		cmdMsg := exec.Command("kubectl", "-n", "service-portal-system", "get", "pods", "-l", "app=service-portal-controller",
-			"-o", "jsonpath={.items[*].status.containerStatuses[*].state.waiting.message}")
-		outMsg, _ := cmdMsg.CombinedOutput()
-		waitingMessage = strings.TrimSpace(string(outMsg))
-
-		if waitingReason == "CreateContainerConfigError" && strings.Contains(waitingMessage, "service-portal-config") {
-			foundExpectedStatus = true
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	if !foundExpectedStatus {
-		t.Fatalf("expected controller container to be waiting with reason CreateContainerConfigError and message naming 'service-portal-config', got reason=%q, message=%q",
-			waitingReason, waitingMessage)
-	}
-
+	// Configure the controller via dev/tasks/configure before deploying it,
+	// creating the service-portal-config ConfigMap so ap deploy can wait for readiness.
 	h.RunCommand(filepath.Join(gitRoot, "dev/tasks/configure"),
 		"--client-allowlist="+allowedClientAccount,
 	)
 
-	h.WaitForDeploymentInNamespace("service-portal-system", "service-portal-controller", 2*time.Minute)
-	h.WaitForPodReady("app=service-portal-controller", 2*time.Minute)
+	// Deploy controller from shipped manifest via ap deploy (no rewriting; waits for readiness)
+	h.ApDeploy("k8s/controller.yaml")
 
 	// Deploy Backend Service and Deployment
 	backendCACert, backendCAKey, err := generateTestCA()
@@ -1872,45 +1830,11 @@ spec:` + serviceIPFamilies + `
 	}
 	t.Logf("Backend IPv4 ClusterIP: %s", backendIPv4ClusterIP)
 	backendIPv6ClusterIP := h.GetServiceIPv6ClusterIP("backend")
-	var proxyHostV6Env string
 	if h.IsDualStack() {
 		t.Logf("Backend IPv6 ClusterIP: %s", backendIPv6ClusterIP)
 		if backendIPv6ClusterIP == "" {
 			t.Fatalf("Expected IPv6 ClusterIP for backend service on dual-stack cluster, but none found")
 		}
-		cmdNodeIPv6 := exec.Command("kubectl", "get", "nodes", "-o", "jsonpath={.items[0].status.addresses[?(@.type==\"InternalIP\")].address}")
-		if out, err := cmdNodeIPv6.CombinedOutput(); err == nil {
-			for _, addr := range strings.Fields(string(out)) {
-				if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
-					proxyHostV6Env = fmt.Sprintf("\n        - name: PROXY_HOST_V6\n          value: %q", addr)
-					break
-				}
-			}
-		}
-	}
-
-	// Deploy Node-Agent DaemonSet from k8s/node-agent.yaml
-	nodeAgentManifestPath := filepath.Join(gitRoot, "k8s/node-agent.yaml")
-	bNodeAgent, err := os.ReadFile(nodeAgentManifestPath)
-	if err != nil {
-		t.Fatalf("Failed to read node agent manifest: %v", err)
-	}
-	nodeAgentManifest := string(bNodeAgent)
-
-	// Differences between the shipped manifest and what the e2e test requires:
-	// 1. Image tags and pull policy: use local :e2e images and Never pull policy
-	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "image: service-portal-nri-plugin:latest", "image: service-portal-nri-plugin:e2e")
-	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "image: service-portal-agent:latest", "image: service-portal-agent:e2e")
-	nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest, "imagePullPolicy: IfNotPresent", "imagePullPolicy: Never")
-
-	// 2. IPv6 proxy address on dual-stack cluster: pass node IPv6 address to proxy and nri-plugin
-	if proxyHostV6Env != "" {
-		nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
-			`value: "/etc/service-portal/controller-ca/tls.crt"`,
-			`value: "/etc/service-portal/controller-ca/tls.crt"`+proxyHostV6Env)
-		nodeAgentManifest = strings.ReplaceAll(nodeAgentManifest,
-			`value: "/var/run/nri/nri.sock"`,
-			`value: "/var/run/nri/nri.sock"`+proxyHostV6Env)
 	}
 
 	// 1. Taint the node so uninitialized nodes cannot schedule opted-in pods
@@ -1961,8 +1885,8 @@ spec:
 	}
 	t.Logf("Client pod is correctly Pending due to node taint: %s", phaseOut)
 
-	// 4. Deploy Node-Agent DaemonSet (with toleration; connects to NRI and registers)
-	h.KubectlApplyContent(nodeAgentManifest)
+	// 4. Deploy Node-Agent DaemonSet from k8s/node-agent.yaml via ap deploy (no rewriting; tolerates taint)
+	h.ApDeploy("k8s/node-agent.yaml")
 	h.WaitForDaemonSetInNamespace("service-portal-system", "portal-node-agent", 2*time.Minute)
 	h.WaitForPodReady("app=portal-node-agent", 2*time.Minute)
 
