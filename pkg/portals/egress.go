@@ -208,15 +208,12 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 	return h.signer.GetCertificate(info)
 }
 
-// ShouldDrop reports whether DNS queries or connections from clientAddr should be silently
-// dropped without response. Intercepted pods that have no bound policy yet return true,
-// so the client times out and retries instead of receiving NXDOMAIN or 403.
+// ShouldDrop reports whether DNS queries from clientAddr should be silently dropped without
+// response. Intercepted pods that have no bound policy yet and callers that cannot be
+// identified return true, so the client times out and retries instead of receiving NXDOMAIN.
 func (h *EgressHandler) ShouldDrop(_ string, clientAddr net.Addr) bool {
-	pod, policy, err := h.resolveCaller(clientAddr)
-	if err != nil && pod != nil && policy == nil {
-		return true
-	}
-	return false
+	_, _, err := h.resolveCaller(clientAddr)
+	return err != nil
 }
 
 // MatchHost reports whether host matches an http or https rule in the caller pod's egress policy,

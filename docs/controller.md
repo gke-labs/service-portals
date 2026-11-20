@@ -1,6 +1,6 @@
 # Service Portal Controller
 
-The Service Portal Controller provides a single authenticated gRPC endpoint (`PodBindService`) that sandbox controllers dial to configure egress policies and credentials for sandbox pods. A sandbox controller pushes an `EgressPolicy` and named secrets keyed by pod UID. The controller verifies each pod's scheduled node in the Kubernetes API and forwards the push over a long-lived gRPC stream to the node agent running on that node. The node agent stores the policy and secrets locally and enforces them in the node proxy; nothing is allowed until bound, and traffic from unbound pods or traffic that does not match an allowed rule is denied by default.
+The Service Portal Controller provides a single authenticated gRPC endpoint (`PodBindService`) that sandbox controllers dial to configure egress policies and credentials for sandbox pods. A sandbox controller pushes an `EgressPolicy` and named secrets keyed by pod UID. The controller verifies each pod's scheduled node in the Kubernetes API and forwards the push over a long-lived gRPC stream to the node agent running on that node. The node agent stores the policy and secrets locally and enforces them in the node proxy; nothing is allowed until bound, and traffic from unbound pods or unknown callers, or traffic that does not match an allowed rule, is denied by default.
 
 For architectural background and rationale, see the design records:
 - [Service Portal Controller design](design/service-portal-controller.md)
@@ -173,7 +173,9 @@ The `EgressPolicy` and `PodBindService` APIs are defined in protobuf; see [`pkg/
 
 ### What Happens to Unallowed Traffic
 
-Any traffic not permitted by an explicit rule in the bound policy is blocked. The sandbox observes the following:
+Before an egress policy is bound, or if a pod's first DNS query arrives before the node agent maps its source IP to the pod (unknown caller), outbound DNS queries are dropped (no answer on UDP, held on TCP) so client resolvers time out and retry instead of caching a negative `NXDOMAIN` response. Proxied HTTP and TLS connections from unbound pods are similarly held without response until the client closes or times out. (For unknown callers, HTTP and TLS connections are actively refused with HTTP `403 Forbidden` or handshake termination).
+
+Once a policy is bound, any traffic not permitted by an explicit rule in the bound policy is blocked. The sandbox observes the following:
 
 | Destination | Name Resolution (DNS) | Port 80 (HTTP) | Port 443 (HTTPS) | Other Ports |
 |---|---|---|---|---|
