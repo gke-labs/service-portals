@@ -167,7 +167,7 @@ spec:
 NRI intercepts container creation, mounts the node CA at `/etc/service-portal/ca/tls.crt`, sets `SSL_CERT_FILE=/etc/service-portal/ca/tls.crt`, and installs host netfilter redirection.
 
 ### What You See Before Binding
-Outbound traffic from an unbound opted-in pod fails closed by silence rather than refusal: until an egress policy is bound, the node agent drops outbound traffic. DNS queries get no answer and proxied connections get no response (not `NXDOMAIN`, not `403 Access Denied`, and not a TCP reset).
+Outbound traffic from an unbound opted-in pod fails closed by silence rather than refusal: until an egress policy is bound, the node agent drops outbound traffic. Similarly, DNS queries whose source address the node agent cannot yet map to a pod (unknown callers) are dropped without an answer rather than returning an immediate `NXDOMAIN`, preventing negative answer caching during pod startup. DNS queries get no answer (UDP) or are held (TCP), and proxied connections from unbound pods get no response (not `NXDOMAIN`, not `403 Access Denied`, and not a TCP reset). (Note that HTTP and TLS requests from an unknown caller are actively denied with HTTP `403 Forbidden` or TLS termination).
 
 This appears to client workloads as packet loss, so standard network timeouts and retry logic apply automatically (e.g., in init containers running `git clone` or package managers) without terminating early on a negative answer or caching a negative DNS lookup:
 ```bash

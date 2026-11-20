@@ -1487,8 +1487,8 @@ func TestEgressHandler_ShouldDrop(t *testing.T) {
 		{"unbound pod any host is dropped", addrUnbound, "any.other.host", true},
 		{"bound pod is not dropped", addrBound, "example.com", false},
 		{"bound pod unlisted host is not dropped (handled by MatchHost)", addrBound, "other.com", false},
-		{"unknown caller is not dropped (handled by DefaultAction / 403)", addrUnknown, "example.com", false},
-		{"nil client address is not dropped", nil, "example.com", false},
+		{"unknown caller is dropped", addrUnknown, "example.com", true},
+		{"nil client address is dropped", nil, "example.com", true},
 	}
 
 	for _, tc := range tests {
@@ -1854,10 +1854,9 @@ func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
 		assertAnswerA(t, resp)
 	})
 
-	// 10. Unknown source address: gets NXDOMAIN
-	t.Run("unknown caller gets NXDOMAIN", func(t *testing.T) {
-		resp := sendDNSQueryFromPacketConn(t, connUnknown, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA)
-		assertNXDOMAIN(t, resp)
+	// 10. Unknown source address: query is dropped (UDP times out without response)
+	t.Run("unknown caller is dropped on UDP", func(t *testing.T) {
+		sendDNSQueryFromPacketConnExpectTimeout(t, connUnknown, dnsAddr, "http-exact.example.com.", dnsmessage.TypeA, 100*time.Millisecond)
 	})
 }
 
