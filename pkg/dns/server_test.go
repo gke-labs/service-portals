@@ -141,15 +141,18 @@ func sendDNSQueryTCP(t *testing.T, serverAddr, qname string, qtype dnsmessage.Ty
 }
 
 func TestDNSServer_Match_A(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
-		return host == "api.github.com" || host == "gemini.backend"
+	evaluator := QueryEvaluatorFunc(func(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+		if host == "api.github.com" || host == "gemini.backend" {
+			return DecisionAllow
+		}
+		return DecisionDeny
 	})
 
 	proxyIP := net.ParseIP("127.0.0.2")
 	srv, err := NewServer(Config{
 		BindAddr:  "127.0.0.1:0",
 		ProxyIPv4: proxyIP,
-		Matcher:   matcher,
+		Evaluator: evaluator,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
@@ -183,8 +186,11 @@ func TestDNSServer_Match_A(t *testing.T) {
 }
 
 func TestDNSServer_Match_AAAA(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
-		return host == "api.github.com"
+	evaluator := QueryEvaluatorFunc(func(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+		if host == "api.github.com" {
+			return DecisionAllow
+		}
+		return DecisionDeny
 	})
 
 	proxyIPv6 := net.ParseIP("::1")
@@ -192,7 +198,7 @@ func TestDNSServer_Match_AAAA(t *testing.T) {
 		BindAddr:  "127.0.0.1:0",
 		ProxyIPv4: net.ParseIP("127.0.0.2"),
 		ProxyIPv6: proxyIPv6,
-		Matcher:   matcher,
+		Evaluator: evaluator,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
@@ -226,13 +232,16 @@ func TestDNSServer_Match_AAAA(t *testing.T) {
 }
 
 func TestDNSServer_Match_OtherTypes_NoData(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
-		return host == "api.github.com"
+	evaluator := QueryEvaluatorFunc(func(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+		if host == "api.github.com" {
+			return DecisionAllow
+		}
+		return DecisionDeny
 	})
 
 	srv, err := NewServer(Config{
-		BindAddr: "127.0.0.1:0",
-		Matcher:  matcher,
+		BindAddr:  "127.0.0.1:0",
+		Evaluator: evaluator,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
@@ -258,14 +267,17 @@ func TestDNSServer_Match_OtherTypes_NoData(t *testing.T) {
 }
 
 func TestDNSServer_Deny_NXDOMAIN(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
-		return host == "api.github.com"
+	evaluator := QueryEvaluatorFunc(func(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+		if host == "api.github.com" {
+			return DecisionAllow
+		}
+		return DecisionDeny
 	})
 
 	srv, err := NewServer(Config{
 		BindAddr:      "127.0.0.1:0",
 		DefaultAction: "Deny",
-		Matcher:       matcher,
+		Evaluator:     evaluator,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
@@ -343,15 +355,18 @@ func TestDNSServer_Forward_Allow(t *testing.T) {
 	upstreamAddr := upstreamConn.LocalAddr().String()
 
 	// 2. Setup sidecar DNS server configured with DefaultAction: Allow
-	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
-		return host == "api.github.com"
+	evaluator := QueryEvaluatorFunc(func(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+		if host == "api.github.com" {
+			return DecisionAllow
+		}
+		return DecisionDeny
 	})
 
 	srv, err := NewServer(Config{
 		BindAddr:        "127.0.0.1:0",
 		DefaultAction:   "Allow",
 		UpstreamServers: []string{upstreamAddr},
-		Matcher:         matcher,
+		Evaluator:       evaluator,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
@@ -384,15 +399,18 @@ func TestDNSServer_Forward_Allow(t *testing.T) {
 }
 
 func TestDNSServer_TCP(t *testing.T) {
-	matcher := RuleMatcherFunc(func(host string, _ net.Addr) bool {
-		return host == "api.github.com"
+	evaluator := QueryEvaluatorFunc(func(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+		if host == "api.github.com" {
+			return DecisionAllow
+		}
+		return DecisionDeny
 	})
 
 	proxyIP := net.ParseIP("127.0.0.2")
 	srv, err := NewServer(Config{
 		BindAddr:  "127.0.0.1:0",
 		ProxyIPv4: proxyIP,
-		Matcher:   matcher,
+		Evaluator: evaluator,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
@@ -575,12 +593,14 @@ type dropAndMatch struct {
 	matchHosts map[string]bool
 }
 
-func (d *dropAndMatch) MatchHost(host string, _ net.Addr) bool {
-	return d.matchHosts[host]
-}
-
-func (d *dropAndMatch) ShouldDrop(host string, _ net.Addr) bool {
-	return d.dropHosts[host]
+func (d *dropAndMatch) EvaluateQuery(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+	if d.dropHosts[host] {
+		return DecisionDrop
+	}
+	if d.matchHosts[host] {
+		return DecisionAllow
+	}
+	return DecisionDeny
 }
 
 func TestDNSServer_Drop_UDP(t *testing.T) {
@@ -592,8 +612,7 @@ func TestDNSServer_Drop_UDP(t *testing.T) {
 	srv, err := NewServer(Config{
 		BindAddr:      "127.0.0.1:0",
 		DefaultAction: "Deny",
-		Matcher:       matcher,
-		DropEvaluator: matcher,
+		Evaluator:     matcher,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
@@ -672,8 +691,7 @@ func TestDNSServer_Drop_TCP(t *testing.T) {
 	srv, err := NewServer(Config{
 		BindAddr:      "127.0.0.1:0",
 		DefaultAction: "Deny",
-		Matcher:       evaluator,
-		DropEvaluator: evaluator,
+		Evaluator:     evaluator,
 	})
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
