@@ -502,6 +502,11 @@ func Run(ctx context.Context, config Config) error {
 			})
 		}
 
+		var dropEvaluator dns.DropEvaluator
+		if de, ok := handler.(dns.DropEvaluator); ok {
+			dropEvaluator = de
+		}
+
 		var proxyIPv4 net.IP
 		proxyIPStr := bindHost
 		if proxyIPStr == "" || proxyIPStr == "0.0.0.0" {
@@ -550,6 +555,7 @@ func Run(ctx context.Context, config Config) error {
 				ProxyIPv4:     proxyIPv4,
 				ProxyIPv6:     proxyIPv6,
 				Matcher:       matcher,
+				DropEvaluator: dropEvaluator,
 				DefaultAction: defaultAction,
 			}
 			s, err := dns.NewServer(dnsCfg)
