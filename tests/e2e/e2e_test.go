@@ -2214,7 +2214,7 @@ spec:
 	}
 	controllerPodUID := strings.TrimSpace(string(outCtrlUID))
 
-	portForwardCtx, cancelPortForward := context.WithCancel(context.Background())
+	portForwardCtx, cancelPortForward := context.WithCancel(t.Context())
 	t.Cleanup(cancelPortForward)
 
 	controllerAddr, cleanupForward, err := startPortForward(portForwardCtx, "service-portal-system", "svc/service-portal-controller")
@@ -2239,8 +2239,8 @@ spec:
 	authorizedToken := getServiceAccountToken(t, allowedClientSA, controllerAudience, "default")
 	unauthorizedToken := getServiceAccountToken(t, unauthorizedClientSA, controllerAudience, "default")
 
-	authCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+authorizedToken))
-	unauthCtx := metadata.NewOutgoingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+unauthorizedToken))
+	authCtx := metadata.NewOutgoingContext(t.Context(), metadata.Pairs("authorization", "Bearer "+authorizedToken))
+	unauthCtx := metadata.NewOutgoingContext(t.Context(), metadata.Pairs("authorization", "Bearer "+unauthorizedToken))
 
 	policyProto := &portalsv1.EgressPolicy{}
 	if err := protojson.Unmarshal([]byte(policyJSON), policyProto); err != nil {

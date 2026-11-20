@@ -1063,7 +1063,7 @@ func TestTimeout_ServerToControllerDeadlineExceeded(t *testing.T) {
 		t.Fatalf("NewController: %v", err)
 	}
 
-	ctx := incomingCtx("valid-token")
+	ctx := incomingCtx(t, "valid-token")
 	_, err = ctrl.Bind(ctx, &portalsv1.PodPolicy{
 		PodUid: "pod-timeout-test",
 		Policy: &portalsv1.EgressPolicy{},

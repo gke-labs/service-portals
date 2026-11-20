@@ -89,8 +89,8 @@ func makeJWT(exp time.Time) string {
 	return fmt.Sprintf("%s.%s.signature", header, payload)
 }
 
-func incomingCtx(token string) context.Context {
-	return metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+func incomingCtx(t *testing.T, token string) context.Context {
+	return metadata.NewIncomingContext(t.Context(), metadata.Pairs("authorization", "Bearer "+token))
 }
 
 const (
@@ -128,7 +128,7 @@ func TestNodeAgentToken_Success(t *testing.T) {
 		t.Fatalf("NewAuthenticator failed: %v", err)
 	}
 
-	ctx := incomingCtx("valid-node-token")
+	ctx := incomingCtx(t, "valid-node-token")
 	nodeName, expiresAt, err := auth.AuthorizeNodeAgent(ctx)
 	if err != nil {
 		t.Fatalf("AuthorizeNodeAgent failed: %v", err)
@@ -176,7 +176,7 @@ func TestNodeAgentToken_ReturnedExpiry(t *testing.T) {
 	tokenExpLong := startTime.Add(1 * time.Hour)
 	jwtTokenLong := makeJWT(tokenExpLong)
 
-	nodeName, exp, err := auth.AuthorizeNodeAgent(incomingCtx(jwtTokenLong))
+	nodeName, exp, err := auth.AuthorizeNodeAgent(incomingCtx(t, jwtTokenLong))
 	if err != nil {
 		t.Fatalf("AuthorizeNodeAgent failed: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestNodeAgentToken_ReturnedExpiry(t *testing.T) {
 	tokenExpShort := startTime.Add(3 * time.Minute)
 	jwtTokenShort := makeJWT(tokenExpShort)
 
-	nodeNameShort, expShort, err := auth.AuthorizeNodeAgent(incomingCtx(jwtTokenShort))
+	nodeNameShort, expShort, err := auth.AuthorizeNodeAgent(incomingCtx(t, jwtTokenShort))
 	if err != nil {
 		t.Fatalf("AuthorizeNodeAgent failed: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestNodeAgentToken_ReturnedExpiry(t *testing.T) {
 	}
 
 	// 3. Token without readable exp claim: falls back to now + CacheTTL.
-	nodeNameFallback, expFallback, err := auth.AuthorizeNodeAgent(incomingCtx("raw-token-without-exp"))
+	nodeNameFallback, expFallback, err := auth.AuthorizeNodeAgent(incomingCtx(t, "raw-token-without-exp"))
 	if err != nil {
 		t.Fatalf("AuthorizeNodeAgent failed: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestNodeAgentToken_NoNodeNameRefused(t *testing.T) {
 		t.Fatalf("NewAuthenticator failed: %v", err)
 	}
 
-	ctx := incomingCtx("token-without-node")
+	ctx := incomingCtx(t, "token-without-node")
 	_, _, err = auth.AuthorizeNodeAgent(ctx)
 	if err == nil {
 		t.Fatal("AuthorizeNodeAgent succeeded, want refusal")
@@ -278,7 +278,7 @@ func TestNodeAgentToken_WrongAccountRefused(t *testing.T) {
 		t.Fatalf("NewAuthenticator failed: %v", err)
 	}
 
-	ctx := incomingCtx("wrong-account-token")
+	ctx := incomingCtx(t, "wrong-account-token")
 	_, _, err = auth.AuthorizeNodeAgent(ctx)
 	if err == nil {
 		t.Fatal("AuthorizeNodeAgent succeeded, want refusal")
@@ -315,7 +315,7 @@ func TestWrongAudienceRefused(t *testing.T) {
 		t.Fatalf("NewAuthenticator failed: %v", err)
 	}
 
-	ctx := incomingCtx("wrong-audience-token")
+	ctx := incomingCtx(t, "wrong-audience-token")
 	_, _, err = auth.AuthorizeNodeAgent(ctx)
 	if err == nil {
 		t.Fatal("AuthorizeNodeAgent succeeded, want refusal")
@@ -354,7 +354,7 @@ func TestClientAllowlist_AcceptedAndRefused(t *testing.T) {
 	}
 
 	// 1. Allowlisted client is accepted
-	ctxAllowed := incomingCtx("allowed-token")
+	ctxAllowed := incomingCtx(t, "allowed-token")
 	sa, err := auth.AuthorizeClient(ctxAllowed)
 	if err != nil {
 		t.Fatalf("AuthorizeClient failed: %v", err)
@@ -364,7 +364,7 @@ func TestClientAllowlist_AcceptedAndRefused(t *testing.T) {
 	}
 
 	// 2. Client not on allowlist is refused with PermissionDenied
-	ctxDenied := incomingCtx("unauthorized-token")
+	ctxDenied := incomingCtx(t, "unauthorized-token")
 	_, err = auth.AuthorizeClient(ctxDenied)
 	if err == nil {
 		t.Fatal("AuthorizeClient succeeded for unauthorized client, want refusal")
@@ -387,7 +387,7 @@ func TestNoToken_Unauthenticated(t *testing.T) {
 	}
 
 	// Context with no metadata
-	ctx := context.Background()
+	ctx := t.Context()
 
 	if _, _, err := auth.AuthorizeNodeAgent(ctx); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("AuthorizeNodeAgent code = %v, want Unauthenticated", status.Code(err))
@@ -426,7 +426,7 @@ func TestEmptyAllowlistRefusesEveryone(t *testing.T) {
 		t.Fatalf("NewAuthenticator failed: %v", err)
 	}
 
-	ctx := incomingCtx("any-valid-token")
+	ctx := incomingCtx(t, "any-valid-token")
 	_, err = auth.AuthorizeClient(ctx)
 	if err == nil {
 		t.Fatal("AuthorizeClient succeeded with empty allowlist, want refusal")
@@ -453,7 +453,7 @@ func TestTokenReviewError_Refuses(t *testing.T) {
 		t.Fatalf("NewAuthenticator failed: %v", err)
 	}
 
-	ctx := incomingCtx("test-token")
+	ctx := incomingCtx(t, "test-token")
 	_, _, err = auth1.AuthorizeNodeAgent(ctx)
 	if err == nil {
 		t.Fatal("AuthorizeNodeAgent succeeded on API error, want refusal")
@@ -530,11 +530,11 @@ func TestNoTokenInLogs(t *testing.T) {
 		t.Fatalf("NewAuthenticator failed: %v", err)
 	}
 
-	ctx := incomingCtx(secretToken)
+	ctx := incomingCtx(t, secretToken)
 	_, _ = auth.AuthorizeClient(ctx)
 
 	// Also trigger missing token refusal
-	_, _ = auth.AuthorizeClient(context.Background())
+	_, _ = auth.AuthorizeClient(t.Context())
 
 	klog.Flush()
 	logs := logBuf.String()
@@ -587,7 +587,7 @@ func TestCache_ExpiresNoLaterThanToken(t *testing.T) {
 	}
 	auth.now = nowFn
 
-	ctx := incomingCtx(tokenWithExp)
+	ctx := incomingCtx(t, tokenWithExp)
 
 	// Call 1: makes API call
 	if _, err := auth.AuthorizeClient(ctx); err != nil {
@@ -665,11 +665,11 @@ func TestConcurrency_Race(t *testing.T) {
 			var token string
 			if id%2 == 0 {
 				token = fmt.Sprintf("node-token-%d", id%5)
-				ctx := incomingCtx(token)
+				ctx := incomingCtx(t, token)
 				_, _, _ = auth.AuthorizeNodeAgent(ctx)
 			} else {
 				token = fmt.Sprintf("client-token-%d", id%5)
-				ctx := incomingCtx(token)
+				ctx := incomingCtx(t, token)
 				_, _ = auth.AuthorizeClient(ctx)
 			}
 		}(i)
@@ -745,7 +745,7 @@ func TestGRPCIntegration_MethodLogged(t *testing.T) {
 	defer conn.Close()
 
 	client := portalsv1.NewPodBindServiceClient(conn)
-	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer client-token")
+	ctx := metadata.AppendToOutgoingContext(t.Context(), "authorization", "Bearer client-token")
 	_, err = client.Bind(ctx, &portalsv1.PodPolicy{PodUid: "test-pod-uid"})
 	if err == nil {
 		t.Fatal("expected invoke to fail, but succeeded")

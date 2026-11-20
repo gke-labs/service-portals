@@ -159,8 +159,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 }
 
-func clientCtx(token string) context.Context {
-	return metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token)
+func clientCtx(t *testing.T, token string) context.Context {
+	return metadata.AppendToOutgoingContext(t.Context(), "authorization", "Bearer "+token)
 }
 
 func validTestPolicy() *portalsv1.EgressPolicy {
@@ -211,7 +211,7 @@ func TestController_Bind_WaitAccepted(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	resp, err := env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid:   "pod-123",
 		Identity: "user@example.com",
 		Policy:   validTestPolicy(),
@@ -250,7 +250,7 @@ func TestController_Bind_WaitPending_MissingSecrets(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	resp, err := env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid:   "pod-123",
 		Identity: "user@example.com",
 		Policy:   validTestPolicy(),
@@ -289,7 +289,7 @@ func TestController_InjectSecrets_WaitPending_MissingSecrets(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+	resp, err := env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 		PodUid:  "pod-123",
 		Secrets: map[string][]byte{"github-token": []byte("token-value")},
 		Wait:    true,
@@ -322,7 +322,7 @@ func TestController_Bind_NoWaitPending(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	resp, err := env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid:   "pod-123",
 		Identity: "user@example.com",
 		Policy:   validTestPolicy(),
@@ -362,7 +362,7 @@ func TestController_Bind_Refused(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	resp, err := env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid:   "pod-123",
 		Identity: "user@example.com",
 		Policy:   validTestPolicy(),
@@ -390,7 +390,7 @@ func TestController_Bind_DeadlineExceeded(t *testing.T) {
 		return nil, context.DeadlineExceeded
 	}
 
-	_, err := env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	_, err := env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid: "pod-123",
 		Policy: validTestPolicy(),
 		Wait:   true,
@@ -407,7 +407,7 @@ func TestController_UnlistedClientRefused(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.stop()
 
-	_, err := env.client.Bind(clientCtx("unauthorized-token"), &portalsv1.PodPolicy{
+	_, err := env.client.Bind(clientCtx(t, "unauthorized-token"), &portalsv1.PodPolicy{
 		PodUid: "pod-123",
 		Policy: validTestPolicy(),
 		Wait:   true,
@@ -427,7 +427,7 @@ func TestController_NoTokenUnauthenticated(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.stop()
 
-	_, err := env.client.Bind(context.Background(), &portalsv1.PodPolicy{
+	_, err := env.client.Bind(t.Context(), &portalsv1.PodPolicy{
 		PodUid: "pod-123",
 		Policy: validTestPolicy(),
 		Wait:   true,
@@ -448,7 +448,7 @@ func TestController_Bind_InvalidPolicy(t *testing.T) {
 	defer env.stop()
 
 	// 1. Empty pod UID
-	_, err := env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	_, err := env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid: "",
 		Policy: validTestPolicy(),
 	})
@@ -460,7 +460,7 @@ func TestController_Bind_InvalidPolicy(t *testing.T) {
 	}
 
 	// 2. Nil policy
-	_, err = env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	_, err = env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid: "pod-123",
 		Policy: nil,
 	})
@@ -481,7 +481,7 @@ func TestController_Bind_InvalidPolicy(t *testing.T) {
 			},
 		},
 	}
-	_, err = env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+	_, err = env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 		PodUid: "pod-123",
 		Policy: invalidPolicy,
 	})
@@ -512,7 +512,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+	resp, err := env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 		PodUid:  "pod-123",
 		Secrets: secrets,
 		Wait:    true,
@@ -538,7 +538,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 		}, nil
 	}
 
-	resp, err = env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+	resp, err = env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 		PodUid:  "pod-123",
 		Secrets: secrets,
 		Wait:    false,
@@ -563,7 +563,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 			RefusalReason: refusalReason,
 		}, nil
 	}
-	resp, err = env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+	resp, err = env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 		PodUid:  "pod-123",
 		Secrets: secrets,
 		Wait:    true,
@@ -582,7 +582,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return nil, context.DeadlineExceeded
 	}
-	_, err = env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+	_, err = env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 		PodUid:  "pod-123",
 		Secrets: secrets,
 		Wait:    true,
@@ -593,7 +593,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 
 	// 5. Unlisted caller -> refused, nothing pushed
 	pushCountBefore := env.core.PushCount()
-	_, err = env.client.InjectSecrets(clientCtx("unauthorized-token"), &portalsv1.PodSecrets{
+	_, err = env.client.InjectSecrets(clientCtx(t, "unauthorized-token"), &portalsv1.PodSecrets{
 		PodUid:  "pod-123",
 		Secrets: secrets,
 	})
@@ -606,7 +606,7 @@ func TestController_InjectSecrets_Routing(t *testing.T) {
 
 	// 6. Empty pod UID -> InvalidArgument, nothing pushed
 	pushCountBefore = env.core.PushCount()
-	_, err = env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+	_, err = env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 		PodUid:  "",
 		Secrets: secrets,
 	})
@@ -633,7 +633,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 		}, nil
 	}
 
-	resp, err := env.client.Unbind(clientCtx("allowed-token"), &portalsv1.UnbindRequest{
+	resp, err := env.client.Unbind(clientCtx(t, "allowed-token"), &portalsv1.UnbindRequest{
 		PodUid: "pod-123",
 		Wait:   true,
 	})
@@ -661,7 +661,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 		}, nil
 	}
 
-	resp, err = env.client.Unbind(clientCtx("allowed-token"), &portalsv1.UnbindRequest{
+	resp, err = env.client.Unbind(clientCtx(t, "allowed-token"), &portalsv1.UnbindRequest{
 		PodUid: "pod-123",
 		Wait:   false,
 	})
@@ -685,7 +685,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 			RefusalReason: refusalReason,
 		}, nil
 	}
-	resp, err = env.client.Unbind(clientCtx("allowed-token"), &portalsv1.UnbindRequest{
+	resp, err = env.client.Unbind(clientCtx(t, "allowed-token"), &portalsv1.UnbindRequest{
 		PodUid: "pod-123",
 		Wait:   true,
 	})
@@ -703,7 +703,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 	env.core.pushFn = func(ctx context.Context, push *portalsv1.ControllerPush, wait bool) (*portalsv1.PushAnswer, error) {
 		return nil, context.DeadlineExceeded
 	}
-	_, err = env.client.Unbind(clientCtx("allowed-token"), &portalsv1.UnbindRequest{
+	_, err = env.client.Unbind(clientCtx(t, "allowed-token"), &portalsv1.UnbindRequest{
 		PodUid: "pod-123",
 		Wait:   true,
 	})
@@ -713,7 +713,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 
 	// 5. Unlisted caller -> refused, nothing pushed
 	pushCountBefore := env.core.PushCount()
-	_, err = env.client.Unbind(clientCtx("unauthorized-token"), &portalsv1.UnbindRequest{
+	_, err = env.client.Unbind(clientCtx(t, "unauthorized-token"), &portalsv1.UnbindRequest{
 		PodUid: "pod-123",
 	})
 	if status.Code(err) != codes.PermissionDenied {
@@ -725,7 +725,7 @@ func TestController_Unbind_Routing(t *testing.T) {
 
 	// 6. Empty pod UID -> InvalidArgument, nothing pushed
 	pushCountBefore = env.core.PushCount()
-	_, err = env.client.Unbind(clientCtx("allowed-token"), &portalsv1.UnbindRequest{
+	_, err = env.client.Unbind(clientCtx(t, "allowed-token"), &portalsv1.UnbindRequest{
 		PodUid: "",
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -741,7 +741,7 @@ func TestController_Get_Unimplemented(t *testing.T) {
 	defer env.stop()
 
 	// 1. Allowlisted client -> Unimplemented
-	_, err := env.client.Get(clientCtx("allowed-token"), &portalsv1.GetRequest{
+	_, err := env.client.Get(clientCtx(t, "allowed-token"), &portalsv1.GetRequest{
 		PodUid: "pod-123",
 	})
 	if err == nil {
@@ -755,7 +755,7 @@ func TestController_Get_Unimplemented(t *testing.T) {
 	}
 
 	// 2. Unlisted client -> PermissionDenied
-	_, err = env.client.Get(clientCtx("unauthorized-token"), &portalsv1.GetRequest{
+	_, err = env.client.Get(clientCtx(t, "unauthorized-token"), &portalsv1.GetRequest{
 		PodUid: "pod-123",
 	})
 	if status.Code(err) != codes.PermissionDenied {
@@ -763,7 +763,7 @@ func TestController_Get_Unimplemented(t *testing.T) {
 	}
 
 	// 3. No token -> Unauthenticated
-	_, err = env.client.Get(context.Background(), &portalsv1.GetRequest{
+	_, err = env.client.Get(t.Context(), &portalsv1.GetRequest{
 		PodUid: "pod-123",
 	})
 	if status.Code(err) != codes.Unauthenticated {
@@ -792,7 +792,7 @@ func TestController_NoSecretsInLogs(t *testing.T) {
 		}, nil
 	}
 
-	_, err := env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+	_, err := env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 		PodUid: podUID,
 		Secrets: map[string][]byte{
 			"api_token": []byte(secretValue),
@@ -842,7 +842,7 @@ func TestController_Concurrency(t *testing.T) {
 		wg.Add(3)
 		go func(id int) {
 			defer wg.Done()
-			_, _ = env.client.Bind(clientCtx("allowed-token"), &portalsv1.PodPolicy{
+			_, _ = env.client.Bind(clientCtx(t, "allowed-token"), &portalsv1.PodPolicy{
 				PodUid: "concurrent-pod",
 				Policy: validTestPolicy(),
 				Wait:   true,
@@ -850,7 +850,7 @@ func TestController_Concurrency(t *testing.T) {
 		}(i)
 		go func(id int) {
 			defer wg.Done()
-			_, _ = env.client.InjectSecrets(clientCtx("allowed-token"), &portalsv1.PodSecrets{
+			_, _ = env.client.InjectSecrets(clientCtx(t, "allowed-token"), &portalsv1.PodSecrets{
 				PodUid:  "concurrent-pod",
 				Secrets: map[string][]byte{"k": []byte("v")},
 				Wait:    false,
@@ -858,7 +858,7 @@ func TestController_Concurrency(t *testing.T) {
 		}(i)
 		go func(id int) {
 			defer wg.Done()
-			_, _ = env.client.Unbind(clientCtx("allowed-token"), &portalsv1.UnbindRequest{
+			_, _ = env.client.Unbind(clientCtx(t, "allowed-token"), &portalsv1.UnbindRequest{
 				PodUid: "concurrent-pod",
 				Wait:   true,
 			})
