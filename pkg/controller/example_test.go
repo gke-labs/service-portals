@@ -82,6 +82,7 @@ func BindAndReleaseSandbox(
 // ExamplePodBindServiceClient provides a compilable godoc example illustrating how
 // a sandbox controller binds policy and secrets before releasing a sandbox pod.
 func ExamplePodBindServiceClient() {
+	// Example has no *testing.T in reach.
 	ctx := context.Background()
 	controllerAddr := "service-portal-controller.service-portal-system.svc:8443"
 	caCertPath := "/etc/service-portal/ca/tls.crt"
