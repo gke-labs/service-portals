@@ -2408,6 +2408,186 @@ spec:
 		}
 		t.Logf("HTTPS request after controller unbind denied as expected: %v (output: %s)", errHTTPS, outHTTPS)
 	})
+
+	// 16. Bound pod in a namespace other than default resolving an in-cluster HTTP Service
+	// by its name.namespace.svc form and its name.namespace.svc.cluster.local form from an
+	// init container as well as from the main container.
+	t.Run("InClusterService_InitAndMainContainer_NonDefaultNamespace", func(t *testing.T) {
+		const sandboxNS = "eval-runner-sandbox"
+		nsManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+`, sandboxNS)
+		h.KubectlApplyContent(nsManifest)
+		t.Cleanup(func() {
+			h.RunCommand("kubectl", "delete", "namespace", sandboxNS, "--ignore-not-found")
+		})
+
+		// Deploy in-cluster backend service in the non-default namespace
+		sandboxBackendManifest := fmt.Sprintf(`
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-server
+  namespace: %s
+  labels:
+    app: git-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: git-server
+  template:
+    metadata:
+      labels:
+        app: git-server
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git-server
+  namespace: %s
+spec:%s
+  selector:
+    app: git-server
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+`, sandboxNS, sandboxNS, serviceIPFamilies)
+		h.KubectlApplyContent(sandboxBackendManifest)
+		h.WaitForDeploymentInNamespace(sandboxNS, "git-server", 2*time.Minute)
+
+		sandboxClientPodName := "test-client-init-in-cluster"
+		exec.Command("kubectl", "delete", "pod", sandboxClientPodName, "-n", sandboxNS, "--ignore-not-found").Run()
+		t.Cleanup(func() {
+			exec.Command("kubectl", "delete", "pod", sandboxClientPodName, "-n", sandboxNS, "--ignore-not-found").Run()
+		})
+
+		sandboxClientManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: %s
+    service-portal.gke.io/intercept: "true"
+spec:
+%s  initContainers:
+  - name: init-fetch
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      for i in $(seq 1 60); do
+        if wget -T 2 -qO- http://git-server.%s.svc/init-check; then
+          exit 0
+        fi
+        sleep 1
+      done
+      exit 1
+  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`, sandboxClientPodName, sandboxNS, sandboxClientPodName, runtimeClassField, sandboxNS)
+		h.KubectlApplyContent(sandboxClientManifest)
+
+		var sandboxPodUID string
+		for i := 0; i < 30; i++ {
+			cmdUID := exec.Command("kubectl", "get", "pod", sandboxClientPodName, "-n", sandboxNS, "-o", "jsonpath={.metadata.uid}")
+			if outUID, err := cmdUID.CombinedOutput(); err == nil && len(strings.TrimSpace(string(outUID))) > 0 {
+				sandboxPodUID = strings.TrimSpace(string(outUID))
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if sandboxPodUID == "" {
+			t.Fatalf("failed to get pod UID for %s in %s", sandboxClientPodName, sandboxNS)
+		}
+
+		sandboxPolicyJSON := fmt.Sprintf(`{
+  "rules": [
+    {
+      "http": {
+        "hostnames": [
+          "git-server.%s.svc",
+          "git-server.%s.svc.cluster.local"
+        ]
+      }
+    },
+    {
+      "https": {
+        "hostnames": [
+          "git-server.%s.svc",
+          "git-server.%s.svc.cluster.local"
+        ]
+      }
+    }
+  ]
+}`, sandboxNS, sandboxNS, sandboxNS, sandboxNS)
+
+		sandboxPolicyProto := &portalsv1.EgressPolicy{}
+		if err := protojson.Unmarshal([]byte(sandboxPolicyJSON), sandboxPolicyProto); err != nil {
+			t.Fatalf("failed to unmarshal sandboxPolicyJSON: %v", err)
+		}
+
+		sandboxCtrlPolicy := &portalsv1.PodPolicy{
+			PodUid:   sandboxPodUID,
+			Identity: "test-user-sandbox",
+			Policy:   sandboxPolicyProto,
+			Wait:     true,
+		}
+		bindResp, err := bindClient.Bind(authCtx, sandboxCtrlPolicy)
+		if err != nil {
+			t.Fatalf("Bind with wait failed for sandbox pod: %v", err)
+		}
+		if bindResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
+			t.Fatalf("expected Bind for sandbox pod to end in ACCEPTED, got %v (refusal: %s)", bindResp.GetStatus(), bindResp.GetRefusalReason())
+		}
+		t.Logf("Bind for sandbox pod %s completed with status ACCEPTED", sandboxPodUID)
+
+		// Assert the pod passes its init container and becomes Ready
+		h.WaitForPodReady("app="+sandboxClientPodName, 2*time.Minute)
+
+		// Assert main container also successfully fetches from the in-cluster service
+		cmdMain := exec.Command("kubectl", "exec", sandboxClientPodName, "-n", sandboxNS, "-c", "workload", "--",
+			"wget", "-T", "5", "-qO-", fmt.Sprintf("http://git-server.%s.svc/main-check", sandboxNS))
+		outMain, errMain := cmdMain.CombinedOutput()
+		if errMain != nil {
+			t.Fatalf("main container request to http://git-server.%s.svc/main-check failed: %v (output: %s)", sandboxNS, errMain, outMain)
+		}
+		t.Logf("main container request succeeded: %s", outMain)
+
+		// Assert backend deployment received requests from both init and main containers
+		backendLogs := h.GetPodLogsByNamespaceAndLabel(sandboxNS, "app=git-server", "toolbox")
+		if !strings.Contains(backendLogs, "/init-check") {
+			t.Fatalf("backend access log missing /init-check: %s", backendLogs)
+		}
+		if !strings.Contains(backendLogs, "/main-check") {
+			t.Fatalf("backend access log missing /main-check: %s", backendLogs)
+		}
+		t.Logf("verified backend received requests from both init and main containers")
+	})
 }
 
 func runNRIDualStackAssertions(t *testing.T, h *Harness, clientPodName, backendIPv6ClusterIP string) {
