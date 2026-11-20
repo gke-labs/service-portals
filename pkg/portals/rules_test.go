@@ -16,6 +16,7 @@ package portals
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -25,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -35,7 +37,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gke-labs/service-portals/pkg/dns"
 	"github.com/gke-labs/service-portals/pkg/proxy"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func TestLoadRulesAndRouting(t *testing.T) {
@@ -681,7 +685,7 @@ spec:
 	})
 }
 
-func TestRuleRouterMatchHost(t *testing.T) {
+func TestRuleRouter_EvaluateQuery(t *testing.T) {
 	tmpDir := t.TempDir()
 	ruleContent := `
 apiVersion: portals.gke.io/v1alpha1
@@ -703,24 +707,94 @@ spec:
 
 	tests := []struct {
 		host     string
-		expected bool
+		expected dns.QueryDecision
 	}{
-		{"backend", true},
-		{"backend:80", true},
-		{"backend.", true},
-		{"backend.default.svc.cluster.local", true},
-		{"backend.default.svc.cluster.local.", true},
-		{"unlisted-backend", false},
-		{"google.com", false},
-		{"example.com", false},
+		{"backend", dns.DecisionAllow},
+		{"backend:80", dns.DecisionAllow},
+		{"backend.", dns.DecisionAllow},
+		{"backend.default.svc.cluster.local", dns.DecisionAllow},
+		{"backend.default.svc.cluster.local.", dns.DecisionAllow},
+		{"unlisted-backend", dns.DecisionDeny},
+		{"google.com", dns.DecisionDeny},
+		{"example.com", dns.DecisionDeny},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.host, func(t *testing.T) {
-			got := rr.MatchHost(tc.host, nil)
+			got := rr.EvaluateQuery(t.Context(), tc.host, dnsmessage.TypeA, nil)
 			if got != tc.expected {
-				t.Errorf("MatchHost(%q) = %v; expected %v", tc.host, got, tc.expected)
+				t.Errorf("EvaluateQuery(%q) = %v; expected %v", tc.host, got, tc.expected)
 			}
 		})
+	}
+}
+
+func TestRuleRouter_DNSServer_AnswersRuleHost(t *testing.T) {
+	tmpDir := t.TempDir()
+	ruleContent := `
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: test-rule
+spec:
+  host: "backend"
+  rewriteUrl: "http://127.0.0.1:8080"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "rule.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+
+	rr := NewRuleRouter(tmpDir, nil, "", "", 0, nil)
+	if err := rr.loadRules(); err != nil {
+		t.Fatalf("loadRules failed: %v", err)
+	}
+
+	proxyIP := net.ParseIP("127.0.0.2")
+	srv, err := dns.NewServer(dns.Config{
+		BindAddr:      "127.0.0.1:0",
+		ProxyIPv4:     proxyIP,
+		Evaluator:     rr,
+		DefaultAction: "Deny",
+	})
+	if err != nil {
+		t.Fatalf("failed to create DNS server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("failed to start DNS server: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(t.Context()) }()
+
+	dnsAddr := srv.UDPAddr().String()
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	defer conn.Close()
+
+	// 1. Configured rule host -> answered with proxy IP
+	respMatch := sendDNSQueryFromPacketConn(t, conn, dnsAddr, "backend.", dnsmessage.TypeA)
+	if respMatch.RCode != dnsmessage.RCodeSuccess {
+		t.Fatalf("expected RCodeSuccess for rule host, got %v", respMatch.RCode)
+	}
+	if len(respMatch.Answers) != 1 {
+		t.Fatalf("expected 1 answer for rule host, got %d", len(respMatch.Answers))
+	}
+	aRecord, ok := respMatch.Answers[0].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("expected *dnsmessage.AResource, got %T", respMatch.Answers[0].Body)
+	}
+	if aRecord.A != [4]byte{127, 0, 0, 2} {
+		t.Errorf("expected IP 127.0.0.2, got %v", aRecord.A)
+	}
+
+	// 2. Unlisted host -> denied with NXDOMAIN
+	respDeny := sendDNSQueryFromPacketConn(t, conn, dnsAddr, "unlisted-backend.", dnsmessage.TypeA)
+	if respDeny.RCode != dnsmessage.RCodeNameError {
+		t.Fatalf("expected NXDOMAIN for unlisted host, got %v", respDeny.RCode)
 	}
 }

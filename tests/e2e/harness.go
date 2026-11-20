@@ -306,7 +306,7 @@ func (h *Harness) GetPodLogs(name string) string {
 
 func (h *Harness) GetPodLogsByLabel(labelSelector, container string) string {
 	h.t.Helper()
-	args := []string{"logs", "-l", labelSelector}
+	args := []string{"logs", "-l", labelSelector, "--tail=-1"}
 	if container != "" {
 		args = append(args, "-c", container)
 	}
@@ -319,7 +319,7 @@ func (h *Harness) GetPodLogsByLabel(labelSelector, container string) string {
 
 func (h *Harness) GetPodLogsByNamespaceAndLabel(namespace, labelSelector, container string) string {
 	h.t.Helper()
-	args := []string{"-n", namespace, "logs", "-l", labelSelector}
+	args := []string{"-n", namespace, "logs", "-l", labelSelector, "--tail=-1"}
 	if container != "" {
 		args = append(args, "-c", container)
 	}

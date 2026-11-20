@@ -15,6 +15,7 @@
 package portals
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -29,11 +30,12 @@ import (
 	"github.com/gke-labs/service-portals/pkg/dns"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"github.com/gke-labs/service-portals/pkg/proxy"
+	"github.com/gke-labs/service-portals/pkg/scoped"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 var _ CertificateProvider = (*EgressHandler)(nil)
-var _ dns.RuleMatcher = (*EgressHandler)(nil)
-var _ dns.DropEvaluator = (*EgressHandler)(nil)
+var _ dns.QueryEvaluator = (*EgressHandler)(nil)
 
 // EgressHandler decides intercepted requests against the caller pod's bound egress policy.
 type EgressHandler struct {
@@ -208,24 +210,52 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 	return h.signer.GetCertificate(info)
 }
 
-// ShouldDrop reports whether DNS queries from clientAddr should be silently dropped without
-// response. Intercepted pods that have no bound policy yet and callers that cannot be
-// identified return true, so the client times out and retries instead of receiving NXDOMAIN.
-func (h *EgressHandler) ShouldDrop(_ string, clientAddr net.Addr) bool {
-	_, _, err := h.resolveCaller(clientAddr)
-	return err != nil
-}
-
-// MatchHost reports whether host matches an http or https rule in the caller pod's egress policy,
-// implementing dns.RuleMatcher.
-func (h *EgressHandler) MatchHost(host string, clientAddr net.Addr) bool {
-	_, policy, err := h.resolveCaller(clientAddr)
-	if err != nil {
-		return false
+// EvaluateQuery evaluates a DNS query for the caller at clientAddr in a single decision step,
+// logging refused and dropped queries with source address, pod identity, query name, and reason.
+func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr) dns.QueryDecision {
+	pod, policy, err := h.resolveCaller(clientAddr)
+	if err == nil {
+		cleanHost := proxy.HostWithoutPort(host)
+		cleanHost = strings.TrimSuffix(strings.ToLower(cleanHost), ".")
+		if policy.CouldMatch(portalsv1.ProtocolHTTP, cleanHost) || policy.CouldMatch(portalsv1.ProtocolHTTPS, cleanHost) {
+			return dns.DecisionAllow
+		}
 	}
 
-	host = proxy.HostWithoutPort(host)
-	return policy.CouldMatch(portalsv1.ProtocolHTTP, host) || policy.CouldMatch(portalsv1.ProtocolHTTPS, host)
+	var reason, action string
+	var decision dns.QueryDecision
+	if err != nil {
+		action = "dropped"
+		decision = dns.DecisionDrop
+		if pod == nil {
+			reason = "unknown caller"
+		} else {
+			reason = "pod has no policy"
+		}
+	} else {
+		action = "refused"
+		reason = "name not in policy"
+		decision = dns.DecisionDeny
+	}
+
+	src := ""
+	if clientAddr != nil {
+		src = clientAddr.String()
+	}
+	args := []any{
+		"source", src,
+	}
+	if pod != nil {
+		args = append(args, "pod", podCaller(pod), "podUID", pod.UID)
+	}
+	args = append(args,
+		"name", host,
+		"type", strings.TrimPrefix(qtype.String(), "Type"),
+		"reason", reason,
+		"action", action,
+	)
+	scoped.Log(ctx).Info("dns query refused or dropped", args...)
+	return decision
 }
 
 // ServeHTTP decides an intercepted request from the caller pod's bound policy.

@@ -15,6 +15,7 @@
 package portals
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -38,6 +39,8 @@ import (
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
 	"github.com/gke-labs/service-portals/pkg/proxy"
 	"golang.org/x/net/dns/dnsmessage"
+	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/textlogger"
 )
 
 func newTestEnv(t *testing.T) (*PodMap, *portalsv1.BindingStore) {
@@ -1290,217 +1293,6 @@ func TestEgressHandler_TLSHandshakeEndToEnd(t *testing.T) {
 	})
 }
 
-func TestEgressHandler_MatchHost(t *testing.T) {
-	pm, store := newTestEnv(t)
-
-	podAIP := "10.244.1.10"
-	podAUID := "pod-a"
-	pm.AddOrUpdatePod(&PodInfo{
-		UID:       podAUID,
-		Namespace: "default",
-		Name:      "pod-a",
-		IPs:       []string{podAIP},
-	})
-
-	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
-		PodUid: podAUID,
-		Policy: &portalsv1.EgressPolicy{
-			Rules: []*portalsv1.EgressRule{
-				{
-					Http: &portalsv1.HttpRule{
-						Hostnames: []string{"http-exact.example.com"},
-						Ports: &portalsv1.Ports{
-							Numbers: []int32{8080},
-						},
-					},
-				},
-				{
-					Http: &portalsv1.HttpRule{
-						Hostnames: []string{"*.http-wild.example.com"},
-						Ports: &portalsv1.Ports{
-							All: &portalsv1.AllPorts{},
-						},
-					},
-				},
-				{
-					Https: &portalsv1.HttpsRule{
-						Hostnames: []string{"https-exact.example.com"},
-						Ports: &portalsv1.Ports{
-							Numbers: []int32{443},
-						},
-					},
-				},
-				{
-					Https: &portalsv1.HttpsRule{
-						Hostnames: []string{"*.https-wild.example.com"},
-						Ports: &portalsv1.Ports{
-							Numbers: []int32{8443},
-						},
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Bind pod A failed: %v", err)
-	}
-
-	podBIP := "10.244.1.20"
-	podBUID := "pod-b"
-	pm.AddOrUpdatePod(&PodInfo{
-		UID:       podBUID,
-		Namespace: "default",
-		Name:      "pod-b",
-		IPs:       []string{podBIP},
-	})
-
-	_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
-		PodUid: podBUID,
-		Policy: &portalsv1.EgressPolicy{
-			Rules: []*portalsv1.EgressRule{
-				{
-					Http: &portalsv1.HttpRule{
-						Hostnames: []string{"pod-b-only.example.com"},
-						Ports: &portalsv1.Ports{
-							Numbers: []int32{80},
-						},
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Bind pod B failed: %v", err)
-	}
-
-	podCIP := "10.244.1.30"
-	podCUID := "pod-c"
-	pm.AddOrUpdatePod(&PodInfo{
-		UID:       podCUID,
-		Namespace: "default",
-		Name:      "pod-c",
-		IPs:       []string{podCIP},
-	})
-
-	handler := NewEgressHandler(pm, store, nil, nil)
-
-	addrA := &net.UDPAddr{IP: net.ParseIP(podAIP), Port: 12345}
-	addrB := &net.UDPAddr{IP: net.ParseIP(podBIP), Port: 23456}
-	addrC := &net.UDPAddr{IP: net.ParseIP(podCIP), Port: 34567}
-	addrUnknown := &net.UDPAddr{IP: net.ParseIP("10.244.1.99"), Port: 45678}
-
-	tests := []struct {
-		name     string
-		addr     net.Addr
-		host     string
-		expected bool
-	}{
-		// Pod A queries
-		{"pod A http exact", addrA, "http-exact.example.com", true},
-		{"pod A http exact with dot", addrA, "http-exact.example.com.", true},
-		{"pod A http exact uppercase", addrA, "HTTP-EXACT.EXAMPLE.COM", true},
-		{"pod A http exact with port", addrA, "http-exact.example.com:8080", true},
-		{"pod A http wildcard", addrA, "foo.http-wild.example.com", true},
-		{"pod A https exact", addrA, "https-exact.example.com", true},
-		{"pod A https exact with port", addrA, "https-exact.example.com:443", true},
-		{"pod A https wildcard", addrA, "bar.https-wild.example.com", true},
-		{"pod A outside policy", addrA, "outside.example.com", false},
-		{"pod A pod B rule not matched", addrA, "pod-b-only.example.com", false},
-
-		// Pod B queries (isolation)
-		{"pod B pod B rule matched", addrB, "pod-b-only.example.com", true},
-		{"pod B pod A http exact not matched", addrB, "http-exact.example.com", false},
-		{"pod B pod A http wildcard not matched", addrB, "foo.http-wild.example.com", false},
-		{"pod B pod A https exact not matched", addrB, "https-exact.example.com", false},
-		{"pod B pod A https wildcard not matched", addrB, "bar.https-wild.example.com", false},
-
-		// Unbound pod C
-		{"unbound pod gets nothing", addrC, "http-exact.example.com", false},
-		{"unbound pod gets nothing for pod B rule", addrC, "pod-b-only.example.com", false},
-
-		// Unknown source address
-		{"unknown caller gets nothing", addrUnknown, "http-exact.example.com", false},
-
-		// Nil client address
-		{"nil client address gets nothing", nil, "http-exact.example.com", false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := handler.MatchHost(tc.host, tc.addr)
-			if got != tc.expected {
-				t.Errorf("MatchHost(%q, %v) = %v; expected %v", tc.host, tc.addr, got, tc.expected)
-			}
-		})
-	}
-}
-
-func TestEgressHandler_ShouldDrop(t *testing.T) {
-	pm, store := newTestEnv(t)
-
-	boundIP := "10.244.1.10"
-	boundUID := "pod-bound"
-	pm.AddOrUpdatePod(&PodInfo{
-		UID:       boundUID,
-		Namespace: "default",
-		Name:      "pod-bound",
-		IPs:       []string{boundIP},
-	})
-	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
-		PodUid: boundUID,
-		Policy: &portalsv1.EgressPolicy{
-			Rules: []*portalsv1.EgressRule{
-				{
-					Http: &portalsv1.HttpRule{
-						Hostnames: []string{"example.com"},
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Bind failed: %v", err)
-	}
-
-	unboundIP := "10.244.1.20"
-	unboundUID := "pod-unbound"
-	pm.AddOrUpdatePod(&PodInfo{
-		UID:       unboundUID,
-		Namespace: "default",
-		Name:      "pod-unbound",
-		IPs:       []string{unboundIP},
-	})
-
-	handler := NewEgressHandler(pm, store, nil, nil)
-
-	addrBound := &net.UDPAddr{IP: net.ParseIP(boundIP), Port: 12345}
-	addrUnbound := &net.UDPAddr{IP: net.ParseIP(unboundIP), Port: 23456}
-	addrUnknown := &net.UDPAddr{IP: net.ParseIP("10.244.1.99"), Port: 34567}
-
-	tests := []struct {
-		name     string
-		addr     net.Addr
-		host     string
-		expected bool
-	}{
-		{"unbound pod is dropped", addrUnbound, "example.com", true},
-		{"unbound pod any host is dropped", addrUnbound, "any.other.host", true},
-		{"bound pod is not dropped", addrBound, "example.com", false},
-		{"bound pod unlisted host is not dropped (handled by MatchHost)", addrBound, "other.com", false},
-		{"unknown caller is dropped", addrUnknown, "example.com", true},
-		{"nil client address is dropped", nil, "example.com", true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := handler.ShouldDrop(tc.host, tc.addr)
-			if got != tc.expected {
-				t.Errorf("ShouldDrop(%q, %v) = %v; expected %v", tc.host, tc.addr, got, tc.expected)
-			}
-		})
-	}
-}
-
 func sendDNSQueryFromPacketConn(t *testing.T, conn net.PacketConn, serverAddr, qname string, qtype dnsmessage.Type) dnsmessage.Message {
 	t.Helper()
 	serverUDP, err := net.ResolveUDPAddr("udp", serverAddr)
@@ -1686,8 +1478,7 @@ func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
 		BindAddr:      "127.0.0.1:0",
 		ProxyIPv4:     proxyIPv4,
 		ProxyIPv6:     proxyIPv6,
-		Matcher:       handler,
-		DropEvaluator: handler,
+		Evaluator:     handler,
 		DefaultAction: "Deny",
 	})
 	if err != nil {
@@ -2317,6 +2108,142 @@ func TestClientIP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := clientIP(tc.addr); got != tc.want {
 				t.Errorf("clientIP(%v) = %q, want %q", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEgressHandler_EvaluateQuery_Logging(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundUID := "pod-bound-uid"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "sandbox",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.1.10"},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"allowed.example.com"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       "pod-unbound-uid",
+		Namespace: "sandbox",
+		Name:      "unbound-pod",
+		IPs:       []string{"10.244.1.20"},
+	})
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+
+	tests := []struct {
+		name         string
+		clientIP     string
+		host         string
+		qtype        dnsmessage.Type
+		wantDecision dns.QueryDecision
+		wantLog      bool
+		wantReason   string
+		wantAction   string
+		wantPod      string
+		wantPodUID   string
+	}{
+		{
+			name:         "unknown caller",
+			clientIP:     "10.244.1.99",
+			host:         "allowed.example.com",
+			qtype:        dnsmessage.TypeA,
+			wantDecision: dns.DecisionDrop,
+			wantLog:      true,
+			wantReason:   "unknown caller",
+			wantAction:   "dropped",
+		},
+		{
+			name:         "pod has no policy",
+			clientIP:     "10.244.1.20",
+			host:         "allowed.example.com",
+			qtype:        dnsmessage.TypeAAAA,
+			wantDecision: dns.DecisionDrop,
+			wantLog:      true,
+			wantReason:   "pod has no policy",
+			wantAction:   "dropped",
+			wantPod:      "sandbox/unbound-pod",
+			wantPodUID:   "pod-unbound-uid",
+		},
+		{
+			name:         "name not in policy",
+			clientIP:     "10.244.1.10",
+			host:         "forbidden.example.com",
+			qtype:        dnsmessage.TypeA,
+			wantDecision: dns.DecisionDeny,
+			wantLog:      true,
+			wantReason:   "name not in policy",
+			wantAction:   "refused",
+			wantPod:      "sandbox/bound-pod",
+			wantPodUID:   "pod-bound-uid",
+		},
+		{
+			name:         "allowed query",
+			clientIP:     "10.244.1.10",
+			host:         "allowed.example.com",
+			qtype:        dnsmessage.TypeA,
+			wantDecision: dns.DecisionAllow,
+			wantLog:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			logger := textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&logBuf)))
+			ctx := klog.NewContext(t.Context(), logger)
+
+			addr := &net.UDPAddr{IP: net.ParseIP(tc.clientIP), Port: 54321}
+			got := handler.EvaluateQuery(ctx, tc.host, tc.qtype, addr)
+			if got != tc.wantDecision {
+				t.Fatalf("EvaluateQuery() = %v, want %v", got, tc.wantDecision)
+			}
+			out := logBuf.String()
+			if !tc.wantLog {
+				if len(out) > 0 {
+					t.Errorf("expected no log, got:\n%s", out)
+				}
+				return
+			}
+			for _, substr := range []string{
+				`source="` + tc.clientIP + `:54321"`,
+				`name="` + tc.host + `"`,
+				`type="` + strings.TrimPrefix(tc.qtype.String(), "Type") + `"`,
+				`reason="` + tc.wantReason + `"`,
+				`action="` + tc.wantAction + `"`,
+			} {
+				if !strings.Contains(out, substr) {
+					t.Errorf("log missing %s, got:\n%s", substr, out)
+				}
+			}
+			if tc.wantPod != "" {
+				if !strings.Contains(out, `pod="`+tc.wantPod+`"`) {
+					t.Errorf("log missing pod=%q, got:\n%s", tc.wantPod, out)
+				}
+				if !strings.Contains(out, `podUID="`+tc.wantPodUID+`"`) {
+					t.Errorf("log missing podUID=%q, got:\n%s", tc.wantPodUID, out)
+				}
+			} else {
+				if strings.Contains(out, "pod=") || strings.Contains(out, "podUID=") {
+					t.Errorf("expected no pod keys for unknown caller, got:\n%s", out)
+				}
 			}
 		})
 	}

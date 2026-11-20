@@ -38,6 +38,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	"golang.org/x/net/dns/dnsmessage"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -492,19 +493,17 @@ func Run(ctx context.Context, config Config) error {
 			defaultAction = "Deny"
 		}
 
-		var matcher dns.RuleMatcher
-		if rr, ok := handler.(dns.RuleMatcher); ok {
-			matcher = rr
+		var evaluator dns.QueryEvaluator
+		if qe, ok := handler.(dns.QueryEvaluator); ok {
+			evaluator = qe
 		} else if fallback != nil && fallback.TargetURL != nil {
-			matcher = dns.RuleMatcherFunc(func(h string, _ net.Addr) bool {
-				targetHost := strings.ToLower(proxy.HostWithoutPort(fallback.TargetURL.Host))
-				return targetHost != "" && (targetHost == h || strings.HasPrefix(h, targetHost+"."))
+			targetHost := strings.ToLower(proxy.HostWithoutPort(fallback.TargetURL.Host))
+			evaluator = dns.QueryEvaluatorFunc(func(_ context.Context, h string, _ dnsmessage.Type, _ net.Addr) dns.QueryDecision {
+				if targetHost != "" && (targetHost == h || strings.HasPrefix(h, targetHost+".")) {
+					return dns.DecisionAllow
+				}
+				return dns.DecisionDeny
 			})
-		}
-
-		var dropEvaluator dns.DropEvaluator
-		if de, ok := handler.(dns.DropEvaluator); ok {
-			dropEvaluator = de
 		}
 
 		var proxyIPv4 net.IP
@@ -554,8 +553,7 @@ func Run(ctx context.Context, config Config) error {
 				BindAddr:      addr,
 				ProxyIPv4:     proxyIPv4,
 				ProxyIPv6:     proxyIPv6,
-				Matcher:       matcher,
-				DropEvaluator: dropEvaluator,
+				Evaluator:     evaluator,
 				DefaultAction: defaultAction,
 			}
 			s, err := dns.NewServer(dnsCfg)

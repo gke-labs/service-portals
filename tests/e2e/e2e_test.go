@@ -2079,6 +2079,15 @@ spec:
 		t.Logf("proxy logs correctly carry pod identity: default/%s", clientPodName)
 	})
 
+	t.Run("ProxyDNSLogsCarryPodIdentity", func(t *testing.T) {
+		nodeAgentLogs := h.GetPodLogsByNamespaceAndLabel("service-portal-system", "app=portal-node-agent", "proxy")
+		expectedPodKey := fmt.Sprintf(`pod="default/%s"`, clientPodName)
+		if !strings.Contains(nodeAgentLogs, expectedPodKey) {
+			t.Fatalf("proxy DNS logs missing expected caller pod '%s':\n%s", expectedPodKey, nodeAgentLogs)
+		}
+		t.Logf("proxy DNS logs correctly carry pod identity: %s", expectedPodKey)
+	})
+
 	// 11. Required direct-to-proxy deny case 1:
 	// Opted-in bound pod connecting directly to <proxyHost>:8080 with a Host it is not entitled to is denied
 	t.Run("DirectToProxy_OptedInPod_UnentitledHost_Denied", func(t *testing.T) {

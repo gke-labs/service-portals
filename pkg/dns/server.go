@@ -29,22 +29,29 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// RuleMatcher checks if a given query hostname matches a configured rule host for the caller.
-type RuleMatcher interface {
-	MatchHost(host string, clientAddr net.Addr) bool
+// QueryDecision represents the handling decision for a DNS query.
+type QueryDecision int
+
+const (
+	// DecisionDeny indicates the query does not match and should be refused (NXDOMAIN) or forwarded.
+	DecisionDeny QueryDecision = iota
+	// DecisionAllow indicates the query is allowed and should be answered with the proxy IP.
+	DecisionAllow
+	// DecisionDrop indicates the query should be silently dropped without response.
+	DecisionDrop
+)
+
+// QueryEvaluator evaluates a DNS query for a client in a single decision step.
+type QueryEvaluator interface {
+	EvaluateQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr) QueryDecision
 }
 
-// RuleMatcherFunc is an adapter function implementing RuleMatcher.
-type RuleMatcherFunc func(host string, clientAddr net.Addr) bool
+// QueryEvaluatorFunc is an adapter function implementing QueryEvaluator.
+type QueryEvaluatorFunc func(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr) QueryDecision
 
-// MatchHost calls the underlying function.
-func (f RuleMatcherFunc) MatchHost(host string, clientAddr net.Addr) bool {
-	return f(host, clientAddr)
-}
-
-// DropEvaluator checks if a given query should be dropped without an answer for the caller.
-type DropEvaluator interface {
-	ShouldDrop(host string, clientAddr net.Addr) bool
+// EvaluateQuery calls the underlying function.
+func (f QueryEvaluatorFunc) EvaluateQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr) QueryDecision {
+	return f(ctx, host, qtype, clientAddr)
 }
 
 // Config specifies the configuration for the sidecar DNS server.
@@ -55,10 +62,8 @@ type Config struct {
 	ProxyIPv4 net.IP
 	// ProxyIPv6 is the IPv6 address of the proxy to return for matching hosts (optional).
 	ProxyIPv6 net.IP
-	// Matcher determines if a hostname matches a configured rule.
-	Matcher RuleMatcher
-	// DropEvaluator determines if a query should be silently dropped without an answer for the caller.
-	DropEvaluator DropEvaluator
+	// Evaluator determines the handling decision for a DNS query in a single step.
+	Evaluator QueryEvaluator
 	// DefaultAction specifies what to do when a hostname does not match a rule.
 	// Defaults to "Deny" (return NXDOMAIN). If "Allow", forwards to UpstreamServers.
 	DefaultAction string
@@ -94,14 +99,12 @@ func NewServer(cfg Config) (*Server, error) {
 		cfg.TTL = 60
 	}
 
-	s := &Server{
+	return &Server{
 		config: cfg,
-	}
-
-	return s, nil
+	}, nil
 }
 
-func (s *Server) handleQuery(reqBytes []byte, clientAddr net.Addr, isTCP bool) ([]byte, error) {
+func (s *Server) handleQuery(ctx context.Context, reqBytes []byte, clientAddr net.Addr, isTCP bool) ([]byte, error) {
 	var msg dnsmessage.Message
 	if err := msg.Unpack(reqBytes); err != nil {
 		return nil, fmt.Errorf("failed to unpack DNS message: %w", err)
@@ -121,13 +124,16 @@ func (s *Server) handleQuery(reqBytes []byte, clientAddr net.Addr, isTCP bool) (
 	q := msg.Questions[0]
 	qname := strings.TrimSuffix(strings.ToLower(q.Name.String()), ".")
 
-	if s.config.DropEvaluator != nil && s.config.DropEvaluator.ShouldDrop(qname, clientAddr) {
-		return nil, nil
-	}
-
 	matched := false
-	if s.config.Matcher != nil {
-		matched = s.config.Matcher.MatchHost(qname, clientAddr)
+	if s.config.Evaluator != nil {
+		switch s.config.Evaluator.EvaluateQuery(ctx, qname, q.Type, clientAddr) {
+		case DecisionDrop:
+			return nil, nil
+		case DecisionAllow:
+			matched = true
+		case DecisionDeny:
+			matched = false
+		}
 	}
 
 	if matched {
@@ -413,7 +419,7 @@ func (s *Server) Start(ctx context.Context) error {
 			reqBytes := make([]byte, n)
 			copy(reqBytes, buf[:n])
 			go func(req []byte, addr net.Addr) {
-				respBytes, err := s.handleQuery(req, addr, false)
+				respBytes, err := s.handleQuery(ctx, req, addr, false)
 				if err != nil {
 					log.Printf("DNS UDP handle error: %v", err)
 					return
@@ -447,7 +453,7 @@ func (s *Server) Start(ctx context.Context) error {
 					if _, err := io.ReadFull(c, reqBuf); err != nil {
 						return
 					}
-					respBytes, err := s.handleQuery(reqBuf, c.RemoteAddr(), true)
+					respBytes, err := s.handleQuery(ctx, reqBuf, c.RemoteAddr(), true)
 					if err != nil {
 						log.Printf("DNS TCP handle error: %v", err)
 						return

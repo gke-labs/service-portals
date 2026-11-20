@@ -15,6 +15,7 @@
 package portals
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -30,7 +31,9 @@ import (
 	"time"
 
 	"github.com/gke-labs/service-portals/pkg/cache"
+	"github.com/gke-labs/service-portals/pkg/dns"
 	"github.com/gke-labs/service-portals/pkg/proxy"
+	"golang.org/x/net/dns/dnsmessage"
 	"sigs.k8s.io/yaml"
 )
 
@@ -84,8 +87,11 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 	}
 }
 
-// MatchHost reports whether host matches a configured rule or fallback target.
-func (rr *RuleRouter) MatchHost(host string, _ net.Addr) bool {
+var _ dns.QueryEvaluator = (*RuleRouter)(nil)
+
+// EvaluateQuery evaluates a DNS query against configured rules or fallback target,
+// returning DecisionAllow or DecisionDeny (never drops).
+func (rr *RuleRouter) EvaluateQuery(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) dns.QueryDecision {
 	host = proxy.HostWithoutPort(host)
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 
@@ -93,22 +99,22 @@ func (rr *RuleRouter) MatchHost(host string, _ net.Addr) bool {
 	defer rr.mu.RUnlock()
 
 	if _, ok := rr.routes[host]; ok {
-		return true
+		return dns.DecisionAllow
 	}
 	for rHost := range rr.routes {
 		if strings.HasPrefix(host, rHost+".") {
-			return true
+			return dns.DecisionAllow
 		}
 	}
 
 	if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok && fallbackProxy.TargetURL != nil {
 		targetHost := strings.ToLower(proxy.HostWithoutPort(fallbackProxy.TargetURL.Host))
 		if targetHost != "" && (targetHost == host || strings.HasPrefix(host, targetHost+".")) {
-			return true
+			return dns.DecisionAllow
 		}
 	}
 
-	return false
+	return dns.DecisionDeny
 }
 
 // loadRules reads YAML rules from the configured rulesDir and rebuilds the routing table.
