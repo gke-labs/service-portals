@@ -25,6 +25,8 @@ NODE_AGENT_ACCOUNT=""
 NODE_AGENT_ACCOUNT_SET=false
 CLIENT_ALLOWLIST=""
 CLIENT_ALLOWLIST_SET=false
+UPSTREAM_CA_FILE=""
+UPSTREAM_CA_FILE_SET=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,6 +60,16 @@ while [[ $# -gt 0 ]]; do
       CLIENT_ALLOWLIST_SET=true
       shift 2
       ;;
+    --upstream-ca-file=*)
+      UPSTREAM_CA_FILE="${1#*=}"
+      UPSTREAM_CA_FILE_SET=true
+      shift
+      ;;
+    --upstream-ca-file)
+      UPSTREAM_CA_FILE="$2"
+      UPSTREAM_CA_FILE_SET=true
+      shift 2
+      ;;
     -n|--namespace)
       NAMESPACE="$2"
       shift 2
@@ -74,6 +86,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --audience <aud>             TokenReview audience (default: https://service-portal-controller, matching k8s/node-agent.yaml)"
       echo "  --node-agent-account <sa>    Node agent service account (default: system:serviceaccount:<namespace>:portal-node-agent, matching k8s/node-agent.yaml)"
       echo "  --client-allowlist <sa,...>  Comma-separated list of permitted client service accounts"
+      echo "  --upstream-ca-file <file>    PEM bundle of additional upstream CAs for the node agent (optional)"
       echo "  -n, --namespace <ns>         Namespace for ConfigMap (default: service-portal-system)"
       exit 0
       ;;
@@ -107,3 +120,19 @@ kubectl create configmap "${CONFIGMAP_NAME}" \
   --from-literal=node-agent-account="${NODE_AGENT_ACCOUNT}" \
   --from-literal=client-allowlist="${CLIENT_ALLOWLIST}" \
   --dry-run=client -o yaml | kubectl apply -f -
+
+if [[ "${UPSTREAM_CA_FILE_SET}" == "true" ]]; then
+  echo "Creating ConfigMap 'service-portal-upstream-ca' in namespace '${NAMESPACE}'..."
+  kubectl create configmap service-portal-upstream-ca \
+    --namespace="${NAMESPACE}" \
+    --from-file=tls.crt="${UPSTREAM_CA_FILE}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+  if kubectl get daemonset portal-node-agent -n "${NAMESPACE}" >/dev/null 2>&1; then
+    echo "Restarting daemonset/portal-node-agent in namespace '${NAMESPACE}' to load upstream CAs..."
+    kubectl rollout restart daemonset/portal-node-agent -n "${NAMESPACE}"
+  else
+    echo "Note: If portal-node-agent is already running, restart it to load upstream CAs:"
+    echo "  kubectl rollout restart daemonset/portal-node-agent -n ${NAMESPACE}"
+  fi
+fi

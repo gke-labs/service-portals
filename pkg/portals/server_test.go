@@ -415,3 +415,71 @@ func TestResolveDNSPort(t *testing.T) {
 		}
 	})
 }
+
+func TestRun_UpstreamCAValidation(t *testing.T) {
+	t.Run("UpstreamCARequiresPodMap", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("UPSTREAM_CA_CERT_PATH", tmpDir)
+		t.Setenv("ENABLE_POD_MAP", "")
+
+		err := Run(t.Context(), Config{})
+		if err == nil {
+			t.Fatal("expected error when UPSTREAM_CA_CERT_PATH set without pod map, got nil")
+		}
+	})
+
+	t.Run("UpstreamCACannotPointToInterceptionCAFile", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		caFile := filepath.Join(tmpDir, "tls.crt")
+		t.Setenv("ENABLE_POD_MAP", "true")
+		t.Setenv("ADMIN_ADDR", filepath.Join(tmpDir, "portal.sock"))
+		t.Setenv("CA_CERT_PATH", caFile)
+		t.Setenv("CA_KEY_PATH", filepath.Join(tmpDir, "tls.key"))
+		t.Setenv("UPSTREAM_CA_CERT_PATH", caFile)
+
+		err := Run(t.Context(), Config{
+			BindSocketPath: filepath.Join(tmpDir, "bind.sock"),
+		})
+		if err == nil {
+			t.Fatal("expected error when UPSTREAM_CA_CERT_PATH points to interception CA, got nil")
+		}
+	})
+
+	t.Run("UpstreamCACannotPointToInterceptionCADir", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("ENABLE_POD_MAP", "true")
+		t.Setenv("ADMIN_ADDR", filepath.Join(tmpDir, "portal.sock"))
+		t.Setenv("CA_CERT_PATH", filepath.Join(tmpDir, "tls.crt"))
+		t.Setenv("CA_KEY_PATH", filepath.Join(tmpDir, "tls.key"))
+		t.Setenv("UPSTREAM_CA_CERT_PATH", tmpDir)
+
+		err := Run(t.Context(), Config{
+			BindSocketPath: filepath.Join(tmpDir, "bind.sock"),
+		})
+		if err == nil {
+			t.Fatal("expected error when UPSTREAM_CA_CERT_PATH points to interception CA directory, got nil")
+		}
+	})
+
+	t.Run("InvalidUpstreamCABundleErrorsAtStartup", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		caDir := filepath.Join(tmpDir, "upstream-ca")
+		if err := os.Mkdir(caDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(caDir, "bad-ca.crt"), []byte("NOT_A_CERT"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		t.Setenv("ENABLE_POD_MAP", "true")
+		t.Setenv("ADMIN_ADDR", filepath.Join(tmpDir, "portal.sock"))
+		t.Setenv("UPSTREAM_CA_CERT_PATH", caDir)
+
+		err := Run(t.Context(), Config{
+			BindSocketPath: filepath.Join(tmpDir, "bind.sock"),
+		})
+		if err == nil {
+			t.Fatal("expected startup error for invalid upstream CA bundle, got nil")
+		}
+	})
+}

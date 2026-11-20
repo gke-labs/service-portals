@@ -89,6 +89,27 @@ dev/tasks/configure --client-allowlist="system:serviceaccount:default:sandbox-co
 ```
 The token audience defaults to the fixed value `https://service-portal-controller`, matching the projected token audience in `k8s/node-agent.yaml`. The node agent account defaults to `system:serviceaccount:service-portal-system:portal-node-agent`, matching `k8s/node-agent.yaml`. Once the ConfigMap is created, the controller pod starts.
 
+### Step 3d: Trust Private Upstream CAs (Optional)
+If in-cluster services or internal API gateways use TLS certificates issued by a private Certificate Authority, you can configure the node agent's proxy to trust that CA without modifying the manifests.
+
+Supply a PEM certificate bundle in a ConfigMap named `service-portal-upstream-ca` in the `service-portal-system` namespace. You can pass `--upstream-ca-file` to `dev/tasks/configure` or create the ConfigMap directly with `kubectl`:
+```bash
+# Via dev/tasks/configure (restarts the DaemonSet automatically if already running):
+dev/tasks/configure --client-allowlist="system:serviceaccount:default:sandbox-controller" \
+  --upstream-ca-file=path/to/upstream-ca.crt
+
+# Or directly via kubectl:
+kubectl create configmap service-portal-upstream-ca -n service-portal-system \
+  --from-file=tls.crt=path/to/upstream-ca.crt
+```
+The node agent mounts this ConfigMap optionally and adds the certificates to the system root pool. Public upstreams continue to verify against system roots alongside your private CA. If no ConfigMap is created, the node agent verifies upstream TLS against the system root pool only.
+
+The CA bundle is read once at proxy startup. If the node agent DaemonSet is already running when the ConfigMap is created or updated, restart it to load the bundle:
+```bash
+kubectl rollout restart daemonset/portal-node-agent -n service-portal-system
+kubectl rollout status daemonset/portal-node-agent -n service-portal-system
+```
+
 ---
 
 ## 4. Confirm Controller and Node Agents Are Healthy

@@ -25,6 +25,7 @@
 - `RULES_DIR`: Directory containing `PortalRule` YAML files (overridden by `--rules-dir`).
 - `CA_CERT_PATH`: Path to Root CA certificate PEM file.
 - `CA_KEY_PATH`: Path to Root CA private key PEM file.
+- `UPSTREAM_CA_CERT_PATH`: Path to upstream CA certificate bundle directory.
 - `TARGET_URL`: Default fallback upstream URL.
 - `UPSTREAM_AUTH_TOKEN`: Default fallback authentication token.
 - `UPSTREAM_AUTH_HEADER`: Default fallback authentication header (default `Authorization`).
