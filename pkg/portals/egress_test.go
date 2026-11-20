@@ -973,13 +973,6 @@ func TestRequestTarget(t *testing.T) {
 	}
 }
 
-type mockAddr struct {
-	addr string
-}
-
-func (a mockAddr) Network() string { return "tcp" }
-func (a mockAddr) String() string  { return a.addr }
-
 type mockConn struct {
 	net.Conn
 	remoteAddr net.Addr
@@ -1059,7 +1052,7 @@ func TestEgressHandler_GetCertificate(t *testing.T) {
 	clientHello := func(sni, remoteAddr string) *tls.ClientHelloInfo {
 		var conn net.Conn
 		if remoteAddr != "" {
-			conn = &mockConn{remoteAddr: mockAddr{addr: remoteAddr}}
+			conn = &mockConn{remoteAddr: parseRemoteAddr(remoteAddr)}
 		}
 		return &tls.ClientHelloInfo{
 			ServerName: sni,
@@ -1115,7 +1108,7 @@ func TestEgressHandler_GetCertificate(t *testing.T) {
 
 		info := &tls.ClientHelloInfo{
 			ServerName: "api.example.com",
-			Conn:       &mockConn{Conn: serverConn, remoteAddr: mockAddr{addr: unboundIP + ":12345"}},
+			Conn:       &mockConn{Conn: serverConn, remoteAddr: parseRemoteAddr(unboundIP + ":12345")},
 		}
 
 		done := make(chan struct{})
@@ -2285,5 +2278,47 @@ options ndots:5
 	searchesNone, domainNone, podRestNone := parseResolvConf("/nonexistent/file/path")
 	if searchesNone != nil || domainNone != "" || podRestNone != "" {
 		t.Errorf("expected nil/empty for nonexistent file, got %v, %q, %q", searchesNone, domainNone, podRestNone)
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	tests := []struct {
+		name string
+		addr net.Addr
+		want string
+	}{
+		{
+			name: "IPv4",
+			addr: &net.TCPAddr{IP: net.ParseIP("10.244.1.5"), Port: 12345},
+			want: "10.244.1.5",
+		},
+		{
+			name: "IPv6",
+			addr: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 12345},
+			want: "2001:db8::1",
+		},
+		{
+			name: "IPv4-mapped",
+			addr: &net.TCPAddr{IP: net.ParseIP("::ffff:10.244.1.5"), Port: 12345},
+			want: "10.244.1.5",
+		},
+		{
+			name: "nil",
+			addr: nil,
+			want: "",
+		},
+		{
+			name: "unparseable RemoteAddr",
+			addr: parseRemoteAddr("invalid:remote:addr"),
+			want: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clientIP(tc.addr); got != tc.want {
+				t.Errorf("clientIP(%v) = %q, want %q", tc.addr, got, tc.want)
+			}
+		})
 	}
 }

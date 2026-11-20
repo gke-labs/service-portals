@@ -21,6 +21,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -170,16 +171,16 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 	if info == nil {
 		return nil, errors.New("missing client hello info")
 	}
-	var remoteAddr string
-	if info.Conn != nil && info.Conn.RemoteAddr() != nil {
-		remoteAddr = info.Conn.RemoteAddr().String()
+	var clientAddr net.Addr
+	if info.Conn != nil {
+		clientAddr = info.Conn.RemoteAddr()
 	}
 
-	pod, policy, err := h.resolveCaller(remoteAddr)
+	pod, policy, err := h.resolveCaller(clientAddr)
 	if err != nil {
 		if pod != nil {
 			caller := podCaller(pod)
-			remoteIP := clientIP(remoteAddr)
+			remoteIP := clientIP(clientAddr)
 			log.Printf("TLS handshake | Caller: %s (%s) | State: unbound | Action: drop", caller, remoteIP)
 			dns.HoldConnection(info.Context(), info.Conn)
 		}
@@ -211,12 +212,7 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 // dropped without response. Intercepted pods that have no bound policy yet return true,
 // so the client times out and retries instead of receiving NXDOMAIN or 403.
 func (h *EgressHandler) ShouldDrop(_ string, clientAddr net.Addr) bool {
-	var remoteAddr string
-	if clientAddr != nil {
-		remoteAddr = clientAddr.String()
-	}
-
-	pod, policy, err := h.resolveCaller(remoteAddr)
+	pod, policy, err := h.resolveCaller(clientAddr)
 	if err != nil && pod != nil && policy == nil {
 		return true
 	}
@@ -226,12 +222,7 @@ func (h *EgressHandler) ShouldDrop(_ string, clientAddr net.Addr) bool {
 // MatchHost reports whether host matches an http or https rule in the caller pod's egress policy,
 // implementing dns.RuleMatcher.
 func (h *EgressHandler) MatchHost(host string, clientAddr net.Addr) bool {
-	var remoteAddr string
-	if clientAddr != nil {
-		remoteAddr = clientAddr.String()
-	}
-
-	_, policy, err := h.resolveCaller(remoteAddr)
+	_, policy, err := h.resolveCaller(clientAddr)
 	if err != nil {
 		return false
 	}
@@ -247,9 +238,10 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pod, policy, err := h.resolveCaller(r.RemoteAddr)
+	clientAddr := parseRemoteAddr(r.RemoteAddr)
+	pod, policy, err := h.resolveCaller(clientAddr)
 	if err != nil {
-		remoteIP := clientIP(r.RemoteAddr)
+		remoteIP := clientIP(clientAddr)
 		if pod == nil {
 			log.Printf("Request: %s %s | Caller: unknown (%s) | Action: denied", r.Method, r.Host, remoteIP)
 			http.Error(w, "Access Denied: unknown caller", http.StatusForbidden)
@@ -318,8 +310,8 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.Forward(w, outReq, h.transport)
 }
 
-func (h *EgressHandler) resolveCaller(remoteAddr string) (*PodInfo, *portalsv1.EgressPolicy, error) {
-	remoteIP := clientIP(remoteAddr)
+func (h *EgressHandler) resolveCaller(addr net.Addr) (*PodInfo, *portalsv1.EgressPolicy, error) {
+	remoteIP := clientIP(addr)
 	pod, err := h.lookupCaller(remoteIP)
 	if err != nil {
 		return nil, nil, fmt.Errorf("unknown caller (%s)", remoteIP)
@@ -335,12 +327,22 @@ func (h *EgressHandler) resolveCaller(remoteAddr string) (*PodInfo, *portalsv1.E
 	return pod, policy, nil
 }
 
-func clientIP(remoteAddr string) string {
-	ip := proxy.HostWithoutPort(remoteAddr)
-	if strings.HasPrefix(ip, "[") && strings.HasSuffix(ip, "]") {
-		return ip[1 : len(ip)-1]
+func parseRemoteAddr(remoteAddr string) net.Addr {
+	ap, err := netip.ParseAddrPort(remoteAddr)
+	if err != nil {
+		return nil
 	}
-	return ip
+	return net.TCPAddrFromAddrPort(ap)
+}
+
+func clientIP(addr net.Addr) string {
+	if a, ok := addr.(interface{ AddrPort() netip.AddrPort }); ok {
+		ip := a.AddrPort().Addr().Unmap()
+		if ip.IsValid() {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func (h *EgressHandler) lookupCaller(ip string) (*PodInfo, error) {
