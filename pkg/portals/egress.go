@@ -285,9 +285,10 @@ func (d *refusalDeduper) record(key refusalKey) (bool, int) {
 // isSearchExpansion reports whether host is an unlisted name produced by kubelet's ndots:5
 // search-domain expansion of a base name that the pod's policy actually permits.
 // It tests whether stripping one of the caller pod's expected search suffixes:
-//   1. the pod's own first search entry (<namespace>.svc.<clusterDomain>),
-//   2. the remaining search entries from the agent's /etc/resolv.conf (e.g. svc.<clusterDomain>),
-//   3. the cluster domain itself (<clusterDomain>),
+//  1. the pod's own first search entry (<namespace>.svc.<clusterDomain>),
+//  2. the remaining search entries from the agent's /etc/resolv.conf (e.g. svc.<clusterDomain>),
+//  3. the cluster domain itself (<clusterDomain>),
+//
 // produces a base name permitted by the policy.
 // If stripping a valid search suffix yields a permitted base name, the refusal is expected
 // resolver noise under ndots:5 and is logged at V(1).
