@@ -307,12 +307,20 @@ func TestBuildFetchFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected buildFetchFromStore to succeed, got %v", err)
 	}
-	if len(resp) == 0 {
+
+	var _ io.WriterTo = resp
+
+	var buf bytes.Buffer
+	n, err := resp.WriteTo(&buf)
+	if err != nil {
+		t.Fatalf("failed to write response: %v", err)
+	}
+	if n == 0 || buf.Len() == 0 {
 		t.Fatal("expected non-empty response bytes")
 	}
 
 	// Verify that the extracted packfile from response contains our object
-	packBytes, err := ExtractPackfileFromResponse(resp)
+	packBytes, err := ExtractPackfileFromResponse(buf.Bytes())
 	if err != nil {
 		t.Fatalf("failed to extract packfile from response: %v", err)
 	}
@@ -322,6 +330,54 @@ func TestBuildFetchFromStore(t *testing.T) {
 	}
 	if len(parsedObjs) != 1 || parsedObjs[0].OID != wantCommit {
 		t.Fatalf("unexpected parsed objects: %+v (want OID %s)", parsedObjs, wantCommit)
+	}
+}
+
+func TestGitProxyUploadPackCacheHitWriteFailureDoesNotCallHttpError(t *testing.T) {
+	commitData := []byte("tree 4444444444444444444444444444444444444444\nauthor Alice <a@example.com> 1700000000 +0000\ncommitter Alice <a@example.com> 1700000000 +0000\n\nCommit\n")
+	wantCommitOID := ComputeOID(ObjCommit, commitData)
+	commitObj := &RawObject{Type: ObjCommit, Data: commitData, OID: wantCommitOID}
+
+	c := cache.NewInMemoryCache(1 * time.Minute)
+	repoCache := NewRepoCacheManager("")
+	s := NewServer(Config{
+		DefaultTargetURL: "http://upstream.example.com",
+		Cache:            c,
+		CacheTTL:         10 * time.Minute,
+	})
+	s.RepoCache = repoCache
+
+	repoPath := "/repo.git/git-upload-pack"
+	repoStore := repoCache.GetRepoStore(repoPath)
+
+	repoStore.commits[wantCommitOID] = &CommitInfo{
+		OID:     wantCommitOID,
+		Tree:    "4444444444444444444444444444444444444444",
+		Parents: nil,
+	}
+	repoStore.objects[wantCommitOID] = commitObj
+	repoStore.commitObjects[wantCommitOID] = []string{wantCommitOID}
+
+	fetchBody := []byte(fmt.Sprintf("0032want %s\n00000009done\n", wantCommitOID))
+
+	req := httptest.NewRequest("POST", fmt.Sprintf("/upstream.example.com%s", repoPath), bytes.NewReader(fetchBody))
+	rec := httptest.NewRecorder()
+	fw := &failingResponseWriter{
+		ResponseWriter: rec,
+		writeErr:       errors.New("client connection disconnected"),
+	}
+
+	s.ServeHTTP(fw, req)
+
+	// Verify WriteHeader was called exactly once with 200 OK, and never with an error status
+	if len(fw.headerCalls) != 1 {
+		t.Fatalf("expected WriteHeader to be called exactly once, got %d calls: %v", len(fw.headerCalls), fw.headerCalls)
+	}
+	if fw.headerCalls[0] != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d", fw.headerCalls[0])
+	}
+	if fw.Header().Get("X-Git-Cache") != "HIT" {
+		t.Fatalf("expected X-Git-Cache: HIT, got %s", fw.Header().Get("X-Git-Cache"))
 	}
 }
 
