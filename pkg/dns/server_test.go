@@ -145,7 +145,7 @@ func TestDNSServer_Match_A(t *testing.T) {
 		if host == "api.github.com" || host == "gemini.backend" {
 			return DecisionAllow
 		}
-		return DecisionDeny
+		return DecisionDefault
 	})
 
 	proxyIP := net.ParseIP("127.0.0.2")
@@ -190,7 +190,7 @@ func TestDNSServer_Match_AAAA(t *testing.T) {
 		if host == "api.github.com" {
 			return DecisionAllow
 		}
-		return DecisionDeny
+		return DecisionDefault
 	})
 
 	proxyIPv6 := net.ParseIP("::1")
@@ -236,7 +236,7 @@ func TestDNSServer_Match_OtherTypes_NoData(t *testing.T) {
 		if host == "api.github.com" {
 			return DecisionAllow
 		}
-		return DecisionDeny
+		return DecisionDefault
 	})
 
 	srv, err := NewServer(Config{
@@ -271,7 +271,7 @@ func TestDNSServer_Deny_NXDOMAIN(t *testing.T) {
 		if host == "api.github.com" {
 			return DecisionAllow
 		}
-		return DecisionDeny
+		return DecisionDefault
 	})
 
 	srv, err := NewServer(Config{
@@ -359,7 +359,7 @@ func TestDNSServer_Forward_Allow(t *testing.T) {
 		if host == "api.github.com" {
 			return DecisionAllow
 		}
-		return DecisionDeny
+		return DecisionDefault
 	})
 
 	srv, err := NewServer(Config{
@@ -403,7 +403,7 @@ func TestDNSServer_TCP(t *testing.T) {
 		if host == "api.github.com" {
 			return DecisionAllow
 		}
-		return DecisionDeny
+		return DecisionDefault
 	})
 
 	proxyIP := net.ParseIP("127.0.0.2")
@@ -600,7 +600,7 @@ func (d *dropAndMatch) EvaluateQuery(_ context.Context, host string, _ dnsmessag
 	if d.matchHosts[host] {
 		return DecisionAllow
 	}
-	return DecisionDeny
+	return DecisionDefault
 }
 
 func TestDNSServer_Drop_UDP(t *testing.T) {
@@ -811,4 +811,98 @@ func TestHoldConnection(t *testing.T) {
 			t.Fatal("expected HoldConnection to unblock after context cancelled")
 		}
 	})
+}
+
+func TestDNSServer_NXDomain_OverridesDefaultActionForward(t *testing.T) {
+	mockUpstreamIP := [4]byte{93, 184, 216, 34}
+	upstreamConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen packet for mock upstream: %v", err)
+	}
+	defer upstreamConn.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, clientAddr, err := upstreamConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var req dnsmessage.Message
+			if err := req.Unpack(buf[:n]); err != nil {
+				continue
+			}
+
+			resp := dnsmessage.Message{
+				Header: dnsmessage.Header{
+					ID:       req.Header.ID,
+					Response: true,
+					RCode:    dnsmessage.RCodeSuccess,
+				},
+				Questions: req.Questions,
+				Answers: []dnsmessage.Resource{
+					{
+						Header: dnsmessage.ResourceHeader{
+							Name:  req.Questions[0].Name,
+							Type:  dnsmessage.TypeA,
+							Class: dnsmessage.ClassINET,
+							TTL:   60,
+						},
+						Body: &dnsmessage.AResource{A: mockUpstreamIP},
+					},
+				},
+			}
+			packed, err := resp.Pack()
+			if err == nil {
+				_, _ = upstreamConn.WriteTo(packed, clientAddr)
+			}
+		}
+	}()
+
+	upstreamAddr := upstreamConn.LocalAddr().String()
+
+	evaluator := QueryEvaluatorFunc(func(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) QueryDecision {
+		if host == "reject.example.com" {
+			return DecisionNXDomain
+		}
+		return DecisionDefault
+	})
+
+	srv, err := NewServer(Config{
+		BindAddr:        "127.0.0.1:0",
+		DefaultAction:   "Allow",
+		UpstreamServers: []string{upstreamAddr},
+		Evaluator:       evaluator,
+	})
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("failed to start server: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(t.Context()) }()
+
+	addr := srv.UDPAddr().String()
+
+	// 1. DecisionNXDomain -> answers NXDOMAIN despite DefaultAction forwarding
+	respNXDomain := sendDNSQueryUDP(t, addr, "reject.example.com.", dnsmessage.TypeA)
+	if respNXDomain.RCode != dnsmessage.RCodeNameError {
+		t.Fatalf("expected NXDOMAIN (RCodeNameError) for DecisionNXDomain, got %v", respNXDomain.RCode)
+	}
+	if len(respNXDomain.Answers) != 0 {
+		t.Fatalf("expected 0 answers on DecisionNXDomain, got %d", len(respNXDomain.Answers))
+	}
+
+	// 2. DecisionDefault -> forwarded upstream because DefaultAction is Allow
+	respDefault := sendDNSQueryUDP(t, addr, "forward.example.com.", dnsmessage.TypeA)
+	if respDefault.RCode != dnsmessage.RCodeSuccess || len(respDefault.Answers) != 1 {
+		t.Fatalf("expected 1 answer from upstream for DecisionDefault, got rcode=%v answers=%d", respDefault.RCode, len(respDefault.Answers))
+	}
+	if aRecord, ok := respDefault.Answers[0].Body.(*dnsmessage.AResource); !ok || aRecord.A != mockUpstreamIP {
+		t.Errorf("expected upstream IP %v, got %v", mockUpstreamIP, respDefault.Answers[0].Body)
+	}
 }

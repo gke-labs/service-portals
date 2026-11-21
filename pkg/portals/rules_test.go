@@ -714,9 +714,9 @@ spec:
 		{"backend.", dns.DecisionAllow},
 		{"backend.default.svc.cluster.local", dns.DecisionAllow},
 		{"backend.default.svc.cluster.local.", dns.DecisionAllow},
-		{"unlisted-backend", dns.DecisionDeny},
-		{"google.com", dns.DecisionDeny},
-		{"example.com", dns.DecisionDeny},
+		{"unlisted-backend", dns.DecisionDefault},
+		{"google.com", dns.DecisionDefault},
+		{"example.com", dns.DecisionDefault},
 	}
 
 	for _, tc := range tests {

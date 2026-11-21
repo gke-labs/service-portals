@@ -90,7 +90,7 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 var _ dns.QueryEvaluator = (*RuleRouter)(nil)
 
 // EvaluateQuery evaluates a DNS query against configured rules or fallback target,
-// returning DecisionAllow or DecisionDeny (never drops).
+// returning DecisionAllow or DecisionDefault (deferring to the server's default action; never drops).
 func (rr *RuleRouter) EvaluateQuery(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) dns.QueryDecision {
 	host = proxy.HostWithoutPort(host)
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
@@ -114,7 +114,7 @@ func (rr *RuleRouter) EvaluateQuery(_ context.Context, host string, _ dnsmessage
 		}
 	}
 
-	return dns.DecisionDeny
+	return dns.DecisionDefault
 }
 
 // loadRules reads YAML rules from the configured rulesDir and rebuilds the routing table.
