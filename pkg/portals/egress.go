@@ -26,6 +26,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gke-labs/service-portals/pkg/dns"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
@@ -46,6 +48,7 @@ type EgressHandler struct {
 	searchDomains []string // all entries from /etc/resolv.conf search line
 	clusterDomain string   // cluster domain parsed from <namespace>.svc.<domain>
 	podSearchRest string   // search suffix after namespace from entry 0, e.g. "svc.cluster.local"
+	deduper       *refusalDeduper
 }
 
 // NewEgressHandler creates an EgressHandler that resolves caller pods via podMap,
@@ -64,6 +67,7 @@ func NewEgressHandler(podMap *PodMap, store *portalsv1.BindingStore, transport h
 		searchDomains: searches,
 		clusterDomain: clusterDomain,
 		podSearchRest: podSearchRest,
+		deduper:       newRefusalDeduper(defaultMaxRefusalItems, defaultRefusalWindow),
 	}
 }
 
@@ -210,6 +214,117 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 	return h.signer.GetCertificate(info)
 }
 
+const (
+	defaultRefusalWindow   = 10 * time.Second
+	defaultMaxRefusalItems = 1000
+)
+
+type refusalKey struct {
+	caller string // pod UID or client IP
+	name   string // normalized query host
+	reason string // refusal reason
+}
+
+type refusalEntry struct {
+	windowStart time.Time
+	count       int
+}
+
+type refusalDeduper struct {
+	mu       sync.Mutex
+	capacity int
+	window   time.Duration
+	entries  map[refusalKey]refusalEntry
+	now      func() time.Time
+}
+
+func newRefusalDeduper(capacity int, window time.Duration) *refusalDeduper {
+	return &refusalDeduper{
+		capacity: capacity,
+		window:   window,
+		entries:  make(map[refusalKey]refusalEntry),
+		now:      time.Now,
+	}
+}
+
+// record tracks a refusal for key. It returns whether the refusal should be logged
+// and how many identical refusals were suppressed in the previous window.
+// The suppressed count is reported on the next line for that key, so if the pod
+// stops asking it is never reported. The first occurrence for a key is always logged.
+func (d *refusalDeduper) record(key refusalKey) (bool, int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := d.now()
+
+	if entry, ok := d.entries[key]; ok {
+		if now.Sub(entry.windowStart) >= d.window {
+			repeated := entry.count - 1
+			d.entries[key] = refusalEntry{windowStart: now, count: 1}
+			return true, repeated
+		}
+		entry.count++
+		d.entries[key] = entry
+		return false, 0
+	}
+
+	if len(d.entries) >= d.capacity {
+		for k, e := range d.entries {
+			if now.Sub(e.windowStart) >= d.window {
+				delete(d.entries, k)
+			}
+		}
+		if len(d.entries) >= d.capacity {
+			clear(d.entries)
+		}
+	}
+	d.entries[key] = refusalEntry{windowStart: now, count: 1}
+	return true, 0
+}
+
+// isSearchExpansion reports whether host is an unlisted name produced by kubelet's ndots:5
+// search-domain expansion of a base name that the pod's policy actually permits.
+// It tests whether stripping one of the caller pod's expected search suffixes:
+//  1. the pod's own first search entry (<namespace>.svc.<clusterDomain>),
+//  2. the remaining search entries from the agent's /etc/resolv.conf (e.g. svc.<clusterDomain>),
+//  3. the cluster domain itself (<clusterDomain>),
+//
+// produces a base name permitted by the policy.
+// If stripping a valid search suffix yields a permitted base name, the refusal is expected
+// resolver noise under ndots:5 and is logged at V(1).
+// Real mismatches—where the base name is not in policy, or where the pod asks for an allowed
+// short name qualified in a different namespace (e.g. backend.other-ns.svc.cluster.local)—do
+// not match an allowed base name and remain logged at V(0).
+func (h *EgressHandler) isSearchExpansion(pod *PodInfo, policy *portalsv1.EgressPolicy, host string) bool {
+	if policy == nil {
+		return false
+	}
+	cleanHost := strings.Trim(strings.ToLower(proxy.HostWithoutPort(host)), ".")
+	check := func(sd string) bool {
+		sd = strings.Trim(sd, ".")
+		if sd != "" && strings.HasSuffix(cleanHost, "."+sd) {
+			base := strings.TrimSuffix(cleanHost, "."+sd)
+			return base != "" && (policy.CouldMatch(portalsv1.ProtocolHTTP, base) || policy.CouldMatch(portalsv1.ProtocolHTTPS, base))
+		}
+		return false
+	}
+	if pod != nil && pod.Namespace != "" && h.podSearchRest != "" {
+		if check(pod.Namespace + "." + h.podSearchRest) {
+			return true
+		}
+	}
+	start := 0
+	if h.podSearchRest != "" && len(h.searchDomains) > 0 {
+		start = 1
+	}
+	for _, sd := range h.searchDomains[start:] {
+		if check(sd) {
+			return true
+		}
+	}
+	return h.clusterDomain != "" && check(h.clusterDomain)
+}
+
 // EvaluateQuery evaluates a DNS query for the caller at clientAddr in a single decision step,
 // logging refused and dropped queries with source address, pod identity, query name, and reason.
 func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr) dns.QueryDecision {
@@ -238,6 +353,31 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 		decision = dns.DecisionNXDomain
 	}
 
+	logger := scoped.Log(ctx)
+	if h.isSearchExpansion(pod, policy, host) {
+		logger = logger.V(1)
+	}
+	if !logger.Enabled() {
+		return decision
+	}
+
+	podKey := ""
+	if pod != nil {
+		podKey = pod.UID
+	} else if clientAddr != nil {
+		podKey = clientIP(clientAddr)
+	}
+
+	cleanHost := strings.Trim(strings.ToLower(proxy.HostWithoutPort(host)), ".")
+	shouldLog, repeated := h.deduper.record(refusalKey{
+		caller: podKey,
+		name:   cleanHost,
+		reason: reason,
+	})
+	if !shouldLog {
+		return decision
+	}
+
 	src := ""
 	if clientAddr != nil {
 		src = clientAddr.String()
@@ -254,7 +394,10 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 		"reason", reason,
 		"action", action,
 	)
-	scoped.Log(ctx).Info("dns query refused or dropped", args...)
+	if repeated > 0 {
+		args = append(args, "repeated", repeated)
+	}
+	logger.Info("dns query refused or dropped", args...)
 	return decision
 }
 

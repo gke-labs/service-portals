@@ -2248,3 +2248,193 @@ func TestEgressHandler_EvaluateQuery_Logging(t *testing.T) {
 		})
 	}
 }
+
+func TestEgressHandler_EvaluateQuery_Deduplication(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundUID := "pod-bound-uid"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "sandbox",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.1.10"},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+	baseTime := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	var currTime time.Time
+	handler.deduper.now = func() time.Time { return currTime }
+	handler.deduper.capacity = 2
+	handler.deduper.window = 10 * time.Second
+
+	addr := &net.UDPAddr{IP: net.ParseIP("10.244.1.10"), Port: 54321}
+
+	steps := []struct {
+		name         string
+		host         string
+		qtype        dnsmessage.Type
+		advance      time.Duration
+		wantLog      bool
+		wantRepeated string
+	}{
+		{
+			name:    "first logged",
+			host:    "forbidden.example.com",
+			qtype:   dnsmessage.TypeA,
+			advance: 0,
+			wantLog: true,
+		},
+		{
+			name:    "repeat suppressed",
+			host:    "forbidden.example.com",
+			qtype:   dnsmessage.TypeAAAA,
+			advance: time.Second,
+			wantLog: false,
+		},
+		{
+			name:    "repeat suppressed again",
+			host:    "forbidden.example.com",
+			qtype:   dnsmessage.TypeA,
+			advance: time.Second,
+			wantLog: false,
+		},
+		{
+			name:         "logged again after window with suppressed count",
+			host:         "forbidden.example.com",
+			qtype:        dnsmessage.TypeA,
+			advance:      10 * time.Second,
+			wantLog:      true,
+			wantRepeated: "repeated=2",
+		},
+		{
+			name:    "overflow key 1",
+			host:    "host-1.example.com",
+			qtype:   dnsmessage.TypeA,
+			advance: 0,
+			wantLog: true,
+		},
+		{
+			name:    "overflow does not grow without bound",
+			host:    "host-2.example.com",
+			qtype:   dnsmessage.TypeA,
+			advance: 0,
+			wantLog: true,
+		},
+	}
+
+	for _, tc := range steps {
+		t.Run(tc.name, func(t *testing.T) {
+			currTime = baseTime.Add(tc.advance)
+			baseTime = currTime
+			var buf bytes.Buffer
+			ctx := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf))))
+			got := handler.EvaluateQuery(ctx, tc.host, tc.qtype, addr)
+			if got != dns.DecisionNXDomain {
+				t.Fatalf("EvaluateQuery(%q) = %v, want DecisionNXDomain", tc.host, got)
+			}
+			out := buf.String()
+			if !tc.wantLog {
+				if len(out) > 0 {
+					t.Fatalf("expected suppressed query to produce no log, got:\n%s", out)
+				}
+				return
+			}
+			if !strings.Contains(out, `name="`+tc.host+`"`) {
+				t.Fatalf("log missing name %q, got:\n%s", tc.host, out)
+			}
+			if tc.wantRepeated != "" {
+				if !strings.Contains(out, tc.wantRepeated) {
+					t.Fatalf("log missing %q, got:\n%s", tc.wantRepeated, out)
+				}
+			} else if strings.Contains(out, "repeated=") {
+				t.Fatalf("unexpected repeated field in log:\n%s", out)
+			}
+		})
+	}
+
+	handler.deduper.mu.Lock()
+	mapSize := len(handler.deduper.entries)
+	handler.deduper.mu.Unlock()
+	if mapSize > handler.deduper.capacity {
+		t.Fatalf("deduper entries %d exceeded capacity %d", mapSize, handler.deduper.capacity)
+	}
+}
+
+func TestEgressHandler_EvaluateQuery_SearchDomainExpansion(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundUID := "pod-bound-uid"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "sandbox",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.1.10"},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"api.github.com", "backend"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+	handler.searchDomains = []string{"portal-system.svc.cluster.local", "svc.cluster.local", "cluster.local"}
+	handler.podSearchRest = "svc.cluster.local"
+	handler.clusterDomain = "cluster.local"
+
+	addr := &net.UDPAddr{IP: net.ParseIP("10.244.1.10"), Port: 54321}
+
+	tests := []struct {
+		name         string
+		host         string
+		verbosity    int
+		wantDecision dns.QueryDecision
+		wantLog      bool
+	}{
+		{"search expansion suppressed at V(0)", "api.github.com.sandbox.svc.cluster.local", 0, dns.DecisionNXDomain, false},
+		{"svc search expansion suppressed at V(0)", "api.github.com.svc.cluster.local", 0, dns.DecisionNXDomain, false},
+		{"cluster search expansion suppressed at V(0)", "api.github.com.cluster.local", 0, dns.DecisionNXDomain, false},
+		{"search expansion logged at V(1)", "api.github.com.sandbox.svc.cluster.local", 1, dns.DecisionNXDomain, true},
+		{"unpermitted name expansion logged at V(0)", "evil.com.sandbox.svc.cluster.local", 0, dns.DecisionNXDomain, true},
+		{"allowed short name in different namespace FQDN logged at V(0)", "backend.other-ns.svc.cluster.local", 0, dns.DecisionNXDomain, true},
+		{"allowed query answered", "api.github.com", 0, dns.DecisionAllow, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			opts := []textlogger.ConfigOption{textlogger.Output(&buf)}
+			if tc.verbosity > 0 {
+				opts = append(opts, textlogger.Verbosity(tc.verbosity))
+			}
+			ctx := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(opts...)))
+			got := handler.EvaluateQuery(ctx, tc.host, dnsmessage.TypeA, addr)
+			if got != tc.wantDecision {
+				t.Fatalf("EvaluateQuery(%q) = %v, want %v", tc.host, got, tc.wantDecision)
+			}
+			out := buf.String()
+			if tc.wantLog && !strings.Contains(out, `name="`+tc.host+`"`) {
+				t.Errorf("expected log for %q, got:\n%s", tc.host, out)
+			}
+			if !tc.wantLog && len(out) > 0 {
+				t.Errorf("expected no log for %q, got:\n%s", tc.host, out)
+			}
+		})
+	}
+}
