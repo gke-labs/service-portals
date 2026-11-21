@@ -502,7 +502,7 @@ func Run(ctx context.Context, config Config) error {
 				if targetHost != "" && (targetHost == h || strings.HasPrefix(h, targetHost+".")) {
 					return dns.DecisionAllow
 				}
-				return dns.DecisionDeny
+				return dns.DecisionDefault
 			})
 		}
 

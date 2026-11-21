@@ -233,9 +233,9 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 			reason = "pod has no policy"
 		}
 	} else {
-		action = "refused"
+		action = "NXDOMAIN"
 		reason = "name not in policy"
-		decision = dns.DecisionDeny
+		decision = dns.DecisionNXDomain
 	}
 
 	src := ""

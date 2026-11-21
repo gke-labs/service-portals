@@ -33,12 +33,14 @@ import (
 type QueryDecision int
 
 const (
-	// DecisionDeny indicates the query does not match and should be refused (NXDOMAIN) or forwarded.
-	DecisionDeny QueryDecision = iota
+	// DecisionDefault indicates the evaluator has no opinion and defers to the server's default action (forward or NXDOMAIN).
+	DecisionDefault QueryDecision = iota
 	// DecisionAllow indicates the query is allowed and should be answered with the proxy IP.
 	DecisionAllow
 	// DecisionDrop indicates the query should be silently dropped without response.
 	DecisionDrop
+	// DecisionNXDomain indicates the query is actively rejected and should be answered with NXDOMAIN regardless of DefaultAction.
+	DecisionNXDomain
 )
 
 // QueryEvaluator evaluates a DNS query for a client in a single decision step.
@@ -131,7 +133,9 @@ func (s *Server) handleQuery(ctx context.Context, reqBytes []byte, clientAddr ne
 			return nil, nil
 		case DecisionAllow:
 			matched = true
-		case DecisionDeny:
+		case DecisionNXDomain:
+			return nxdomainResponse(&msg)
+		case DecisionDefault:
 			matched = false
 		}
 	}
@@ -239,6 +243,10 @@ func (s *Server) handleQuery(ctx context.Context, reqBytes []byte, clientAddr ne
 	}
 
 	// Default: deny with NXDOMAIN
+	return nxdomainResponse(&msg)
+}
+
+func nxdomainResponse(msg *dnsmessage.Message) ([]byte, error) {
 	resp := dnsmessage.Message{
 		Header: dnsmessage.Header{
 			ID:                 msg.Header.ID,
