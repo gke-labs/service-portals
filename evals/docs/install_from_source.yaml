@@ -19,6 +19,7 @@ questions:
   - "How do I build and deploy from source?"
 documents_to_cite:
   - "README.md"
+  - "llms.txt"
 expected_key_elements:
   - "IMAGE_PREFIX="
   - "ap deploy //..."
