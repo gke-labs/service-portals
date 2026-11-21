@@ -15,6 +15,7 @@
 package portals
 
 import (
+	"container/list"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -26,6 +27,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gke-labs/service-portals/pkg/dns"
 	portalsv1 "github.com/gke-labs/service-portals/pkg/portals/v1"
@@ -46,6 +49,8 @@ type EgressHandler struct {
 	searchDomains []string // all entries from /etc/resolv.conf search line
 	clusterDomain string   // cluster domain parsed from <namespace>.svc.<domain>
 	podSearchRest string   // search suffix after namespace from entry 0, e.g. "svc.cluster.local"
+	deduper       *refusalDeduper
+	initDeduper   sync.Once
 }
 
 // NewEgressHandler creates an EgressHandler that resolves caller pods via podMap,
@@ -64,6 +69,7 @@ func NewEgressHandler(podMap *PodMap, store *portalsv1.BindingStore, transport h
 		searchDomains: searches,
 		clusterDomain: clusterDomain,
 		podSearchRest: podSearchRest,
+		deduper:       newRefusalDeduper(defaultMaxRefusalItems, defaultRefusalWindow),
 	}
 }
 
@@ -210,6 +216,119 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 	return h.signer.GetCertificate(info)
 }
 
+const (
+	defaultRefusalWindow   = 10 * time.Second
+	defaultMaxRefusalItems = 1000
+)
+
+type refusalKey struct {
+	caller string // pod UID or client IP
+	name   string // normalized query host
+	reason string // refusal reason
+}
+
+type refusalEntry struct {
+	key         refusalKey
+	windowStart time.Time
+	count       int
+}
+
+type refusalDeduper struct {
+	mu       sync.Mutex
+	capacity int
+	window   time.Duration
+	entries  map[refusalKey]*list.Element
+	order    *list.List
+	now      func() time.Time
+}
+
+func newRefusalDeduper(capacity int, window time.Duration) *refusalDeduper {
+	if capacity <= 0 {
+		capacity = defaultMaxRefusalItems
+	}
+	if window <= 0 {
+		window = defaultRefusalWindow
+	}
+	return &refusalDeduper{
+		capacity: capacity,
+		window:   window,
+		entries:  make(map[refusalKey]*list.Element),
+		order:    list.New(),
+	}
+}
+
+func (d *refusalDeduper) record(key refusalKey) (bool, int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := time.Now()
+	if d.now != nil {
+		now = d.now()
+	}
+
+	if elem, ok := d.entries[key]; ok {
+		entry := elem.Value.(*refusalEntry)
+		d.order.MoveToFront(elem)
+		if now.Sub(entry.windowStart) >= d.window {
+			prevCount := entry.count
+			entry.windowStart = now
+			entry.count = 1
+			return true, prevCount
+		}
+		entry.count++
+		return false, entry.count
+	}
+
+	if d.capacity > 0 && len(d.entries) >= d.capacity {
+		if oldest := d.order.Back(); oldest != nil {
+			d.order.Remove(oldest)
+			delete(d.entries, oldest.Value.(*refusalEntry).key)
+		}
+	}
+	elem := d.order.PushFront(&refusalEntry{key: key, windowStart: now, count: 1})
+	d.entries[key] = elem
+	return true, 1
+}
+
+func (h *EgressHandler) getDeduper() *refusalDeduper {
+	h.initDeduper.Do(func() {
+		if h.deduper == nil {
+			h.deduper = newRefusalDeduper(defaultMaxRefusalItems, defaultRefusalWindow)
+		}
+	})
+	return h.deduper
+}
+
+func (h *EgressHandler) isSearchExpansion(pod *PodInfo, policy *portalsv1.EgressPolicy, host string) bool {
+	if policy == nil {
+		return false
+	}
+	cleanHost := strings.Trim(strings.ToLower(proxy.HostWithoutPort(host)), ".")
+	check := func(sd string) bool {
+		sd = strings.Trim(sd, ".")
+		if sd != "" && strings.HasSuffix(cleanHost, "."+sd) {
+			base := strings.TrimSuffix(cleanHost, "."+sd)
+			return base != "" && (policy.CouldMatch(portalsv1.ProtocolHTTP, base) || policy.CouldMatch(portalsv1.ProtocolHTTPS, base))
+		}
+		return false
+	}
+	if pod != nil && pod.Namespace != "" && h.podSearchRest != "" {
+		if check(pod.Namespace + "." + h.podSearchRest) {
+			return true
+		}
+	}
+	start := 0
+	if h.podSearchRest != "" && len(h.searchDomains) > 0 {
+		start = 1
+	}
+	for _, sd := range h.searchDomains[start:] {
+		if check(sd) {
+			return true
+		}
+	}
+	return h.clusterDomain != "" && check(h.clusterDomain)
+}
+
 // EvaluateQuery evaluates a DNS query for the caller at clientAddr in a single decision step,
 // logging refused and dropped queries with source address, pod identity, query name, and reason.
 func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr) dns.QueryDecision {
@@ -238,6 +357,31 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 		decision = dns.DecisionNXDomain
 	}
 
+	logger := scoped.Log(ctx)
+	if h.isSearchExpansion(pod, policy, host) {
+		logger = logger.V(1)
+	}
+	if !logger.Enabled() {
+		return decision
+	}
+
+	podKey := ""
+	if pod != nil {
+		podKey = pod.UID
+	} else if clientAddr != nil {
+		podKey = clientIP(clientAddr)
+	}
+
+	cleanHost := strings.Trim(strings.ToLower(proxy.HostWithoutPort(host)), ".")
+	shouldLog, count := h.getDeduper().record(refusalKey{
+		caller: podKey,
+		name:   cleanHost,
+		reason: reason,
+	})
+	if !shouldLog {
+		return decision
+	}
+
 	src := ""
 	if clientAddr != nil {
 		src = clientAddr.String()
@@ -254,7 +398,10 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 		"reason", reason,
 		"action", action,
 	)
-	scoped.Log(ctx).Info("dns query refused or dropped", args...)
+	if count > 1 {
+		args = append(args, "count", count, "repeated", count-1)
+	}
+	logger.Info("dns query refused or dropped", args...)
 	return decision
 }
 

@@ -2248,3 +2248,253 @@ func TestEgressHandler_EvaluateQuery_Logging(t *testing.T) {
 		})
 	}
 }
+
+func TestEgressHandler_EvaluateQuery_Deduplication(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundUID := "pod-bound-uid"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "sandbox",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.1.10"},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{
+						Hostnames: []string{"allowed.example.com"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+	currTime := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	handler.deduper.now = func() time.Time { return currTime }
+	handler.deduper.window = 10 * time.Second
+
+	addr := &net.UDPAddr{IP: net.ParseIP("10.244.1.10"), Port: 54321}
+
+	// 1. First occurrence of forbidden name: logged immediately without count/repeated.
+	var buf1 bytes.Buffer
+	ctx1 := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf1))))
+	got1 := handler.EvaluateQuery(ctx1, "forbidden.example.com", dnsmessage.TypeA, addr)
+	if got1 != dns.DecisionNXDomain {
+		t.Fatalf("EvaluateQuery() = %v, want DecisionNXDomain", got1)
+	}
+	out1 := buf1.String()
+	if !strings.Contains(out1, `name="forbidden.example.com"`) || !strings.Contains(out1, `type="A"`) {
+		t.Fatalf("expected first query to be logged, got:\n%s", out1)
+	}
+	if strings.Contains(out1, "count=") || strings.Contains(out1, "repeated=") {
+		t.Fatalf("first occurrence should not have count or repeated, got:\n%s", out1)
+	}
+
+	// 2. Second query within window (AAAA type for same name and reason): suppressed.
+	currTime = currTime.Add(100 * time.Millisecond)
+	var buf2 bytes.Buffer
+	ctx2 := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf2))))
+	got2 := handler.EvaluateQuery(ctx2, "forbidden.example.com", dnsmessage.TypeAAAA, addr)
+	if got2 != dns.DecisionNXDomain {
+		t.Fatalf("EvaluateQuery() = %v, want DecisionNXDomain", got2)
+	}
+	if buf2.Len() > 0 {
+		t.Fatalf("expected repeated query within window to be suppressed, got:\n%s", buf2.String())
+	}
+
+	// 3. Third query within window (A retry): suppressed.
+	currTime = currTime.Add(1 * time.Second)
+	var buf3 bytes.Buffer
+	ctx3 := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf3))))
+	got3 := handler.EvaluateQuery(ctx3, "forbidden.example.com", dnsmessage.TypeA, addr)
+	if got3 != dns.DecisionNXDomain {
+		t.Fatalf("EvaluateQuery() = %v, want DecisionNXDomain", got3)
+	}
+	if buf3.Len() > 0 {
+		t.Fatalf("expected repeated retry query within window to be suppressed, got:\n%s", buf3.String())
+	}
+
+	// 4. Query for a DIFFERENT forbidden name: logged immediately (not suppressed by first name).
+	var buf4 bytes.Buffer
+	ctx4 := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf4))))
+	got4 := handler.EvaluateQuery(ctx4, "other-forbidden.example.com", dnsmessage.TypeA, addr)
+	if got4 != dns.DecisionNXDomain {
+		t.Fatalf("EvaluateQuery() = %v, want DecisionNXDomain", got4)
+	}
+	out4 := buf4.String()
+	if !strings.Contains(out4, `name="other-forbidden.example.com"`) {
+		t.Fatalf("expected different name to be logged, got:\n%s", out4)
+	}
+
+	// 5. Query after the 10s window closes: logged on the next line with count=3 and repeated=2.
+	currTime = currTime.Add(10 * time.Second) // total elapsed is now > 10s from window start
+	var buf5 bytes.Buffer
+	ctx5 := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf5))))
+	got5 := handler.EvaluateQuery(ctx5, "forbidden.example.com", dnsmessage.TypeA, addr)
+	if got5 != dns.DecisionNXDomain {
+		t.Fatalf("EvaluateQuery() = %v, want DecisionNXDomain", got5)
+	}
+	out5 := buf5.String()
+	if !strings.Contains(out5, `name="forbidden.example.com"`) {
+		t.Fatalf("expected query after window expiration to be logged, got:\n%s", out5)
+	}
+	if !strings.Contains(out5, `count=3`) {
+		t.Errorf("expected log to contain count=3, got:\n%s", out5)
+	}
+	if !strings.Contains(out5, `repeated=2`) {
+		t.Errorf("expected log to contain repeated=2, got:\n%s", out5)
+	}
+
+	// 6. Next query in the new window: suppressed again.
+	currTime = currTime.Add(500 * time.Millisecond)
+	var buf6 bytes.Buffer
+	ctx6 := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf6))))
+	got6 := handler.EvaluateQuery(ctx6, "forbidden.example.com", dnsmessage.TypeA, addr)
+	if got6 != dns.DecisionNXDomain {
+		t.Fatalf("EvaluateQuery() = %v, want DecisionNXDomain", got6)
+	}
+	if buf6.Len() > 0 {
+		t.Fatalf("expected repeat in new window to be suppressed, got:\n%s", buf6.String())
+	}
+}
+
+func TestEgressHandler_EvaluateQuery_BoundedMemory(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundUID := "pod-bound-uid"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "sandbox",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.1.10"},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+	const capacity = 5
+	handler.deduper = newRefusalDeduper(capacity, 10*time.Second)
+
+	addr := &net.UDPAddr{IP: net.ParseIP("10.244.1.10"), Port: 54321}
+	ctx := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(io.Discard))))
+
+	// Query 20 distinct names
+	for i := 0; i < 20; i++ {
+		host := fmt.Sprintf("host-%d.example.com", i)
+		handler.EvaluateQuery(ctx, host, dnsmessage.TypeA, addr)
+	}
+
+	handler.deduper.mu.Lock()
+	entryCount := len(handler.deduper.entries)
+	listCount := handler.deduper.order.Len()
+	handler.deduper.mu.Unlock()
+
+	if entryCount > capacity {
+		t.Errorf("expected deduper entries to be bounded by %d, got %d", capacity, entryCount)
+	}
+	if listCount > capacity {
+		t.Errorf("expected deduper LRU list to be bounded by %d, got %d", capacity, listCount)
+	}
+}
+
+func TestEgressHandler_EvaluateQuery_SearchDomainExpansion(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundUID := "pod-bound-uid"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "sandbox",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.1.10"},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"api.github.com"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+	handler.searchDomains = []string{"portal-system.svc.cluster.local", "svc.cluster.local", "cluster.local"}
+	handler.podSearchRest = "svc.cluster.local"
+	handler.clusterDomain = "cluster.local"
+
+	addr := &net.UDPAddr{IP: net.ParseIP("10.244.1.10"), Port: 54321}
+
+	// 1. Refusals for search-domain expansions of allowed name at default verbosity (V=0) are suppressed (no log)
+	expansions := []string{
+		"api.github.com.sandbox.svc.cluster.local",
+		"api.github.com.svc.cluster.local",
+		"api.github.com.cluster.local",
+	}
+	for _, host := range expansions {
+		var buf bytes.Buffer
+		ctx := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf))))
+		got := handler.EvaluateQuery(ctx, host, dnsmessage.TypeA, addr)
+		if got != dns.DecisionNXDomain {
+			t.Errorf("EvaluateQuery(%q) = %v, want DecisionNXDomain", host, got)
+		}
+		if buf.Len() > 0 {
+			t.Errorf("expected search-domain expansion %q to produce no log at V=0, got:\n%s", host, buf.String())
+		}
+	}
+
+	// 2. Refusal for search-domain expansion of allowed name at V(1) IS logged
+	for _, host := range expansions {
+		var buf bytes.Buffer
+		logger := textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&buf), textlogger.Verbosity(1)))
+		ctx := klog.NewContext(t.Context(), logger)
+		got := handler.EvaluateQuery(ctx, host, dnsmessage.TypeA, addr)
+		if got != dns.DecisionNXDomain {
+			t.Errorf("EvaluateQuery(%q) = %v, want DecisionNXDomain", host, got)
+		}
+		out := buf.String()
+		if !strings.Contains(out, `name="`+host+`"`) {
+			t.Errorf("expected search-domain expansion %q to be logged at V=1, got:\n%s", host, out)
+		}
+	}
+
+	// 3. Real mismatch: query for an unpermitted name expanded with search domain IS logged even at V=0
+	var bufMismatch bytes.Buffer
+	ctxMismatch := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&bufMismatch))))
+	gotMismatch := handler.EvaluateQuery(ctxMismatch, "evil.com.sandbox.svc.cluster.local", dnsmessage.TypeA, addr)
+	if gotMismatch != dns.DecisionNXDomain {
+		t.Errorf("EvaluateQuery(evil.com) = %v, want DecisionNXDomain", gotMismatch)
+	}
+	outMismatch := bufMismatch.String()
+	if !strings.Contains(outMismatch, `name="evil.com.sandbox.svc.cluster.local"`) {
+		t.Errorf("expected real mismatch to be logged at V=0, got:\n%s", outMismatch)
+	}
+
+	// 4. Allowed name itself is allowed without refusal logging
+	var bufAllowed bytes.Buffer
+	ctxAllowed := klog.NewContext(t.Context(), textlogger.NewLogger(textlogger.NewConfig(textlogger.Output(&bufAllowed))))
+	gotAllowed := handler.EvaluateQuery(ctxAllowed, "api.github.com", dnsmessage.TypeA, addr)
+	if gotAllowed != dns.DecisionAllow {
+		t.Errorf("EvaluateQuery(api.github.com) = %v, want DecisionAllow", gotAllowed)
+	}
+	if bufAllowed.Len() > 0 {
+		t.Errorf("expected allowed query to produce no refusal log, got:\n%s", bufAllowed.String())
+	}
+}
