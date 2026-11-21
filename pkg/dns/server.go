@@ -126,77 +126,83 @@ func (s *Server) handleQuery(ctx context.Context, reqBytes []byte, clientAddr ne
 	q := msg.Questions[0]
 	qname := strings.TrimSuffix(strings.ToLower(q.Name.String()), ".")
 
-	matched := false
+	decision := DecisionDefault
 	if s.config.Evaluator != nil {
-		switch s.config.Evaluator.EvaluateQuery(ctx, qname, q.Type, clientAddr) {
-		case DecisionDrop:
-			return nil, nil
-		case DecisionAllow:
-			matched = true
-		case DecisionNXDomain:
-			return nxdomainResponse(&msg)
-		case DecisionDefault:
-			matched = false
-		}
+		decision = s.config.Evaluator.EvaluateQuery(ctx, qname, q.Type, clientAddr)
 	}
 
-	if matched {
-		resp := dnsmessage.Message{
-			Header: dnsmessage.Header{
-				ID:                 msg.Header.ID,
-				Response:           true,
-				OpCode:             msg.Header.OpCode,
-				Authoritative:      true,
-				RecursionDesired:   msg.Header.RecursionDesired,
-				RecursionAvailable: true,
-				RCode:              dnsmessage.RCodeSuccess,
-			},
-			Questions: msg.Questions,
-		}
+	switch decision {
+	case DecisionAllow:
+		return s.allowResponse(&msg, q)
+	case DecisionDefault:
+		return s.applyDefaultAction(reqBytes, &msg, qname, isTCP)
+	case DecisionDrop:
+		return nil, nil
+	case DecisionNXDomain:
+		return nxdomainResponse(&msg)
+	default:
+		// Unknown decision value fails closed (not answered as allowed).
+		return nxdomainResponse(&msg)
+	}
+}
 
-		switch q.Type {
-		case dnsmessage.TypeA:
-			if s.config.ProxyIPv4 != nil {
-				ip4 := s.config.ProxyIPv4.To4()
-				if ip4 != nil {
-					var a [4]byte
-					copy(a[:], ip4)
-					resp.Answers = append(resp.Answers, dnsmessage.Resource{
-						Header: dnsmessage.ResourceHeader{
-							Name:  q.Name,
-							Type:  dnsmessage.TypeA,
-							Class: dnsmessage.ClassINET,
-							TTL:   s.config.TTL,
-						},
-						Body: &dnsmessage.AResource{A: a},
-					})
-				}
-			}
-		case dnsmessage.TypeAAAA:
-			if s.config.ProxyIPv6 != nil {
-				ip6 := s.config.ProxyIPv6.To16()
-				if ip6 != nil {
-					var aaaa [16]byte
-					copy(aaaa[:], ip6)
-					resp.Answers = append(resp.Answers, dnsmessage.Resource{
-						Header: dnsmessage.ResourceHeader{
-							Name:  q.Name,
-							Type:  dnsmessage.TypeAAAA,
-							Class: dnsmessage.ClassINET,
-							TTL:   s.config.TTL,
-						},
-						Body: &dnsmessage.AAAAResource{AAAA: aaaa},
-					})
-				}
-			}
-		default:
-			// For non-address queries (TXT, MX, etc.) on matched policy hosts,
-			// respond with NOERROR and empty answer (RFC NODATA).
-		}
-		return resp.Pack()
+func (s *Server) allowResponse(msg *dnsmessage.Message, q dnsmessage.Question) ([]byte, error) {
+	resp := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 msg.Header.ID,
+			Response:           true,
+			OpCode:             msg.Header.OpCode,
+			Authoritative:      true,
+			RecursionDesired:   msg.Header.RecursionDesired,
+			RecursionAvailable: true,
+			RCode:              dnsmessage.RCodeSuccess,
+		},
+		Questions: msg.Questions,
 	}
 
-	// Host not matched by policy
+	switch q.Type {
+	case dnsmessage.TypeA:
+		if s.config.ProxyIPv4 != nil {
+			ip4 := s.config.ProxyIPv4.To4()
+			if ip4 != nil {
+				var a [4]byte
+				copy(a[:], ip4)
+				resp.Answers = append(resp.Answers, dnsmessage.Resource{
+					Header: dnsmessage.ResourceHeader{
+						Name:  q.Name,
+						Type:  dnsmessage.TypeA,
+						Class: dnsmessage.ClassINET,
+						TTL:   s.config.TTL,
+					},
+					Body: &dnsmessage.AResource{A: a},
+				})
+			}
+		}
+	case dnsmessage.TypeAAAA:
+		if s.config.ProxyIPv6 != nil {
+			ip6 := s.config.ProxyIPv6.To16()
+			if ip6 != nil {
+				var aaaa [16]byte
+				copy(aaaa[:], ip6)
+				resp.Answers = append(resp.Answers, dnsmessage.Resource{
+					Header: dnsmessage.ResourceHeader{
+						Name:  q.Name,
+						Type:  dnsmessage.TypeAAAA,
+						Class: dnsmessage.ClassINET,
+						TTL:   s.config.TTL,
+					},
+					Body: &dnsmessage.AAAAResource{AAAA: aaaa},
+				})
+			}
+		}
+	default:
+		// For non-address queries (TXT, MX, etc.) on matched policy hosts,
+		// respond with NOERROR and empty answer (RFC NODATA).
+	}
+	return resp.Pack()
+}
+
+func (s *Server) applyDefaultAction(reqBytes []byte, msg *dnsmessage.Message, qname string, isTCP bool) ([]byte, error) {
 	if strings.EqualFold(s.config.DefaultAction, "Allow") {
 		respBytes, err := s.forward(reqBytes, isTCP)
 		if err != nil {
@@ -243,7 +249,7 @@ func (s *Server) handleQuery(ctx context.Context, reqBytes []byte, clientAddr ne
 	}
 
 	// Default: deny with NXDOMAIN
-	return nxdomainResponse(&msg)
+	return nxdomainResponse(msg)
 }
 
 func nxdomainResponse(msg *dnsmessage.Message) ([]byte, error) {
