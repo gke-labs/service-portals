@@ -87,34 +87,64 @@ func NewRuleRouter(rulesDir string, fallback http.Handler, caCertPath, caKeyPath
 	}
 }
 
+type ruleDecision int
+
+const (
+	ruleDecisionRoute ruleDecision = iota
+	ruleDecisionFallback
+	ruleDecisionDeny
+)
+
+// evaluateHTTP decides what the router does with a host over HTTP.
+func (rr *RuleRouter) evaluateHTTP(host string) (ruleDecision, *Rule) {
+	cleanHost := strings.TrimSuffix(strings.ToLower(proxy.HostWithoutPort(host)), ".")
+
+	rr.mu.RLock()
+	defer rr.mu.RUnlock()
+
+	if cleanHost != "" {
+		if rule, ok := rr.routes[cleanHost]; ok {
+			return ruleDecisionRoute, rule
+		}
+		for rHost, r := range rr.routes {
+			if strings.HasPrefix(cleanHost, rHost+".") {
+				return ruleDecisionRoute, r
+			}
+		}
+	}
+
+	if rr.fallback != nil {
+		return ruleDecisionFallback, nil
+	}
+
+	return ruleDecisionDeny, nil
+}
+
 var _ dns.QueryEvaluator = (*RuleRouter)(nil)
 
 // EvaluateQuery evaluates a DNS query against configured rules or fallback target,
 // returning DecisionAllow or DecisionDefault (deferring to the server's default action; never drops).
 func (rr *RuleRouter) EvaluateQuery(_ context.Context, host string, _ dnsmessage.Type, _ net.Addr) dns.QueryDecision {
-	host = proxy.HostWithoutPort(host)
-	host = strings.TrimSuffix(strings.ToLower(host), ".")
-
-	rr.mu.RLock()
-	defer rr.mu.RUnlock()
-
-	if _, ok := rr.routes[host]; ok {
+	decision, _ := rr.evaluateHTTP(host)
+	switch decision {
+	case ruleDecisionRoute:
 		return dns.DecisionAllow
-	}
-	for rHost := range rr.routes {
-		if strings.HasPrefix(host, rHost+".") {
-			return dns.DecisionAllow
+	case ruleDecisionFallback:
+		// Where DNS differs from HTTP: with a fallback configured, HTTP proxies
+		// anything, but DNS answers with the proxy address only for route hosts
+		// and the fallback's own target, and otherwise defers to the server's default.
+		cleanHost := strings.TrimSuffix(strings.ToLower(proxy.HostWithoutPort(host)), ".")
+		if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok && fallbackProxy.TargetURL != nil {
+			targetHost := strings.ToLower(proxy.HostWithoutPort(fallbackProxy.TargetURL.Host))
+			if targetHost != "" && (targetHost == cleanHost || strings.HasPrefix(cleanHost, targetHost+".")) {
+				return dns.DecisionAllow
+			}
 		}
+		return dns.DecisionDefault
+	default:
+		// Covers ruleDecisionDeny and any unknown value.
+		return dns.DecisionDefault
 	}
-
-	if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok && fallbackProxy.TargetURL != nil {
-		targetHost := strings.ToLower(proxy.HostWithoutPort(fallbackProxy.TargetURL.Host))
-		if targetHost != "" && (targetHost == host || strings.HasPrefix(host, targetHost+".")) {
-			return dns.DecisionAllow
-		}
-	}
-
-	return dns.DecisionDefault
 }
 
 // loadRules reads YAML rules from the configured rulesDir and rebuilds the routing table.
@@ -248,33 +278,19 @@ func (rr *RuleRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	host = strings.ToLower(proxy.HostWithoutPort(host))
 
-	rr.mu.RLock()
-	rule, ok := rr.routes[host]
-	if !ok {
-		for rHost, r := range rr.routes {
-			if strings.HasPrefix(host, rHost+".") {
-				rule = r
-				ok = true
-				break
-			}
-		}
-	}
-	rr.mu.RUnlock()
-
-	if ok {
+	decision, rule := rr.evaluateHTTP(host)
+	switch decision {
+	case ruleDecisionRoute:
 		log.Printf("Request: %s %s | Matched rule: %s | Action: proxy", r.Method, host, rule.Name)
 		rule.Proxy.ServeHTTP(w, r)
-		return
-	}
-
-	if rr.fallback != nil {
+	case ruleDecisionFallback:
 		log.Printf("Request: %s %s | Matched rule: <none> | Action: fallback", r.Method, host)
 		rr.fallback.ServeHTTP(w, r)
-		return
+	default:
+		// Covers ruleDecisionDeny and any unknown value.
+		log.Printf("Request: %s %s | Matched rule: <none> | Action: denied", r.Method, host)
+		http.Error(w, "Access Denied: host not allowed by portal rules", http.StatusForbidden)
 	}
-
-	log.Printf("Request: %s %s | Matched rule: <none> | Action: denied", r.Method, host)
-	http.Error(w, "Access Denied: host not allowed by portal rules", http.StatusForbidden)
 }
 
 // GetCertificate implements the CertificateProvider interface to dynamically return certificates for TLS connections.
@@ -283,29 +299,19 @@ func (rr *RuleRouter) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certificat
 	if host == "" {
 		host = "localhost"
 	}
-	host = proxy.HostWithoutPort(host)
-	host = strings.ToLower(host)
+	host = strings.ToLower(proxy.HostWithoutPort(host))
 
-	rr.mu.RLock()
-	rule, ok := rr.routes[host]
-	if !ok {
-		for rHost, r := range rr.routes {
-			if strings.HasPrefix(host, rHost+".") {
-				rule = r
-				ok = true
-				break
-			}
-		}
-	}
-	rr.mu.RUnlock()
-
-	if ok {
+	decision, rule := rr.evaluateHTTP(host)
+	switch decision {
+	case ruleDecisionRoute:
 		return rule.Proxy.GetCertificate(info)
+	case ruleDecisionFallback:
+		if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok {
+			return fallbackProxy.GetCertificate(info)
+		}
+		fallthrough
+	default:
+		// Covers ruleDecisionDeny and any unknown value.
+		return nil, fmt.Errorf("no rule matches host %q and no fallback configured to sign certificate", host)
 	}
-
-	if fallbackProxy, ok := rr.fallback.(*proxy.HTTPProxy); ok {
-		return fallbackProxy.GetCertificate(info)
-	}
-
-	return nil, fmt.Errorf("no rule matches host %q and no fallback configured to sign certificate", host)
 }
