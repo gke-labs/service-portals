@@ -182,36 +182,32 @@ func (h *EgressHandler) GetCertificate(info *tls.ClientHelloInfo) (*tls.Certific
 		clientAddr = info.Conn.RemoteAddr()
 	}
 
-	pod, policy, err := h.resolveCaller(clientAddr)
-	if err != nil {
-		if pod != nil {
-			caller := podCaller(pod)
-			remoteIP := clientIP(clientAddr)
-			log.Printf("TLS handshake | Caller: %s (%s) | State: unbound | Action: drop", caller, remoteIP)
-			dns.HoldConnection(info.Context(), info.Conn)
-		}
-		return nil, err
-	}
-
 	host := strings.TrimSpace(info.ServerName)
-	if host == "" {
-		return nil, errors.New("missing server name in TLS handshake")
-	}
-	host = proxy.HostWithoutPort(host)
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	if host == "" {
-		return nil, errors.New("missing server name in TLS handshake")
-	}
+	cleanHost := strings.ToLower(strings.TrimSuffix(proxy.HostWithoutPort(host), "."))
 
-	if !policy.CouldMatch(portalsv1.ProtocolHTTPS, host) {
-		return nil, fmt.Errorf("access denied for caller %s: host %q not permitted by egress policy", podCaller(pod), host)
+	decision, pod, _ := h.evaluateHTTP(clientAddr, portalsv1.ProtocolHTTPS, cleanHost)
+	switch decision {
+	case httpDecisionHold:
+		caller := podCaller(pod)
+		remoteIP := clientIP(clientAddr)
+		log.Printf("TLS handshake | Caller: %s (%s) | State: unbound | Action: drop", caller, remoteIP)
+		dns.HoldConnection(info.Context(), info.Conn)
+		return nil, fmt.Errorf("unbound pod (%s)", pod.UID)
+	case httpDecisionRefuseUnknown:
+		return nil, fmt.Errorf("unknown caller (%s)", clientIP(clientAddr))
+	case httpDecisionRefuse:
+		if cleanHost == "" {
+			return nil, errors.New("missing server name in TLS handshake")
+		}
+		return nil, fmt.Errorf("access denied for caller %s: host %q not permitted by egress policy", podCaller(pod), cleanHost)
+	case httpDecisionAllow:
+		if h.signer == nil {
+			return nil, errors.New("no CA configured to sign certificate")
+		}
+		return h.signer.GetCertificate(info)
+	default:
+		return nil, errors.New("access denied")
 	}
-
-	if h.signer == nil {
-		return nil, errors.New("no CA configured to sign certificate")
-	}
-
-	return h.signer.GetCertificate(info)
 }
 
 const (
@@ -325,40 +321,67 @@ func (h *EgressHandler) isSearchExpansion(pod *PodInfo, policy *portalsv1.Egress
 	return h.clusterDomain != "" && check(h.clusterDomain)
 }
 
+type httpDecision int
+
+const (
+	httpDecisionAllow httpDecision = iota
+	httpDecisionHold
+	httpDecisionRefuse
+	httpDecisionRefuseUnknown
+)
+
+// evaluateHTTP decides what the proxy does with a caller and host for proto.
+func (h *EgressHandler) evaluateHTTP(clientAddr net.Addr, proto portalsv1.Protocol, host string) (httpDecision, *PodInfo, *portalsv1.EgressPolicy) {
+	pod, policy, err := h.resolveCaller(clientAddr)
+	if err != nil {
+		if pod == nil {
+			return httpDecisionRefuseUnknown, nil, nil
+		}
+		return httpDecisionHold, pod, nil
+	}
+
+	cleanHost := proxy.HostWithoutPort(host)
+	cleanHost = strings.TrimSuffix(strings.ToLower(cleanHost), ".")
+	if cleanHost != "" && policy.CouldMatch(proto, cleanHost) {
+		return httpDecisionAllow, pod, policy
+	}
+
+	return httpDecisionRefuse, pod, policy
+}
+
 // EvaluateQuery evaluates a DNS query for the caller at clientAddr in a single decision step,
 // logging refused and dropped queries with source address, pod identity, query name, and reason.
 func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr) dns.QueryDecision {
-	pod, policy, err := h.resolveCaller(clientAddr)
-	if err == nil {
-		cleanHost := proxy.HostWithoutPort(host)
-		cleanHost = strings.TrimSuffix(strings.ToLower(cleanHost), ".")
-		if policy.CouldMatch(portalsv1.ProtocolHTTP, cleanHost) || policy.CouldMatch(portalsv1.ProtocolHTTPS, cleanHost) {
-			return dns.DecisionAllow
-		}
+	decision, pod, policy := h.evaluateHTTP(clientAddr, portalsv1.ProtocolHTTP, host)
+	if decision == httpDecisionRefuse {
+		decision, pod, policy = h.evaluateHTTP(clientAddr, portalsv1.ProtocolHTTPS, host)
 	}
 
-	var reason, action string
-	var decision dns.QueryDecision
-	if err != nil {
-		action = "dropped"
-		decision = dns.DecisionDrop
-		if pod == nil {
-			reason = "unknown caller"
-		} else {
-			reason = "pod has no policy"
-		}
-	} else {
-		action = "NXDOMAIN"
-		reason = "name not in policy"
-		decision = dns.DecisionNXDomain
+	switch decision {
+	case httpDecisionAllow:
+		return dns.DecisionAllow
+	case httpDecisionHold:
+		h.logDNSQuery(ctx, host, qtype, clientAddr, pod, policy, "pod has no policy", "dropped")
+		return dns.DecisionDrop
+	case httpDecisionRefuseUnknown:
+		// Where DNS genuinely differs: an unidentified caller is dropped for DNS but refused for HTTP.
+		h.logDNSQuery(ctx, host, qtype, clientAddr, pod, policy, "unknown caller", "dropped")
+		return dns.DecisionDrop
+	case httpDecisionRefuse:
+		h.logDNSQuery(ctx, host, qtype, clientAddr, pod, policy, "name not in policy", "NXDOMAIN")
+		return dns.DecisionNXDomain
+	default:
+		return dns.DecisionDrop
 	}
+}
 
+func (h *EgressHandler) logDNSQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr, pod *PodInfo, policy *portalsv1.EgressPolicy, reason, action string) {
 	logger := scoped.Log(ctx)
 	if h.isSearchExpansion(pod, policy, host) {
 		logger = logger.V(1)
 	}
 	if !logger.Enabled() {
-		return decision
+		return
 	}
 
 	podKey := ""
@@ -375,7 +398,7 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 		reason: reason,
 	})
 	if !shouldLog {
-		return decision
+		return
 	}
 
 	src := ""
@@ -398,7 +421,6 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 		args = append(args, "repeated", repeated)
 	}
 	logger.Info("dns query refused or dropped", args...)
-	return decision
 }
 
 // ServeHTTP decides an intercepted request from the caller pod's bound policy.
@@ -409,24 +431,42 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientAddr := parseRemoteAddr(r.RemoteAddr)
-	pod, policy, err := h.resolveCaller(clientAddr)
-	if err != nil {
-		remoteIP := clientIP(clientAddr)
-		if pod == nil {
-			log.Printf("Request: %s %s | Caller: unknown (%s) | Action: denied", r.Method, r.Host, remoteIP)
-			http.Error(w, "Access Denied: unknown caller", http.StatusForbidden)
-		} else {
-			caller := podCaller(pod)
-			log.Printf("Request: %s %s | Caller: %s (%s) | State: unbound | Action: drop", r.Method, r.Host, caller, remoteIP)
-			// Hold the request with no response until the client's connection closes
-			// or the request is cancelled, so an unbound pod sees a timeout and retries
-			// rather than receiving a 403. By the time ServeHTTP returns, the client has
-			// gone, so no response is written.
-			if ctx := r.Context(); ctx != nil && ctx.Done() != nil {
-				<-ctx.Done()
-			}
+	proto := portalsv1.ProtocolHTTP
+	if r.TLS != nil {
+		proto = portalsv1.ProtocolHTTPS
+	}
+
+	decision, pod, policy := h.evaluateHTTP(clientAddr, proto, r.Host)
+	remoteIP := clientIP(clientAddr)
+
+	switch decision {
+	case httpDecisionRefuseUnknown:
+		log.Printf("Request: %s %s | Caller: unknown (%s) | Action: denied", r.Method, r.Host, remoteIP)
+		http.Error(w, "Access Denied: unknown caller", http.StatusForbidden)
+		return
+	case httpDecisionHold:
+		caller := podCaller(pod)
+		log.Printf("Request: %s %s | Caller: %s (%s) | State: unbound | Action: drop", r.Method, r.Host, caller, remoteIP)
+		// Hold the request with no response until the client's connection closes
+		// or the request is cancelled, so an unbound pod sees a timeout and retries
+		// rather than receiving a 403. By the time ServeHTTP returns, the client has
+		// gone, so no response is written.
+		if ctx := r.Context(); ctx != nil && ctx.Done() != nil {
+			<-ctx.Done()
 		}
 		return
+	case httpDecisionRefuse:
+		caller := podCaller(pod)
+		targetHost, port, err := requestTarget(r)
+		if err != nil {
+			log.Printf("Request: %s %q | Caller: %s | Action: denied (invalid destination: %v)", r.Method, r.Host, caller, err)
+			http.Error(w, "Access Denied: invalid destination host or port", http.StatusForbidden)
+			return
+		}
+		log.Printf("Request: %s %s:%d (proto: %s) | Caller: %s | Action: denied (no matching rule)", r.Method, targetHost, port, proto, caller)
+		http.Error(w, "Access Denied: request not allowed by egress policy", http.StatusForbidden)
+		return
+	case httpDecisionAllow:
 	}
 
 	caller := podCaller(pod)
@@ -436,11 +476,6 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Request: %s %q | Caller: %s | Action: denied (invalid destination: %v)", r.Method, r.Host, caller, err)
 		http.Error(w, "Access Denied: invalid destination host or port", http.StatusForbidden)
 		return
-	}
-
-	proto := portalsv1.ProtocolHTTP
-	if r.TLS != nil {
-		proto = portalsv1.ProtocolHTTPS
 	}
 
 	rule := policy.Match(proto, targetHost, port)

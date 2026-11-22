@@ -1135,6 +1135,37 @@ func TestEgressHandler_GetCertificate(t *testing.T) {
 		}
 	})
 
+	t.Run("unbound pod with empty server name holds TLS connection", func(t *testing.T) {
+		serverConn, clientConn := net.Pipe()
+		defer clientConn.Close()
+		defer serverConn.Close()
+
+		info := &tls.ClientHelloInfo{
+			ServerName: "",
+			Conn:       &mockConn{Conn: serverConn, remoteAddr: parseRemoteAddr(unboundIP + ":12345")},
+		}
+
+		done := make(chan struct{})
+		go func() {
+			_, _ = handler.GetCertificate(info)
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			t.Fatal("expected GetCertificate to hold connection for unbound pod with empty SNI, but returned immediately")
+		case <-time.After(50 * time.Millisecond):
+		}
+
+		// Client closes connection; GetCertificate unblocks cleanly
+		_ = clientConn.Close()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("expected GetCertificate to return after client closed connection")
+		}
+	})
+
 	t.Run("empty server name gets no certificate", func(t *testing.T) {
 		_, err := handler.GetCertificate(clientHello("", podIP+":12345"))
 		if err == nil {
@@ -2244,6 +2275,68 @@ func TestEgressHandler_EvaluateQuery_Logging(t *testing.T) {
 				if strings.Contains(out, "pod=") || strings.Contains(out, "podUID=") {
 					t.Errorf("expected no pod keys for unknown caller, got:\n%s", out)
 				}
+			}
+		})
+	}
+}
+
+func TestEgressHandler_EvaluateHTTP(t *testing.T) {
+	pm, store := newTestEnv(t)
+
+	boundUID := "pod-bound-uid"
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       boundUID,
+		Namespace: "sandbox",
+		Name:      "bound-pod",
+		IPs:       []string{"10.244.1.10"},
+	})
+	_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+		PodUid: boundUID,
+		Policy: &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Http: &portalsv1.HttpRule{Hostnames: []string{"http.example.com"}},
+				},
+				{
+					Https: &portalsv1.HttpsRule{Hostnames: []string{"https.example.com"}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bind failed: %v", err)
+	}
+
+	pm.AddOrUpdatePod(&PodInfo{
+		UID:       "pod-unbound-uid",
+		Namespace: "sandbox",
+		Name:      "unbound-pod",
+		IPs:       []string{"10.244.1.20"},
+	})
+
+	handler := NewEgressHandler(pm, store, nil, nil)
+
+	tests := []struct {
+		name         string
+		clientIP     string
+		proto        portalsv1.Protocol
+		host         string
+		wantDecision httpDecision
+	}{
+		{"unknown caller", "10.244.1.99", portalsv1.ProtocolHTTP, "http.example.com", httpDecisionRefuseUnknown},
+		{"unbound pod", "10.244.1.20", portalsv1.ProtocolHTTP, "http.example.com", httpDecisionHold},
+		{"allowed http", "10.244.1.10", portalsv1.ProtocolHTTP, "http.example.com", httpDecisionAllow},
+		{"allowed https", "10.244.1.10", portalsv1.ProtocolHTTPS, "https.example.com", httpDecisionAllow},
+		{"protocol mismatch refused", "10.244.1.10", portalsv1.ProtocolHTTPS, "http.example.com", httpDecisionRefuse},
+		{"unpermitted host refused", "10.244.1.10", portalsv1.ProtocolHTTP, "forbidden.example.com", httpDecisionRefuse},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := &net.TCPAddr{IP: net.ParseIP(tc.clientIP), Port: 12345}
+			got, _, _ := handler.evaluateHTTP(addr, tc.proto, tc.host)
+			if got != tc.wantDecision {
+				t.Fatalf("evaluateHTTP() = %v, want %v", got, tc.wantDecision)
 			}
 		})
 	}
