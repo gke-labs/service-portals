@@ -262,7 +262,23 @@ spec:
 		}
 	}
 
-	// Test case 3: IPv6 host routing and port-stripping matching [::1]:8080
+	// Test case 3: Trailing dot matching service-1.portal.
+	{
+		backend1Called = false
+		req := httptest.NewRequest("GET", "/uncached", nil)
+		req.Host = "service-1.portal."
+		rec := httptest.NewRecorder()
+		rr.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected status 200, got %d", rec.Code)
+		}
+		if !backend1Called {
+			t.Error("expected backend1 to be called for trailing dot host")
+		}
+	}
+
+	// Test case 4: IPv6 host routing and port-stripping matching [::1]:8080
 	{
 		ipv6BackendCalled = false
 		req := httptest.NewRequest("GET", "/baz", nil)
@@ -278,7 +294,7 @@ spec:
 		}
 	}
 
-	// Test case 4: Fallback routing
+	// Test case 5: Fallback routing
 	{
 		fallbackCalled = false
 		req := httptest.NewRequest("GET", "/baz", nil)
@@ -628,7 +644,24 @@ spec:
 			t.Error("expected non-nil cert for allowed.portal")
 		}
 
-		// 3. Unmatched host HTTP -> 403 Forbidden
+		// 3. Matched host with trailing dot HTTP and HTTPS GetCertificate
+		reqDot := httptest.NewRequest("GET", "/test", nil)
+		reqDot.Host = "allowed.portal."
+		recDot := httptest.NewRecorder()
+		rr.ServeHTTP(recDot, reqDot)
+		if recDot.Code != http.StatusOK {
+			t.Errorf("expected 200 OK for matched host with trailing dot, got %d", recDot.Code)
+		}
+
+		certDot, err := rr.GetCertificate(&tls.ClientHelloInfo{ServerName: "allowed.portal."})
+		if err != nil {
+			t.Errorf("expected GetCertificate to succeed for allowed.portal., got: %v", err)
+		}
+		if certDot == nil {
+			t.Error("expected non-nil cert for allowed.portal.")
+		}
+
+		// 4. Unmatched host HTTP -> 403 Forbidden
 		reqUnmatched := httptest.NewRequest("GET", "/test", nil)
 		reqUnmatched.Host = "unmatched.portal"
 		recUnmatched := httptest.NewRecorder()
@@ -637,7 +670,7 @@ spec:
 			t.Errorf("expected 403 Forbidden for unmatched host without fallback, got %d", recUnmatched.Code)
 		}
 
-		// 4. Unmatched host HTTPS GetCertificate -> denied (error)
+		// 5. Unmatched host HTTPS GetCertificate -> denied (error)
 		_, errUnmatched := rr.GetCertificate(&tls.ClientHelloInfo{ServerName: "unmatched.portal"})
 		if errUnmatched == nil {
 			t.Error("expected GetCertificate to fail for unmatched host without fallback, but it succeeded")
@@ -685,6 +718,76 @@ spec:
 	})
 }
 
+func TestRuleRouter_EvaluateHTTP(t *testing.T) {
+	tmpDir := t.TempDir()
+	ruleContent := `
+apiVersion: portals.gke.io/v1alpha1
+kind: PortalRule
+metadata:
+  name: test-rule
+spec:
+  host: "backend"
+  rewriteUrl: "http://127.0.0.1:8080"
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "rule.yaml"), []byte(ruleContent), 0644); err != nil {
+		t.Fatalf("failed to write rule: %v", err)
+	}
+
+	fallbackURL, _ := url.Parse("https://fallback.example.com")
+	fallbackProxy, err := proxy.NewHTTPProxy(fallbackURL, "", "", "", "")
+	if err != nil {
+		t.Fatalf("failed to create fallback proxy: %v", err)
+	}
+
+	rrWithFallback := NewRuleRouter(tmpDir, fallbackProxy, "", "", 0, nil)
+	if err := rrWithFallback.loadRules(); err != nil {
+		t.Fatalf("loadRules failed: %v", err)
+	}
+
+	rrNoFallback := NewRuleRouter(tmpDir, nil, "", "", 0, nil)
+	if err := rrNoFallback.loadRules(); err != nil {
+		t.Fatalf("loadRules failed: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		router       *RuleRouter
+		host         string
+		wantDecision ruleDecision
+		wantRuleName string
+	}{
+		{"exact rule match", rrWithFallback, "backend", ruleDecisionRoute, "test-rule"},
+		{"exact rule match with port", rrWithFallback, "backend:80", ruleDecisionRoute, "test-rule"},
+		{"exact rule match uppercase", rrWithFallback, "BACKEND", ruleDecisionRoute, "test-rule"},
+		{"exact rule match trailing dot", rrWithFallback, "backend.", ruleDecisionRoute, "test-rule"},
+		{"prefix rule match", rrWithFallback, "backend.default.svc.cluster.local", ruleDecisionRoute, "test-rule"},
+		{"prefix rule match trailing dot", rrWithFallback, "backend.default.svc.cluster.local.", ruleDecisionRoute, "test-rule"},
+		{"unlisted host with fallback", rrWithFallback, "other.example.com", ruleDecisionFallback, ""},
+		{"unlisted host without fallback", rrNoFallback, "other.example.com", ruleDecisionDeny, ""},
+		{"empty host with fallback", rrWithFallback, "", ruleDecisionFallback, ""},
+		{"empty host without fallback", rrNoFallback, "", ruleDecisionDeny, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotDecision, gotRule := tc.router.evaluateHTTP(tc.host)
+			if gotDecision != tc.wantDecision {
+				t.Fatalf("evaluateHTTP(%q) decision = %v, want %v", tc.host, gotDecision, tc.wantDecision)
+			}
+			if tc.wantRuleName != "" {
+				if gotRule == nil {
+					t.Fatalf("evaluateHTTP(%q) rule = nil, want rule %q", tc.host, tc.wantRuleName)
+				}
+				if gotRule.Name != tc.wantRuleName {
+					t.Fatalf("evaluateHTTP(%q) rule.Name = %q, want %q", tc.host, gotRule.Name, tc.wantRuleName)
+				}
+			} else if gotRule != nil {
+				t.Fatalf("evaluateHTTP(%q) rule = %v, want nil", tc.host, gotRule)
+			}
+		})
+	}
+}
+
 func TestRuleRouter_EvaluateQuery(t *testing.T) {
 	tmpDir := t.TempDir()
 	ruleContent := `
@@ -705,28 +808,67 @@ spec:
 		t.Fatalf("loadRules failed: %v", err)
 	}
 
-	tests := []struct {
-		host     string
-		expected dns.QueryDecision
-	}{
-		{"backend", dns.DecisionAllow},
-		{"backend:80", dns.DecisionAllow},
-		{"backend.", dns.DecisionAllow},
-		{"backend.default.svc.cluster.local", dns.DecisionAllow},
-		{"backend.default.svc.cluster.local.", dns.DecisionAllow},
-		{"unlisted-backend", dns.DecisionDefault},
-		{"google.com", dns.DecisionDefault},
-		{"example.com", dns.DecisionDefault},
-	}
+	t.Run("without fallback", func(t *testing.T) {
+		tests := []struct {
+			host     string
+			expected dns.QueryDecision
+		}{
+			{"backend", dns.DecisionAllow},
+			{"backend:80", dns.DecisionAllow},
+			{"backend.", dns.DecisionAllow},
+			{"backend.default.svc.cluster.local", dns.DecisionAllow},
+			{"backend.default.svc.cluster.local.", dns.DecisionAllow},
+			{"unlisted-backend", dns.DecisionDefault},
+			{"google.com", dns.DecisionDefault},
+			{"example.com", dns.DecisionDefault},
+		}
 
-	for _, tc := range tests {
-		t.Run(tc.host, func(t *testing.T) {
-			got := rr.EvaluateQuery(t.Context(), tc.host, dnsmessage.TypeA, nil)
-			if got != tc.expected {
-				t.Errorf("EvaluateQuery(%q) = %v; expected %v", tc.host, got, tc.expected)
-			}
-		})
-	}
+		for _, tc := range tests {
+			t.Run(tc.host, func(t *testing.T) {
+				got := rr.EvaluateQuery(t.Context(), tc.host, dnsmessage.TypeA, nil)
+				if got != tc.expected {
+					t.Errorf("EvaluateQuery(%q) = %v; expected %v", tc.host, got, tc.expected)
+				}
+			})
+		}
+	})
+
+	t.Run("with fallback", func(t *testing.T) {
+		fallbackURL, _ := url.Parse("https://fallback.example.com:443")
+		fallbackProxy, err := proxy.NewHTTPProxy(fallbackURL, "", "", "", "")
+		if err != nil {
+			t.Fatalf("failed to create fallback proxy: %v", err)
+		}
+		rrWithFallback := NewRuleRouter(tmpDir, fallbackProxy, "", "", 0, nil)
+		if err := rrWithFallback.loadRules(); err != nil {
+			t.Fatalf("loadRules failed: %v", err)
+		}
+
+		tests := []struct {
+			host     string
+			expected dns.QueryDecision
+		}{
+			{"backend", dns.DecisionAllow},
+			{"backend.", dns.DecisionAllow},
+			{"fallback.example.com", dns.DecisionAllow},
+			{"fallback.example.com:443", dns.DecisionAllow},
+			{"fallback.example.com.", dns.DecisionAllow},
+			{"fallback.example.com.default.svc.cluster.local", dns.DecisionAllow},
+			{"fallback.example.com.default.svc.cluster.local.", dns.DecisionAllow},
+			{"unlisted-backend", dns.DecisionDefault},
+			{"google.com", dns.DecisionDefault},
+			{"example.com", dns.DecisionDefault},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.host, func(t *testing.T) {
+				got := rrWithFallback.EvaluateQuery(t.Context(), tc.host, dnsmessage.TypeA, nil)
+				if got != tc.expected {
+					t.Errorf("EvaluateQuery(%q) = %v; expected %v", tc.host, got, tc.expected)
+				}
+			})
+		}
+	})
 }
 
 func TestRuleRouter_DNSServer_AnswersRuleHost(t *testing.T) {
