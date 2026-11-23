@@ -17,6 +17,7 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -1004,4 +1005,76 @@ func TestDNSServer_UnknownDecision_FailsClosed(t *testing.T) {
 	if aRecord, ok := respDefault.Answers[0].Body.(*dnsmessage.AResource); !ok || aRecord.A != mockUpstreamIP {
 		t.Errorf("expected upstream IP %v, got %v", mockUpstreamIP, respDefault.Answers[0].Body)
 	}
+}
+
+func TestDNSServer_TCPReadTimeout(t *testing.T) {
+	srv, err := NewServer(Config{
+		BindAddr:      "127.0.0.1:0",
+		DefaultAction: "Deny",
+		Evaluator:     &dropAndMatch{dropHosts: map[string]bool{"unbound.example.com": true}},
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if srv.tcpReadTimeout != defaultTCPReadTimeout {
+		t.Fatalf("tcpReadTimeout = %v, want %v", srv.tcpReadTimeout, defaultTCPReadTimeout)
+	}
+	srv.tcpReadTimeout = 80 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(t.Context()) }()
+	addr := srv.TCPAddr().String()
+
+	dial := func(t *testing.T, payload []byte) net.Conn {
+		t.Helper()
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		if len(payload) > 0 {
+			if _, err := conn.Write(payload); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+		}
+		return conn
+	}
+
+	for _, tc := range []struct {
+		name  string
+		write []byte
+	}{
+		{"idle client closed", nil},
+		{"stalled partial query closed", []byte{0, 32, 1, 2, 3, 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := dial(t, tc.write)
+			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+				t.Fatalf("expected EOF, got: %v", err)
+			}
+		})
+	}
+
+	t.Run("dropped query held past read timeout", func(t *testing.T) {
+		req := dnsmessage.Message{
+			Header:    dnsmessage.Header{ID: 3333, RecursionDesired: true},
+			Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName("unbound.example.com."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
+		}
+		packed, err := req.Pack()
+		if err != nil {
+			t.Fatalf("pack: %v", err)
+		}
+		conn := dial(t, append(binary.BigEndian.AppendUint16(nil, uint16(len(packed))), packed...))
+		_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, err = conn.Read(make([]byte, 1))
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("expected held conn to time out past tcpReadTimeout, got: %v", err)
+		}
+	})
 }
