@@ -25,6 +25,7 @@ import (
 	"syscall"
 
 	"github.com/gke-labs/service-portals/pkg/portals"
+	klog "k8s.io/klog/v2"
 )
 
 func parseFlags(args []string, output io.Writer) (portals.Config, error) {
@@ -32,10 +33,17 @@ func parseFlags(args []string, output io.Writer) (portals.Config, error) {
 	if output != nil {
 		fs.SetOutput(output)
 	}
+	klog.InitFlags(fs)
 	rulesDir := fs.String("rules-dir", "", "Directory containing configuration rules")
 	serveDNSFlag := fs.Bool("serve-dns", false, "Serve bounded DNS for configured rule hosts")
 	dnsBindAddr := fs.String("dns-bind-addr", "", "Address to bind DNS server")
 	dnsPort := fs.String("dns-port", portals.ResolveDNSPort(""), "Port to bind DNS server")
+
+	if verbosity := os.Getenv("LOG_VERBOSITY"); verbosity != "" {
+		if err := fs.Set("v", verbosity); err != nil {
+			return portals.Config{}, fmt.Errorf("setting log verbosity from LOG_VERBOSITY=%q: %w", verbosity, err)
+		}
+	}
 
 	if err := fs.Parse(args); err != nil {
 		return portals.Config{}, err

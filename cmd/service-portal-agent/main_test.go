@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/gke-labs/service-portals/pkg/portals"
+	klog "k8s.io/klog/v2"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -112,4 +113,46 @@ func TestDNSPortHelp(t *testing.T) {
 	if count := strings.Count(output, "1053"); count != 1 {
 		t.Errorf("expected default port 1053 to appear exactly once, got count %d in:\n%s", count, output)
 	}
+}
+
+func TestLogVerbosityEnv(t *testing.T) {
+	t.Cleanup(func() {
+		var l klog.Level
+		if err := l.Set("0"); err != nil {
+			t.Errorf("failed to reset klog verbosity: %v", err)
+		}
+	})
+
+	t.Run("ValidLOG_VERBOSITY", func(t *testing.T) {
+		t.Setenv("LOG_VERBOSITY", "1")
+		var buf bytes.Buffer
+		_, err := parseFlags([]string{}, &buf)
+		if err != nil {
+			t.Fatalf("parseFlags failed: %v", err)
+		}
+		if !klog.V(1).Enabled() {
+			t.Errorf("expected verbosity 1 to be enabled after setting LOG_VERBOSITY=1")
+		}
+	})
+
+	t.Run("InvalidLOG_VERBOSITY", func(t *testing.T) {
+		t.Setenv("LOG_VERBOSITY", "invalid")
+		var buf bytes.Buffer
+		_, err := parseFlags([]string{}, &buf)
+		if err == nil {
+			t.Fatalf("expected parseFlags to fail with invalid LOG_VERBOSITY, got nil")
+		}
+	})
+
+	t.Run("FlagOverridesEnv", func(t *testing.T) {
+		t.Setenv("LOG_VERBOSITY", "1")
+		var buf bytes.Buffer
+		_, err := parseFlags([]string{"-v", "2"}, &buf)
+		if err != nil {
+			t.Fatalf("parseFlags failed: %v", err)
+		}
+		if !klog.V(2).Enabled() {
+			t.Errorf("expected verbosity 2 to be enabled when -v 2 flag is passed")
+		}
+	})
 }

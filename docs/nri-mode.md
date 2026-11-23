@@ -241,6 +241,14 @@ The node proxy swapped the placeholder token for the authentic secret credential
 - **Caller Attribution**: Check `kubectl logs -n service-portal-system -l app=portal-node-agent -c proxy` to confirm the caller IP was identified (`Caller: <namespace>/<pod>`). Untracked callers return HTTP 403 Forbidden.
 - **Client Allowlist**: If binding via the controller returns `codes.PermissionDenied`, verify the client service account is included in `--client-allowlist`.
 
+### Enabling Verbose Logging for DNS and Egress
+By default, answered DNS queries on allowed policy hostnames are not logged to avoid excessive log volume. To inspect all answered DNS queries, increase the `proxy` container's verbosity to 1:
+```bash
+kubectl set env daemonset/portal-node-agent -n service-portal-system -c proxy LOG_VERBOSITY=1
+```
+
+> **Note**: Setting environment variables on the DaemonSet triggers a rolling restart of the `portal-node-agent` pods.
+
 For response status meanings and destination traffic handling, see [docs/controller.md](controller.md#what-the-answers-mean) and [What Happens to Unallowed Traffic](controller.md#what-happens-to-unallowed-traffic).
 
 ### Agent Restart vs. Node Reboot

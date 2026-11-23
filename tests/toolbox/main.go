@@ -60,6 +60,15 @@ func runServer() {
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Received request: %s %s (Host: %s)", r.Method, r.URL.Path, r.Host)
+		if strings.HasSuffix(r.URL.Path, "/info/refs") && r.URL.Query().Get("service") == "git-upload-pack" {
+			w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte("001e# service=git-upload-pack\n00000000")); err != nil {
+				log.Printf("Failed to write git advertisement response: %v", err)
+			}
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		headers := make(map[string][]string)
