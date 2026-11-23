@@ -16,6 +16,7 @@ package e2e
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +220,13 @@ func (h *Harness) KindLoad(tag string) {
 	h.t.Helper()
 	h.t.Logf("Loading image %s into kind", tag)
 	h.RunCommand("kind", "load", "docker-image", tag, "--name", h.ClusterName)
+}
+
+func (h *Harness) PullImageOnNode(image string) {
+	h.t.Helper()
+	h.t.Logf("Pulling registry image %s on kind node", image)
+	nodeContainer := fmt.Sprintf("%s-control-plane", h.ClusterName)
+	h.RunCommand("docker", "exec", nodeContainer, "crictl", "pull", image)
 }
 
 func (h *Harness) ApDeploy(manifests ...string) {

@@ -359,23 +359,27 @@ func (h *EgressHandler) EvaluateQuery(ctx context.Context, host string, qtype dn
 
 	switch decision {
 	case httpDecisionAllow:
+		logger := scoped.Log(ctx)
+		if logger.V(1).Enabled() {
+			h.logDNSQuery(ctx, "dns query answered", host, qtype, clientAddr, pod, policy, "allowed by policy", "answered")
+		}
 		return dns.DecisionAllow
 	case httpDecisionHold:
-		h.logDNSQuery(ctx, host, qtype, clientAddr, pod, policy, "pod has no policy", "dropped")
+		h.logDNSQuery(ctx, "dns query refused or dropped", host, qtype, clientAddr, pod, policy, "pod has no policy", "dropped")
 		return dns.DecisionDrop
 	case httpDecisionRefuseUnknown:
 		// Where DNS genuinely differs: an unidentified caller is dropped for DNS but refused for HTTP.
-		h.logDNSQuery(ctx, host, qtype, clientAddr, pod, policy, "unknown caller", "dropped")
+		h.logDNSQuery(ctx, "dns query refused or dropped", host, qtype, clientAddr, pod, policy, "unknown caller", "dropped")
 		return dns.DecisionDrop
 	case httpDecisionRefuse:
-		h.logDNSQuery(ctx, host, qtype, clientAddr, pod, policy, "name not in policy", "NXDOMAIN")
+		h.logDNSQuery(ctx, "dns query refused or dropped", host, qtype, clientAddr, pod, policy, "name not in policy", "NXDOMAIN")
 		return dns.DecisionNXDomain
 	default:
 		return dns.DecisionDrop
 	}
 }
 
-func (h *EgressHandler) logDNSQuery(ctx context.Context, host string, qtype dnsmessage.Type, clientAddr net.Addr, pod *PodInfo, policy *portalsv1.EgressPolicy, reason, action string) {
+func (h *EgressHandler) logDNSQuery(ctx context.Context, msg, host string, qtype dnsmessage.Type, clientAddr net.Addr, pod *PodInfo, policy *portalsv1.EgressPolicy, reason, action string) {
 	logger := scoped.Log(ctx)
 	if h.isSearchExpansion(pod, policy, host) {
 		logger = logger.V(1)
@@ -420,7 +424,7 @@ func (h *EgressHandler) logDNSQuery(ctx context.Context, host string, qtype dnsm
 	if repeated > 0 {
 		args = append(args, "repeated", repeated)
 	}
-	logger.Info("dns query refused or dropped", args...)
+	logger.Info(msg, args...)
 }
 
 // ServeHTTP decides an intercepted request from the caller pod's bound policy.

@@ -32,3 +32,15 @@
 - `CACHE_TTL`: Global fallback cache TTL duration.
 - `CACHE_CLEANUP_INTERVAL`: Interval for clearing expired cache items (default `1m`).
 - `OTEL_INSTRUMENTATION_ENABLED`: Set to `"true"` to enable OpenTelemetry tracing.
+- `LOG_VERBOSITY`: Logging verbosity level (e.g. `"1"` to enable verbose logging such as answered DNS queries; overridden by `-v`).
+
+### Enabling Verbose Logging Dynamically
+
+To enable verbose logging on the running node agent's proxy container (for example, to log answered DNS queries at verbosity 1):
+
+```bash
+kubectl set env daemonset/portal-node-agent -n service-portal-system -c proxy LOG_VERBOSITY=1
+```
+
+> **Note**: Setting environment variables on the DaemonSet triggers a rolling restart of the `portal-node-agent` pods.
+

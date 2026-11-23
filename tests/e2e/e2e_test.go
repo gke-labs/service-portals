@@ -1622,6 +1622,7 @@ func TestNRIPluginEgressDenied(t *testing.T) {
 	// Build and load toolbox test image (controller and node agent are deployed via ap deploy)
 	h.DockerBuild("toolbox:e2e", filepath.Join(gitRoot, "tests/toolbox/Dockerfile"), filepath.Join(gitRoot, "tests/toolbox"))
 	h.KindLoad("toolbox:e2e")
+	h.PullImageOnNode("alpine/git:v2.47.2")
 
 	serviceIPFamilies := ""
 	if h.IsDualStack() {
@@ -2596,6 +2597,137 @@ spec:
 			t.Fatalf("backend access log missing /main-check: %s", backendLogs)
 		}
 		t.Logf("verified backend received requests from both init and main containers")
+
+		// 16b. Musl-based client (alpine/git:v2.47.2) running git ls-remote and git clone
+		// from an init container in eval-runner-sandbox against http://git-server.eval-runner-sandbox.svc/...
+		// with the policy bound and accepted before the git container starts.
+		nodeContainer := fmt.Sprintf("%s-control-plane", h.ClusterName)
+		exec.Command("docker", "exec", nodeContainer, "mkdir", "-p", "/tmp/musl-gate").Run()
+
+		const numMuslPods = 3
+		const lookupsPerPod = 10
+		totalMuslLookups := 0
+
+		for pIdx := 1; pIdx <= numMuslPods; pIdx++ {
+			muslPodName := fmt.Sprintf("test-client-musl-%d", pIdx)
+			gateFilename := fmt.Sprintf("ready-%s", muslPodName)
+			gateHostPath := fmt.Sprintf("/tmp/musl-gate/%s", gateFilename)
+
+			exec.Command("docker", "exec", nodeContainer, "rm", "-f", gateHostPath).Run()
+			exec.Command("kubectl", "delete", "pod", muslPodName, "-n", sandboxNS, "--ignore-not-found").Run()
+			t.Cleanup(func() {
+				exec.Command("kubectl", "delete", "pod", muslPodName, "-n", sandboxNS, "--ignore-not-found").Run()
+			})
+
+			muslPodManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: %s
+    service-portal.gke.io/intercept: "true"
+spec:
+%s  volumes:
+  - name: gate
+    hostPath:
+      path: /tmp/musl-gate
+      type: DirectoryOrCreate
+  initContainers:
+  - name: wait-for-bind
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      while [ ! -f /gate/%s ]; do
+        sleep 0.05
+      done
+    volumeMounts:
+    - name: gate
+      mountPath: /gate
+  - name: clone-init
+    image: alpine/git:v2.47.2
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      for i in $(seq 1 %d); do
+        echo "Attempt $i: git ls-remote http://git-server.%s.svc/repo.git"
+        git ls-remote http://git-server.%s.svc/repo.git || exit 1
+        echo "Attempt $i: git clone http://git-server.%s.svc/repo.git"
+        git clone http://git-server.%s.svc/repo.git /tmp/repo-$i || exit 1
+        rm -rf /tmp/repo-$i
+      done
+  containers:
+  - name: workload
+    image: alpine/git:v2.47.2
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`, muslPodName, sandboxNS, muslPodName, runtimeClassField, gateFilename, lookupsPerPod, sandboxNS, sandboxNS, sandboxNS, sandboxNS)
+
+			h.KubectlApplyContent(muslPodManifest)
+
+			var muslPodUID string
+			for i := 0; i < 30; i++ {
+				cmdUID := exec.Command("kubectl", "get", "pod", muslPodName, "-n", sandboxNS, "-o", "jsonpath={.metadata.uid}")
+				if outUID, err := cmdUID.CombinedOutput(); err == nil && len(strings.TrimSpace(string(outUID))) > 0 {
+					muslPodUID = strings.TrimSpace(string(outUID))
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if muslPodUID == "" {
+				t.Fatalf("failed to retrieve musl client pod UID for %s in %s", muslPodName, sandboxNS)
+			}
+
+			muslCtrlPolicy := &portalsv1.PodPolicy{
+				PodUid:   muslPodUID,
+				Identity: "sandbox-musl-user",
+				Policy:   sandboxPolicyProto,
+				Wait:     true,
+			}
+			bindResp, err := bindClient.Bind(authCtx, muslCtrlPolicy)
+			if err != nil {
+				t.Fatalf("Bind for musl pod %s failed: %v", muslPodName, err)
+			}
+			if bindResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
+				t.Fatalf("expected Bind for musl pod %s to be ACCEPTED, got %v (refusal: %s)", muslPodName, bindResp.GetStatus(), bindResp.GetRefusalReason())
+			}
+			t.Logf("policy bound and accepted before container start for musl pod %s (%s)", muslPodName, muslPodUID)
+
+			// Signal gate so clone-init container can proceed with policy bound
+			if outGate, err := exec.Command("docker", "exec", nodeContainer, "touch", gateHostPath).CombinedOutput(); err != nil {
+				t.Fatalf("failed to touch gate file on %s: %v (output: %s)", nodeContainer, err, outGate)
+			}
+
+			// Assert the pod passes its init container and becomes Ready
+			h.WaitForPodReady("app="+muslPodName, 2*time.Minute)
+
+			// Verify clone-init logs show all attempts succeeded
+			cmdLogs := exec.Command("kubectl", "logs", muslPodName, "-n", sandboxNS, "-c", "clone-init")
+			outLogs, errLogs := cmdLogs.CombinedOutput()
+			if errLogs != nil {
+				t.Fatalf("failed to get clone-init logs for %s: %v (output: %s)", muslPodName, errLogs, outLogs)
+			}
+			logsStr := string(outLogs)
+			if !strings.Contains(logsStr, fmt.Sprintf("Attempt %d:", lookupsPerPod)) {
+				t.Fatalf("clone-init logs for %s did not complete %d attempts: %s", muslPodName, lookupsPerPod, logsStr)
+			}
+			totalMuslLookups += lookupsPerPod * 2
+			t.Logf("musl pod %s (%d lookups) succeeded", muslPodName, lookupsPerPod*2)
+		}
+		t.Logf("verified musl client (alpine/git:v2.47.2) passed across %d pods and %d total lookups/clones", numMuslPods, totalMuslLookups)
 	})
 }
 

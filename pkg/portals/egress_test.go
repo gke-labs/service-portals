@@ -2507,6 +2507,7 @@ func TestEgressHandler_EvaluateQuery_SearchDomainExpansion(t *testing.T) {
 		{"unpermitted name expansion logged at V(0)", "evil.com.sandbox.svc.cluster.local", 0, dns.DecisionNXDomain, true},
 		{"allowed short name in different namespace FQDN logged at V(0)", "backend.other-ns.svc.cluster.local", 0, dns.DecisionNXDomain, true},
 		{"allowed query answered", "api.github.com", 0, dns.DecisionAllow, false},
+		{"allowed query logged at V(1)", "api.github.com", 1, dns.DecisionAllow, true},
 	}
 
 	for _, tc := range tests {
