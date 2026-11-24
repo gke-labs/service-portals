@@ -71,23 +71,44 @@ type Config struct {
 	DefaultAction string
 	// UpstreamServers are the upstream DNS resolvers used when forwarding queries (e.g. ["10.96.0.10:53"]).
 	UpstreamServers []string
-	// ForwardTimeout is the timeout for forwarding queries to upstream resolvers.
-	ForwardTimeout time.Duration
+	// Timeouts configures timeout durations for the DNS server.
+	Timeouts TimeoutOptions
 	// TTL is the time-to-live for generated A and AAAA records in seconds. Defaults to 60.
 	TTL uint32
 }
 
-// defaultTCPReadTimeout bounds how long the TCP DNS listener waits to read a client query.
-const defaultTCPReadTimeout = 5 * time.Second
+const (
+	// defaultForwardTimeout is the default timeout for forwarding queries to upstream resolvers.
+	defaultForwardTimeout = 3 * time.Second
+	// defaultTCPReadTimeout bounds how long the TCP DNS listener waits to read a client query.
+	defaultTCPReadTimeout = 5 * time.Second
+)
+
+// TimeoutOptions configures timeout durations for the DNS server.
+type TimeoutOptions struct {
+	// ForwardTimeout is the timeout for forwarding queries to upstream resolvers.
+	ForwardTimeout time.Duration
+	// TCPReadTimeout bounds how long the TCP DNS listener waits to read a client query.
+	TCPReadTimeout time.Duration
+}
+
+// InitDefaults populates unset or non-positive timeout values with defaults.
+func (o *TimeoutOptions) InitDefaults() {
+	if o.ForwardTimeout <= 0 {
+		o.ForwardTimeout = defaultForwardTimeout
+	}
+	if o.TCPReadTimeout <= 0 {
+		o.TCPReadTimeout = defaultTCPReadTimeout
+	}
+}
 
 // Server serves DNS requests over UDP and TCP using golang.org/x/net/dns/dnsmessage.
 type Server struct {
-	config         Config
-	tcpReadTimeout time.Duration
-	udpConn        net.PacketConn
-	tcpListener    net.Listener
-	mu             sync.Mutex
-	started        bool
+	config      Config
+	udpConn     net.PacketConn
+	tcpListener net.Listener
+	mu          sync.Mutex
+	started     bool
 }
 
 // NewServer creates a new sidecar DNS Server.
@@ -98,16 +119,13 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.ProxyIPv4 == nil {
 		cfg.ProxyIPv4 = net.ParseIP("127.0.0.2")
 	}
-	if cfg.ForwardTimeout <= 0 {
-		cfg.ForwardTimeout = 3 * time.Second
-	}
+	cfg.Timeouts.InitDefaults()
 	if cfg.TTL == 0 {
 		cfg.TTL = 60
 	}
 
 	return &Server{
-		config:         cfg,
-		tcpReadTimeout: defaultTCPReadTimeout,
+		config: cfg,
 	}, nil
 }
 
@@ -284,10 +302,7 @@ func (s *Server) forward(reqBytes []byte, clientIsTCP bool) ([]byte, error) {
 		return nil, errors.New("no upstream DNS servers configured")
 	}
 
-	timeout := s.config.ForwardTimeout
-	if timeout <= 0 {
-		timeout = 3 * time.Second
-	}
+	timeout := s.config.Timeouts.ForwardTimeout
 
 	var lastErr error
 	for _, server := range s.config.UpstreamServers {
@@ -427,11 +442,6 @@ func (s *Server) Start(ctx context.Context) error {
 	s.tcpListener = tcpListener
 	s.started = true
 
-	tcpReadTimeout := s.tcpReadTimeout
-	if tcpReadTimeout <= 0 {
-		tcpReadTimeout = defaultTCPReadTimeout
-	}
-
 	// Serve UDP
 	go func() {
 		buf := make([]byte, 4096)
@@ -469,7 +479,7 @@ func (s *Server) Start(ctx context.Context) error {
 				defer closeQuietly(c)
 				lenBuf := make([]byte, 2)
 				for {
-					if err := c.SetReadDeadline(time.Now().Add(tcpReadTimeout)); err != nil {
+					if err := c.SetReadDeadline(time.Now().Add(s.config.Timeouts.TCPReadTimeout)); err != nil {
 						return
 					}
 					if _, err := io.ReadFull(c, lenBuf); err != nil {

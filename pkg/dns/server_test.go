@@ -1007,19 +1007,50 @@ func TestDNSServer_UnknownDecision_FailsClosed(t *testing.T) {
 	}
 }
 
+func TestTimeoutOptions_InitDefaults(t *testing.T) {
+	defaults := TimeoutOptions{
+		ForwardTimeout: defaultForwardTimeout,
+		TCPReadTimeout: defaultTCPReadTimeout,
+	}
+	for _, tc := range []struct {
+		name string
+		in   TimeoutOptions
+		want TimeoutOptions
+	}{
+		{"zero values", TimeoutOptions{}, defaults},
+		{"negative values", TimeoutOptions{ForwardTimeout: -time.Second, TCPReadTimeout: -time.Second}, defaults},
+		{"explicit values preserved", TimeoutOptions{ForwardTimeout: 7 * time.Second, TCPReadTimeout: 80 * time.Millisecond}, TimeoutOptions{ForwardTimeout: 7 * time.Second, TCPReadTimeout: 80 * time.Millisecond}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in
+			got.InitDefaults()
+			if got != tc.want {
+				t.Fatalf("InitDefaults() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("NewServer applies defaults", func(t *testing.T) {
+		srv, err := NewServer(Config{})
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		if srv.config.Timeouts != defaults {
+			t.Fatalf("NewServer Timeouts = %+v, want %+v", srv.config.Timeouts, defaults)
+		}
+	})
+}
+
 func TestDNSServer_TCPReadTimeout(t *testing.T) {
 	srv, err := NewServer(Config{
 		BindAddr:      "127.0.0.1:0",
 		DefaultAction: "Deny",
 		Evaluator:     &dropAndMatch{dropHosts: map[string]bool{"unbound.example.com": true}},
+		Timeouts:      TimeoutOptions{TCPReadTimeout: 80 * time.Millisecond},
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	if srv.tcpReadTimeout != defaultTCPReadTimeout {
-		t.Fatalf("tcpReadTimeout = %v, want %v", srv.tcpReadTimeout, defaultTCPReadTimeout)
-	}
-	srv.tcpReadTimeout = 80 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
