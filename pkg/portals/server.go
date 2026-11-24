@@ -52,6 +52,26 @@ const DefaultBindSocketPath = "/run/service-portal/bind.sock"
 // DefaultProxyDNSPort is the default unprivileged port for the proxy DNS server.
 const DefaultProxyDNSPort = "1053"
 
+const (
+	// defaultProxyReadHeaderTimeout bounds how long a client may take to send
+	// HTTP request headers (and complete the TLS handshake on the HTTPS listener).
+	// ReadTimeout and WriteTimeout are intentionally unset so long-lived streaming
+	// responses (such as LLM streams or large git clones) are not interrupted.
+	defaultProxyReadHeaderTimeout = 10 * time.Second
+	// defaultProxyIdleTimeout bounds how long an idle keep-alive connection stays open.
+	defaultProxyIdleTimeout = 60 * time.Second
+)
+
+func newProxyServer(addr string, handler http.Handler, tlsConfig *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: defaultProxyReadHeaderTimeout,
+		IdleTimeout:       defaultProxyIdleTimeout,
+	}
+}
+
 // ResolveDNSPort returns the DNS port to use, checking the provided port,
 // the PROXY_DNS_PORT environment variable, the DNS_PORT environment variable,
 // and finally falling back to DefaultProxyDNSPort ("1053").
@@ -574,20 +594,17 @@ func Run(ctx context.Context, config Config) error {
 		log.Println("OpenTelemetry server instrumentation enabled")
 	}
 
-	srv := &http.Server{
-		Addr:    net.JoinHostPort(bindHost, port),
-		Handler: servedHandler,
-	}
+	srv := newProxyServer(net.JoinHostPort(bindHost, port), servedHandler, nil)
 
 	var httpsSrv *http.Server
 	if certProv, ok := handler.(CertificateProvider); ok {
-		httpsSrv = &http.Server{
-			Addr:    net.JoinHostPort(bindHost, httpsPort),
-			Handler: servedHandler,
-			TLSConfig: &tls.Config{
+		httpsSrv = newProxyServer(
+			net.JoinHostPort(bindHost, httpsPort),
+			servedHandler,
+			&tls.Config{
 				GetCertificate: certProv.GetCertificate,
 			},
-		}
+		)
 	}
 
 	targetDesc := target

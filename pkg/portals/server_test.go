@@ -15,8 +15,13 @@
 package portals
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
+	"errors"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -480,6 +485,105 @@ func TestRun_UpstreamCAValidation(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatal("expected startup error for invalid upstream CA bundle, got nil")
+		}
+	})
+}
+
+func TestNewProxyServer_Timeouts(t *testing.T) {
+	for _, tlsCfg := range []*tls.Config{nil, {}} {
+		srv := newProxyServer("127.0.0.1:0", http.NotFoundHandler(), tlsCfg)
+		if srv.ReadHeaderTimeout != defaultProxyReadHeaderTimeout || srv.IdleTimeout != defaultProxyIdleTimeout {
+			t.Errorf("timeouts = (%v, %v), want (%v, %v)", srv.ReadHeaderTimeout, srv.IdleTimeout, defaultProxyReadHeaderTimeout, defaultProxyIdleTimeout)
+		}
+		if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
+			t.Errorf("ReadTimeout=%v WriteTimeout=%v, want 0 (unbounded for streaming)", srv.ReadTimeout, srv.WriteTimeout)
+		}
+	}
+
+	dial := func(t *testing.T, addr, payload string) net.Conn {
+		t.Helper()
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial %s: %v", addr, err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if payload != "" {
+			if _, err := conn.Write([]byte(payload)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+		}
+		return conn
+	}
+
+	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	httpSrv := newProxyServer(httpLn.Addr().String(), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream" {
+			_, _ = w.Write([]byte("part1-"))
+			w.(http.Flusher).Flush()
+			time.Sleep(200 * time.Millisecond)
+			_, _ = w.Write([]byte("part2"))
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}), nil)
+	httpSrv.ReadHeaderTimeout, httpSrv.IdleTimeout = 100*time.Millisecond, 50*time.Millisecond
+	go func() { _ = httpSrv.Serve(httpLn) }()
+	t.Cleanup(func() { _ = httpSrv.Close() })
+	httpAddr := httpLn.Addr().String()
+
+	t.Run("stalled HTTP headers closed", func(t *testing.T) {
+		conn := dial(t, httpAddr, "GET / HTTP/1.1\r\nHost: example.com\r\n")
+		if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Fatalf("expected EOF on stalled header conn, got: %v", err)
+		}
+	})
+
+	t.Run("idle keep-alive closed", func(t *testing.T) {
+		br := bufio.NewReader(dial(t, httpAddr, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if _, err := br.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Fatalf("expected EOF on idle keep-alive conn, got: %v", err)
+		}
+	})
+
+	t.Run("streaming response exceeds timeouts", func(t *testing.T) {
+		conn := dial(t, httpAddr, "GET /stream HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n")
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("read streaming response: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil || string(body) != "part1-part2" {
+			t.Fatalf("body = %q, err = %v; want %q", body, err, "part1-part2")
+		}
+	})
+
+	t.Run("stalled HTTPS handshake closed", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		srv := newProxyServer(ln.Addr().String(), http.NotFoundHandler(), &tls.Config{
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				return nil, errors.New("unexpected")
+			},
+		})
+		srv.ReadHeaderTimeout = 50 * time.Millisecond
+		go func() { _ = srv.ServeTLS(ln, "", "") }()
+		t.Cleanup(func() { _ = srv.Close() })
+
+		if _, err := dial(t, ln.Addr().String(), "").Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+			t.Fatalf("expected EOF on stalled TLS conn, got: %v", err)
 		}
 	})
 }

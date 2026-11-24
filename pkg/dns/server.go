@@ -77,13 +77,17 @@ type Config struct {
 	TTL uint32
 }
 
+// defaultTCPReadTimeout bounds how long the TCP DNS listener waits to read a client query.
+const defaultTCPReadTimeout = 5 * time.Second
+
 // Server serves DNS requests over UDP and TCP using golang.org/x/net/dns/dnsmessage.
 type Server struct {
-	config      Config
-	udpConn     net.PacketConn
-	tcpListener net.Listener
-	mu          sync.Mutex
-	started     bool
+	config         Config
+	tcpReadTimeout time.Duration
+	udpConn        net.PacketConn
+	tcpListener    net.Listener
+	mu             sync.Mutex
+	started        bool
 }
 
 // NewServer creates a new sidecar DNS Server.
@@ -102,7 +106,8 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		config: cfg,
+		config:         cfg,
+		tcpReadTimeout: defaultTCPReadTimeout,
 	}, nil
 }
 
@@ -422,6 +427,11 @@ func (s *Server) Start(ctx context.Context) error {
 	s.tcpListener = tcpListener
 	s.started = true
 
+	tcpReadTimeout := s.tcpReadTimeout
+	if tcpReadTimeout <= 0 {
+		tcpReadTimeout = defaultTCPReadTimeout
+	}
+
 	// Serve UDP
 	go func() {
 		buf := make([]byte, 4096)
@@ -459,6 +469,9 @@ func (s *Server) Start(ctx context.Context) error {
 				defer closeQuietly(c)
 				lenBuf := make([]byte, 2)
 				for {
+					if err := c.SetReadDeadline(time.Now().Add(tcpReadTimeout)); err != nil {
+						return
+					}
 					if _, err := io.ReadFull(c, lenBuf); err != nil {
 						return
 					}
@@ -473,6 +486,11 @@ func (s *Server) Start(ctx context.Context) error {
 						return
 					}
 					if len(respBytes) == 0 {
+						// Clear the query read deadline so dropped queries stay held
+						// until the peer closes or ctx is cancelled.
+						if err := c.SetReadDeadline(time.Time{}); err != nil {
+							return
+						}
 						HoldConnection(ctx, c)
 						return
 					}
