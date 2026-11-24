@@ -295,7 +295,7 @@ func runNetfilter(bin string, ruleCmds [][]string) error {
 				if args[2] == "-N" && strings.Contains(strings.ToLower(msg), "already exists") {
 					continue
 				}
-				if (args[2] == "-D" || args[2] == "-X") && (strings.Contains(strings.ToLower(msg), "does not exist") ||
+				if (args[2] == "-D" || args[2] == "-F" || args[2] == "-X") && (strings.Contains(strings.ToLower(msg), "does not exist") ||
 					strings.Contains(msg, "No chain/target/match by that name") ||
 					strings.Contains(strings.ToLower(msg), "bad rule") ||
 					strings.Contains(strings.ToLower(msg), "too many links")) {

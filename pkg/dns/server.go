@@ -448,6 +448,9 @@ func (s *Server) Start(ctx context.Context) error {
 		for {
 			n, clientAddr, err := udpConn.ReadFrom(buf)
 			if err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					log.Printf("DNS UDP read error: %v", err)
+				}
 				return
 			}
 			reqBytes := make([]byte, n)
@@ -473,6 +476,9 @@ func (s *Server) Start(ctx context.Context) error {
 		for {
 			conn, err := tcpListener.Accept()
 			if err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					log.Printf("DNS TCP accept error: %v", err)
+				}
 				return
 			}
 			go func(c net.Conn) {

@@ -2728,6 +2728,159 @@ spec:
 			t.Logf("musl pod %s (%d lookups) succeeded", muslPodName, lookupsPerPod*2)
 		}
 		t.Logf("verified musl client (alpine/git:v2.47.2) passed across %d pods and %d total lookups/clones", numMuslPods, totalMuslLookups)
+
+		// 16c. Sequential intercepted pods on the same node: pod 1 resolves and fetches the
+		// in-cluster HTTP service, pod 1 is deleted and cleaned up, then pod 2 resolves and
+		// fetches the same service (including under a restrictive egress NetworkPolicy paired
+		// with the companion proxy-port allow policy).
+		t.Run("SequentialPods_AfterCleanup", func(t *testing.T) {
+			createAndBindSeqPod := func(name string) {
+				t.Helper()
+				exec.Command("kubectl", "delete", "pod", name, "-n", sandboxNS, "--ignore-not-found", "--wait=true").Run()
+				t.Cleanup(func() {
+					exec.Command("kubectl", "delete", "pod", name, "-n", sandboxNS, "--ignore-not-found").Run()
+				})
+
+				manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: %s
+    seq-np-test: "true"
+    service-portal.gke.io/intercept: "true"
+spec:
+%s  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`, name, sandboxNS, name, runtimeClassField)
+				h.KubectlApplyContent(manifest)
+
+				var podUID string
+				for i := 0; i < 30; i++ {
+					cmdUID := exec.Command("kubectl", "get", "pod", name, "-n", sandboxNS, "-o", "jsonpath={.metadata.uid}")
+					if outUID, err := cmdUID.CombinedOutput(); err == nil && len(strings.TrimSpace(string(outUID))) > 0 {
+						podUID = strings.TrimSpace(string(outUID))
+						break
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				if podUID == "" {
+					t.Fatalf("failed to get pod UID for %s in %s", name, sandboxNS)
+				}
+
+				resp, err := bindClient.Bind(authCtx, &portalsv1.PodPolicy{
+					PodUid:   podUID,
+					Identity: "test-user-seq",
+					Policy:   sandboxPolicyProto,
+					Wait:     true,
+				})
+				if err != nil {
+					t.Fatalf("Bind with wait failed for %s: %v", name, err)
+				}
+				if resp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
+					t.Fatalf("expected Bind for %s to end in ACCEPTED, got %v (refusal: %s)", name, resp.GetStatus(), resp.GetRefusalReason())
+				}
+				h.WaitForPodReady("app="+name, 2*time.Minute)
+			}
+
+			fetchService := func(podName, reqPath string) {
+				t.Helper()
+				url := fmt.Sprintf("http://git-server.%s.svc/%s", sandboxNS, reqPath)
+				out, err := exec.Command("kubectl", "exec", podName, "-n", sandboxNS, "-c", "workload", "--",
+					"wget", "-T", "5", "-qO-", url).CombinedOutput()
+				if err != nil {
+					t.Fatalf("pod %s request to %s failed: %v (output: %s)", podName, url, err, out)
+				}
+				if !strings.Contains(h.GetPodLogsByNamespaceAndLabel(sandboxNS, "app=git-server", "toolbox"), "/"+reqPath) {
+					t.Fatalf("backend access log missing /%s", reqPath)
+				}
+			}
+
+			const seqPod1 = "test-client-seq-1"
+			const seqPod2 = "test-client-seq-2"
+
+			createAndBindSeqPod(seqPod1)
+			fetchService(seqPod1, "seq-pod-1")
+
+			// Delete pod 1 and wait for NRI host netfilter cleanup before starting pod 2
+			h.RunCommand("kubectl", "delete", "pod", seqPod1, "-n", sandboxNS, "--wait=true")
+			cleaned := false
+			for i := 0; i < 30; i++ {
+				nriLogs := h.GetPodLogsByNamespaceAndLabel("service-portal-system", "app=portal-node-agent", "nri-plugin")
+				if strings.Contains(nriLogs, "Cleaning up host-side netfilter rules for pod") &&
+					strings.Contains(nriLogs, sandboxNS+"/"+seqPod1) {
+					cleaned = true
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			if !cleaned {
+				t.Fatalf("expected nri-plugin logs to show cleanup for %s/%s", sandboxNS, seqPod1)
+			}
+
+			createAndBindSeqPod(seqPod2)
+			fetchService(seqPod2, "seq-pod-2")
+
+			// Verify intercepted pod continues to work under a restrictive egress NetworkPolicy
+			// when paired with the companion NetworkPolicy allowing the node proxy ports.
+			npManifest := fmt.Sprintf(`
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seq-restrictive-egress
+  namespace: %s
+spec:
+  podSelector:
+    matchLabels:
+      seq-np-test: "true"
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: git-server
+    ports:
+    - protocol: TCP
+      port: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: service-portal-intercept-egress
+  namespace: %s
+spec:
+  podSelector:
+    matchLabels:
+      service-portal.gke.io/intercept: "true"
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 1053
+    - protocol: TCP
+      port: 1053
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8443
+`, sandboxNS, sandboxNS)
+			h.KubectlApplyContent(npManifest)
+			t.Cleanup(func() {
+				exec.Command("kubectl", "delete", "networkpolicy", "seq-restrictive-egress", "service-portal-intercept-egress", "-n", sandboxNS, "--ignore-not-found").Run()
+			})
+			time.Sleep(3 * time.Second)
+			fetchService(seqPod2, "seq-pod-2-np")
+		})
 	})
 }
 

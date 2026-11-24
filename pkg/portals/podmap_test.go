@@ -114,6 +114,29 @@ func TestPodMapRemovePod(t *testing.T) {
 	}
 }
 
+func TestPodMapRemovePod_DoesNotEvictRecycledIP(t *testing.T) {
+	pm := NewPodMap()
+	pm.AddOrUpdatePod(&PodInfo{UID: "pod-old", IPs: []string{"10.244.0.30"}})
+	pm.AddOrUpdatePod(&PodInfo{UID: "pod-new", IPs: []string{"10.244.0.30"}})
+
+	pm.RemovePod("pod-old")
+	got, ok := pm.GetPodByIP("10.244.0.30")
+	if !ok || got.UID != "pod-new" {
+		t.Fatalf("expected recycled IP to remain mapped to pod-new, got ok=%v pod=%+v", ok, got)
+	}
+
+	// SynchronizePods pruning pod-old2 must also preserve pod-new2 on the same IP.
+	pm.AddOrUpdatePod(&PodInfo{UID: "pod-old-2", IPs: []string{"10.244.0.31"}})
+	pm.SynchronizePods([]PodInfo{
+		{UID: "pod-new", IPs: []string{"10.244.0.30"}},
+		{UID: "pod-new-2", IPs: []string{"10.244.0.31"}},
+	})
+	got2, ok := pm.GetPodByIP("10.244.0.31")
+	if !ok || got2.UID != "pod-new-2" {
+		t.Fatalf("expected recycled IP after SynchronizePods to remain mapped to pod-new-2, got ok=%v pod=%+v", ok, got2)
+	}
+}
+
 func TestPodMapSynchronizePods(t *testing.T) {
 	pm := NewPodMap()
 	pm.AddOrUpdatePod(&PodInfo{
