@@ -892,12 +892,13 @@ spec:
 	}
 
 	proxyIP := net.ParseIP("127.0.0.2")
-	srv, err := dns.NewServer(dns.Config{
-		BindAddr:      "127.0.0.1:0",
-		ProxyIPv4:     proxyIP,
-		Evaluator:     rr,
-		DefaultAction: "Deny",
-	})
+	var dnsCfg dns.Config
+	dnsCfg.InitDefaults()
+	dnsCfg.BindAddr = "127.0.0.1:0"
+	dnsCfg.ProxyIPv4 = proxyIP
+	dnsCfg.Evaluator = rr
+	dnsCfg.DefaultAction = "Deny"
+	srv, err := dns.NewServer(dnsCfg)
 	if err != nil {
 		t.Fatalf("failed to create DNS server: %v", err)
 	}

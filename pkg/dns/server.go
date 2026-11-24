@@ -77,7 +77,21 @@ type Config struct {
 	TTL uint32
 }
 
+// InitDefaults sets all configuration fields with defaults to their default values.
+func (c *Config) InitDefaults() {
+	c.BindAddr = defaultBindAddr
+	c.ProxyIPv4 = net.ParseIP(defaultProxyIPv4)
+	c.TTL = defaultTTL
+	c.Timeouts.InitDefaults()
+}
+
 const (
+	// defaultBindAddr is the default listen address for the DNS server.
+	defaultBindAddr = "127.0.0.1:53"
+	// defaultProxyIPv4 is the default IPv4 address of the proxy returned for matching hosts.
+	defaultProxyIPv4 = "127.0.0.2"
+	// defaultTTL is the default time-to-live for generated A and AAAA records in seconds.
+	defaultTTL = 60
 	// defaultForwardTimeout is the default timeout for forwarding queries to upstream resolvers.
 	defaultForwardTimeout = 3 * time.Second
 	// defaultTCPReadTimeout bounds how long the TCP DNS listener waits to read a client query.
@@ -108,20 +122,8 @@ type Server struct {
 }
 
 // NewServer creates a new sidecar DNS Server.
+// Callers should call cfg.InitDefaults() before overriding fields.
 func NewServer(cfg Config) (*Server, error) {
-	if cfg.BindAddr == "" {
-		cfg.BindAddr = "127.0.0.1:53"
-	}
-	if cfg.ProxyIPv4 == nil {
-		cfg.ProxyIPv4 = net.ParseIP("127.0.0.2")
-	}
-	if cfg.Timeouts == (TimeoutOptions{}) {
-		cfg.Timeouts.InitDefaults()
-	}
-	if cfg.TTL == 0 {
-		cfg.TTL = 60
-	}
-
 	return &Server{
 		config: cfg,
 	}, nil

@@ -150,11 +150,12 @@ func TestDNSServer_Match_A(t *testing.T) {
 	})
 
 	proxyIP := net.ParseIP("127.0.0.2")
-	srv, err := NewServer(Config{
-		BindAddr:  "127.0.0.1:0",
-		ProxyIPv4: proxyIP,
-		Evaluator: evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.ProxyIPv4 = proxyIP
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -195,12 +196,13 @@ func TestDNSServer_Match_AAAA(t *testing.T) {
 	})
 
 	proxyIPv6 := net.ParseIP("::1")
-	srv, err := NewServer(Config{
-		BindAddr:  "127.0.0.1:0",
-		ProxyIPv4: net.ParseIP("127.0.0.2"),
-		ProxyIPv6: proxyIPv6,
-		Evaluator: evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.ProxyIPv4 = net.ParseIP("127.0.0.2")
+	cfg.ProxyIPv6 = proxyIPv6
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -240,10 +242,11 @@ func TestDNSServer_Match_OtherTypes_NoData(t *testing.T) {
 		return DecisionDefault
 	})
 
-	srv, err := NewServer(Config{
-		BindAddr:  "127.0.0.1:0",
-		Evaluator: evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -275,11 +278,12 @@ func TestDNSServer_Deny_NXDOMAIN(t *testing.T) {
 		return DecisionDefault
 	})
 
-	srv, err := NewServer(Config{
-		BindAddr:      "127.0.0.1:0",
-		DefaultAction: "Deny",
-		Evaluator:     evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Deny"
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -363,12 +367,13 @@ func TestDNSServer_Forward_Allow(t *testing.T) {
 		return DecisionDefault
 	})
 
-	srv, err := NewServer(Config{
-		BindAddr:        "127.0.0.1:0",
-		DefaultAction:   "Allow",
-		UpstreamServers: []string{upstreamAddr},
-		Evaluator:       evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Allow"
+	cfg.UpstreamServers = []string{upstreamAddr}
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -408,11 +413,12 @@ func TestDNSServer_TCP(t *testing.T) {
 	})
 
 	proxyIP := net.ParseIP("127.0.0.2")
-	srv, err := NewServer(Config{
-		BindAddr:  "127.0.0.1:0",
-		ProxyIPv4: proxyIP,
-		Evaluator: evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.ProxyIPv4 = proxyIP
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -541,11 +547,12 @@ func TestDNSServer_Forward_Truncation(t *testing.T) {
 	}()
 
 	// Setup sidecar DNS server configured with DefaultAction: Allow
-	srv, err := NewServer(Config{
-		BindAddr:        "127.0.0.1:0",
-		DefaultAction:   "Allow",
-		UpstreamServers: []string{upstreamAddr},
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Allow"
+	cfg.UpstreamServers = []string{upstreamAddr}
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -610,11 +617,12 @@ func TestDNSServer_Drop_UDP(t *testing.T) {
 		matchHosts: map[string]bool{"allowed.example.com": true},
 	}
 
-	srv, err := NewServer(Config{
-		BindAddr:      "127.0.0.1:0",
-		DefaultAction: "Deny",
-		Evaluator:     matcher,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Deny"
+	cfg.Evaluator = matcher
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -689,11 +697,12 @@ func TestDNSServer_Drop_TCP(t *testing.T) {
 		matchHosts: map[string]bool{"allowed.example.com": true},
 	}
 
-	srv, err := NewServer(Config{
-		BindAddr:      "127.0.0.1:0",
-		DefaultAction: "Deny",
-		Evaluator:     evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Deny"
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -869,12 +878,13 @@ func TestDNSServer_NXDomain_OverridesDefaultActionForward(t *testing.T) {
 		return DecisionDefault
 	})
 
-	srv, err := NewServer(Config{
-		BindAddr:        "127.0.0.1:0",
-		DefaultAction:   "Allow",
-		UpstreamServers: []string{upstreamAddr},
-		Evaluator:       evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Allow"
+	cfg.UpstreamServers = []string{upstreamAddr}
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -968,12 +978,13 @@ func TestDNSServer_UnknownDecision_FailsClosed(t *testing.T) {
 		return DecisionDefault
 	})
 
-	srv, err := NewServer(Config{
-		BindAddr:        "127.0.0.1:0",
-		DefaultAction:   "Allow",
-		UpstreamServers: []string{upstreamAddr},
-		Evaluator:       evaluator,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Allow"
+	cfg.UpstreamServers = []string{upstreamAddr}
+	cfg.Evaluator = evaluator
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
@@ -1007,6 +1018,57 @@ func TestDNSServer_UnknownDecision_FailsClosed(t *testing.T) {
 	}
 }
 
+func TestConfig_InitDefaults(t *testing.T) {
+	defaults := Config{
+		BindAddr:  defaultBindAddr,
+		ProxyIPv4: net.ParseIP(defaultProxyIPv4),
+		TTL:       defaultTTL,
+		Timeouts: TimeoutOptions{
+			ForwardTimeout: defaultForwardTimeout,
+			TCPReadTimeout: defaultTCPReadTimeout,
+		},
+	}
+	assertConfig := func(t *testing.T, got, want Config) {
+		t.Helper()
+		if got.BindAddr != want.BindAddr || !got.ProxyIPv4.Equal(want.ProxyIPv4) || got.TTL != want.TTL || got.Timeouts != want.Timeouts {
+			t.Fatalf("Config = %+v, want %+v", got, want)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   Config
+	}{
+		{"zero value", Config{}},
+		{"existing values overwritten", Config{
+			BindAddr:  "0.0.0.0:1053",
+			ProxyIPv4: net.ParseIP("10.0.0.1"),
+			TTL:       300,
+			Timeouts:  TimeoutOptions{ForwardTimeout: 7 * time.Second, TCPReadTimeout: 80 * time.Millisecond},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.in
+			got.InitDefaults()
+			assertConfig(t, got, defaults)
+		})
+	}
+
+	t.Run("NewServer preserves Config as passed", func(t *testing.T) {
+		var cfg Config
+		cfg.InitDefaults()
+		cfg.BindAddr = "127.0.0.1:1053"
+		cfg.ProxyIPv4 = net.ParseIP("10.0.0.2")
+		cfg.TTL = 120
+		cfg.Timeouts.TCPReadTimeout = 80 * time.Millisecond
+		srv, err := NewServer(cfg)
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		assertConfig(t, srv.config, cfg)
+	})
+}
+
 func TestTimeoutOptions_InitDefaults(t *testing.T) {
 	defaults := TimeoutOptions{
 		ForwardTimeout: defaultForwardTimeout,
@@ -1028,45 +1090,16 @@ func TestTimeoutOptions_InitDefaults(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("NewServer applies defaults for zero Timeouts", func(t *testing.T) {
-		srv, err := NewServer(Config{})
-		if err != nil {
-			t.Fatalf("NewServer: %v", err)
-		}
-		if srv.config.Timeouts != defaults {
-			t.Fatalf("NewServer Timeouts = %+v, want %+v", srv.config.Timeouts, defaults)
-		}
-	})
-
-	t.Run("NewServer preserves overridden Timeouts", func(t *testing.T) {
-		var timeouts TimeoutOptions
-		timeouts.InitDefaults()
-		timeouts.TCPReadTimeout = 80 * time.Millisecond
-		srv, err := NewServer(Config{Timeouts: timeouts})
-		if err != nil {
-			t.Fatalf("NewServer: %v", err)
-		}
-		want := TimeoutOptions{
-			ForwardTimeout: defaultForwardTimeout,
-			TCPReadTimeout: 80 * time.Millisecond,
-		}
-		if srv.config.Timeouts != want {
-			t.Fatalf("NewServer Timeouts = %+v, want %+v", srv.config.Timeouts, want)
-		}
-	})
 }
 
 func TestDNSServer_TCPReadTimeout(t *testing.T) {
-	var timeouts TimeoutOptions
-	timeouts.InitDefaults()
-	timeouts.TCPReadTimeout = 80 * time.Millisecond
-	srv, err := NewServer(Config{
-		BindAddr:      "127.0.0.1:0",
-		DefaultAction: "Deny",
-		Evaluator:     &dropAndMatch{dropHosts: map[string]bool{"unbound.example.com": true}},
-		Timeouts:      timeouts,
-	})
+	var cfg Config
+	cfg.InitDefaults()
+	cfg.BindAddr = "127.0.0.1:0"
+	cfg.DefaultAction = "Deny"
+	cfg.Evaluator = &dropAndMatch{dropHosts: map[string]bool{"unbound.example.com": true}}
+	cfg.Timeouts.TCPReadTimeout = 80 * time.Millisecond
+	srv, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
