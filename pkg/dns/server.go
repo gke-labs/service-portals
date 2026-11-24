@@ -92,14 +92,10 @@ type TimeoutOptions struct {
 	TCPReadTimeout time.Duration
 }
 
-// InitDefaults populates unset or non-positive timeout values with defaults.
+// InitDefaults sets all timeout fields to their default values.
 func (o *TimeoutOptions) InitDefaults() {
-	if o.ForwardTimeout <= 0 {
-		o.ForwardTimeout = defaultForwardTimeout
-	}
-	if o.TCPReadTimeout <= 0 {
-		o.TCPReadTimeout = defaultTCPReadTimeout
-	}
+	o.ForwardTimeout = defaultForwardTimeout
+	o.TCPReadTimeout = defaultTCPReadTimeout
 }
 
 // Server serves DNS requests over UDP and TCP using golang.org/x/net/dns/dnsmessage.
@@ -119,7 +115,9 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.ProxyIPv4 == nil {
 		cfg.ProxyIPv4 = net.ParseIP("127.0.0.2")
 	}
-	cfg.Timeouts.InitDefaults()
+	if cfg.Timeouts == (TimeoutOptions{}) {
+		cfg.Timeouts.InitDefaults()
+	}
 	if cfg.TTL == 0 {
 		cfg.TTL = 60
 	}

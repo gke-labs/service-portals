@@ -569,12 +569,15 @@ func Run(ctx context.Context, config Config) error {
 			if addr == "" {
 				continue
 			}
+			var timeouts dns.TimeoutOptions
+			timeouts.InitDefaults()
 			dnsCfg := dns.Config{
 				BindAddr:      addr,
 				ProxyIPv4:     proxyIPv4,
 				ProxyIPv6:     proxyIPv6,
 				Evaluator:     evaluator,
 				DefaultAction: defaultAction,
+				Timeouts:      timeouts,
 			}
 			s, err := dns.NewServer(dnsCfg)
 			if err != nil {
