@@ -251,6 +251,33 @@ kubectl set env daemonset/portal-node-agent -n service-portal-system -c proxy LO
 
 For response status meanings and destination traffic handling, see [docs/controller.md](controller.md#what-the-answers-mean) and [What Happens to Unallowed Traffic](controller.md#what-happens-to-unallowed-traffic).
 
+### Using Kubernetes NetworkPolicy with NRI Mode
+`service-portal-nri-plugin` DNATs intercepted pod traffic in host `nat/PREROUTING` to the local node proxy (`<nodeIP>:1053` for DNS, `<nodeIP>:8080` for HTTP, and `<nodeIP>:8443` for HTTPS). CNIs that enforce Kubernetes `NetworkPolicy` after `PREROUTING` on host `INPUT` (such as `kindnet`'s `kube-network-policies` nftables `input` chain) evaluate egress rules against the post-DNAT node IP and proxy ports, not the original service destination. Because `portal-node-agent` uses `hostNetwork: true`, a `podSelector` targeting `portal-node-agent` does not match the node IP.
+
+If a workload namespace enforces an egress `NetworkPolicy` on intercepted pods, add a companion `NetworkPolicy` allowing the proxy ports for opted-in pods (host-side `PORTAL_EG_<iface>` rules already restrict those pods to the local node proxy address and ports):
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: service-portal-intercept-egress
+spec:
+  podSelector:
+    matchLabels:
+      service-portal.gke.io/intercept: "true"
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 1053
+    - protocol: TCP
+      port: 1053
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8443
+```
+
 ### Agent Restart vs. Node Reboot
 - **Node Agent Restart**: Bindings and secrets are stored in host tmpfs at `/run/service-portal/store`. They survive proxy container restarts, crashes, and DaemonSet upgrades without re-binding.
 - **Node Reboot**: Host tmpfs is cleared on node reboot. All bindings and secrets are lost. The sandbox controller must re-push bindings for pods on that node.

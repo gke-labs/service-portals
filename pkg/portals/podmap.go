@@ -67,7 +67,9 @@ func (pm *PodMap) addOrUpdateLocked(info *PodInfo) {
 		}
 		for _, old := range ex.IPs {
 			if !newIPs[old] {
-				delete(pm.byIP, old)
+				if cur, exists := pm.byIP[old]; exists && cur.UID == info.UID {
+					delete(pm.byIP, old)
+				}
 			}
 		}
 	}
@@ -107,7 +109,9 @@ func (pm *PodMap) RemovePod(uid string) {
 	pm.mu.Lock()
 	if pod, ok := pm.byUID[uid]; ok {
 		for _, ip := range pod.IPs {
-			delete(pm.byIP, ip)
+			if cur, exists := pm.byIP[ip]; exists && cur.UID == uid {
+				delete(pm.byIP, ip)
+			}
 		}
 		delete(pm.byUID, uid)
 		pm.notifyWatchersLocked()
@@ -137,7 +141,9 @@ func (pm *PodMap) SynchronizePods(pods []PodInfo) {
 	for uid, pod := range pm.byUID {
 		if !active[uid] {
 			for _, ip := range pod.IPs {
-				delete(pm.byIP, ip)
+				if cur, exists := pm.byIP[ip]; exists && cur.UID == uid {
+					delete(pm.byIP, ip)
+				}
 			}
 			delete(pm.byUID, uid)
 			changed = true

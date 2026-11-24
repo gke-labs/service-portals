@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -859,5 +860,19 @@ func TestConfigurePodDualStack(t *testing.T) {
 	}
 	if len(cleanupV6) == 0 {
 		t.Errorf("expected IPv6 cleanup rules, got none")
+	}
+}
+
+func TestRunNetfilter_CleanupMissingChainsIdempotent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test requires unix")
+	}
+	script := filepath.Join(t.TempDir(), "fake-ip6tables")
+	body := "#!/bin/sh\necho 'ip6tables: No chain/target/match by that name.' >&2\nexit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to write fake ip6tables script: %v", err)
+	}
+	if err := runNetfilter(script, buildHostCleanupRules("veth12345")); err != nil {
+		t.Fatalf("expected cleanup on missing chains to be idempotent, got: %v", err)
 	}
 }
