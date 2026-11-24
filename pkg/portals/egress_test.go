@@ -1505,13 +1505,14 @@ func TestEgressHandler_DNSServer_BoundedAnswers(t *testing.T) {
 
 	proxyIPv4 := net.ParseIP("127.0.0.2")
 	proxyIPv6 := net.ParseIP("::1")
-	srv, err := dns.NewServer(dns.Config{
-		BindAddr:      "127.0.0.1:0",
-		ProxyIPv4:     proxyIPv4,
-		ProxyIPv6:     proxyIPv6,
-		Evaluator:     handler,
-		DefaultAction: "Deny",
-	})
+	var dnsCfg dns.Config
+	dnsCfg.InitDefaults()
+	dnsCfg.BindAddr = "127.0.0.1:0"
+	dnsCfg.ProxyIPv4 = proxyIPv4
+	dnsCfg.ProxyIPv6 = proxyIPv6
+	dnsCfg.Evaluator = handler
+	dnsCfg.DefaultAction = "Deny"
+	srv, err := dns.NewServer(dnsCfg)
 	if err != nil {
 		t.Fatalf("failed to create DNS server: %v", err)
 	}

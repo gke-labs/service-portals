@@ -569,16 +569,15 @@ func Run(ctx context.Context, config Config) error {
 			if addr == "" {
 				continue
 			}
-			var timeouts dns.TimeoutOptions
-			timeouts.InitDefaults()
-			dnsCfg := dns.Config{
-				BindAddr:      addr,
-				ProxyIPv4:     proxyIPv4,
-				ProxyIPv6:     proxyIPv6,
-				Evaluator:     evaluator,
-				DefaultAction: defaultAction,
-				Timeouts:      timeouts,
+			var dnsCfg dns.Config
+			dnsCfg.InitDefaults()
+			dnsCfg.BindAddr = addr
+			if proxyIPv4 != nil {
+				dnsCfg.ProxyIPv4 = proxyIPv4
 			}
+			dnsCfg.ProxyIPv6 = proxyIPv6
+			dnsCfg.Evaluator = evaluator
+			dnsCfg.DefaultAction = defaultAction
 			s, err := dns.NewServer(dnsCfg)
 			if err != nil {
 				return fmt.Errorf("failed to create DNS server for %s: %w", addr, err)
