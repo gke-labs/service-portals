@@ -99,6 +99,12 @@ The client encapsulates TLS verification against the controller's CA certificate
 2. **Bind Policy and Secrets (`Bind`)**: Call `client.Bind` passing the pod UID, `EgressPolicy`, and companion secrets map (or `nil` if none). The client executes the complete step synchronously: pushing the policy, then pushing secrets when provided, and returning success only when the node agent accepts all configurations.
 3. **Verify Acceptance**: Only `ACCEPTANCE_STATUS_ACCEPTED` is treated as success (returning `nil`). Any pending or refused final outcome is returned as a `*client.StatusError` that exposes the acceptance status, refusal reason, and missing secret names without leaking secret values. Release and unpause the sandbox container **only** when `Bind` succeeds.
 
+### Secret Naming
+
+Policy and secrets arrive at the node in two separate `PodBindService` calls (`Bind` and `InjectSecrets`), including when invoked through `client.Bind`. Calling `Bind` on an already-bound pod replaces its policy while retaining the pod's existing secrets until `InjectSecrets` is called.
+
+Include the destination in secret names (for example, `api.github.com-token` rather than `token`) and do not reuse a secret name for a different destination. That way, a policy update cannot misdirect an existing secret to a different host during the window between `Bind` and `InjectSecrets`.
+
 ### Example Go Implementation
 
 A complete, runnable example using the client package is maintained in [`pkg/controller/example_test.go`](../pkg/controller/example_test.go) (`ExamplePodBindServiceClient`), which is compiled and tested in presubmit CI.
@@ -137,7 +143,7 @@ The sandbox controller supplies an `EgressPolicy` containing `rules`. Outbound t
 
 Here is an example policy that provides:
 1. HTTPS rules for hosts requiring no credentials (`api.anthropic.com`, `crates.io`).
-2. An HTTPS rule for `api.github.com` that swaps the `Authorization` header with a named secret (`secret://github-token`).
+2. An HTTPS rule for `api.github.com` that swaps the `Authorization` header with a destination-scoped named secret (`secret://api.github.com-token`).
 
 > **Important: All HTTPS rules intercept TLS.** An HTTPS rule without `effects` (like `api.anthropic.com` below) is still terminated at the node proxy with a dynamically generated certificate signed by the pod-local CA, and re-encrypted upstream. The sandbox container must trust that pod-local CA for these connections as well. This is intercepted TLS, not raw TCP/TLS forwarding (`tls_passthrough` is an unsupported feature and is rejected by policy validation).
 
@@ -159,7 +165,7 @@ Here is an example policy that provides:
             {
               "header": "Authorization",
               "prefix": "Bearer ",
-              "credentialUri": "secret://github-token"
+              "credentialUri": "secret://api.github.com-token"
             }
           ]
         }
