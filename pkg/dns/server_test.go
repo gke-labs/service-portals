@@ -1015,22 +1015,21 @@ func TestTimeoutOptions_InitDefaults(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		in   TimeoutOptions
-		want TimeoutOptions
 	}{
-		{"zero values", TimeoutOptions{}, defaults},
-		{"negative values", TimeoutOptions{ForwardTimeout: -time.Second, TCPReadTimeout: -time.Second}, defaults},
-		{"explicit values preserved", TimeoutOptions{ForwardTimeout: 7 * time.Second, TCPReadTimeout: 80 * time.Millisecond}, TimeoutOptions{ForwardTimeout: 7 * time.Second, TCPReadTimeout: 80 * time.Millisecond}},
+		{"zero values", TimeoutOptions{}},
+		{"negative values", TimeoutOptions{ForwardTimeout: -time.Second, TCPReadTimeout: -time.Second}},
+		{"existing values overwritten", TimeoutOptions{ForwardTimeout: 7 * time.Second, TCPReadTimeout: 80 * time.Millisecond}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.in
 			got.InitDefaults()
-			if got != tc.want {
-				t.Fatalf("InitDefaults() = %+v, want %+v", got, tc.want)
+			if got != defaults {
+				t.Fatalf("InitDefaults() = %+v, want %+v", got, defaults)
 			}
 		})
 	}
 
-	t.Run("NewServer applies defaults", func(t *testing.T) {
+	t.Run("NewServer applies defaults for zero Timeouts", func(t *testing.T) {
 		srv, err := NewServer(Config{})
 		if err != nil {
 			t.Fatalf("NewServer: %v", err)
@@ -1039,14 +1038,34 @@ func TestTimeoutOptions_InitDefaults(t *testing.T) {
 			t.Fatalf("NewServer Timeouts = %+v, want %+v", srv.config.Timeouts, defaults)
 		}
 	})
+
+	t.Run("NewServer preserves overridden Timeouts", func(t *testing.T) {
+		var timeouts TimeoutOptions
+		timeouts.InitDefaults()
+		timeouts.TCPReadTimeout = 80 * time.Millisecond
+		srv, err := NewServer(Config{Timeouts: timeouts})
+		if err != nil {
+			t.Fatalf("NewServer: %v", err)
+		}
+		want := TimeoutOptions{
+			ForwardTimeout: defaultForwardTimeout,
+			TCPReadTimeout: 80 * time.Millisecond,
+		}
+		if srv.config.Timeouts != want {
+			t.Fatalf("NewServer Timeouts = %+v, want %+v", srv.config.Timeouts, want)
+		}
+	})
 }
 
 func TestDNSServer_TCPReadTimeout(t *testing.T) {
+	var timeouts TimeoutOptions
+	timeouts.InitDefaults()
+	timeouts.TCPReadTimeout = 80 * time.Millisecond
 	srv, err := NewServer(Config{
 		BindAddr:      "127.0.0.1:0",
 		DefaultAction: "Deny",
 		Evaluator:     &dropAndMatch{dropHosts: map[string]bool{"unbound.example.com": true}},
-		Timeouts:      TimeoutOptions{TCPReadTimeout: 80 * time.Millisecond},
+		Timeouts:      timeouts,
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
