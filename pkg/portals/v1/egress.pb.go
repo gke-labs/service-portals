@@ -542,8 +542,19 @@ type HttpRuleEffects struct {
 	// +k8s:customUnique # case-insensitive
 	// +k8s:customValidation # for duplicate headers
 	ReplaceHeaders []*CredentialHeader `protobuf:"bytes,1,rep,name=replace_headers,json=replaceHeaders,proto3" json:"replace_headers,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Forwards matched requests to the configured backend service URL (for
+	// example, "http://goproxy-cache.service-portal-system.svc:8080") instead of
+	// dialing the original destination. Client-side TLS interception remains
+	// transparent to the Actor.
+	//
+	// Must use the http or https scheme with a non-empty host, and must not
+	// contain userinfo, query strings, fragments, or a non-root path.
+	//
+	// +k8s:optional
+	// +k8s:customValidation # format
+	BackendUrl    string `protobuf:"bytes,1000,opt,name=backend_url,json=backendUrl,proto3" json:"backend_url,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HttpRuleEffects) Reset() {
@@ -581,6 +592,13 @@ func (x *HttpRuleEffects) GetReplaceHeaders() []*CredentialHeader {
 		return x.ReplaceHeaders
 	}
 	return nil
+}
+
+func (x *HttpRuleEffects) GetBackendUrl() string {
+	if x != nil {
+		return x.BackendUrl
+	}
+	return ""
 }
 
 // CredentialHeader replaces the value of an HTTP request header with a
@@ -775,9 +793,11 @@ const file_pkg_portals_v1_egress_proto_rawDesc = "" +
 	"\x03all\x18\x01 \x01(\v2\x14.portals.v1.AllPortsR\x03all\x12\x18\n" +
 	"\anumbers\x18\x02 \x03(\x05R\anumbers\"\n" +
 	"\n" +
-	"\bAllPorts\"X\n" +
+	"\bAllPorts\"z\n" +
 	"\x0fHttpRuleEffects\x12E\n" +
-	"\x0freplace_headers\x18\x01 \x03(\v2\x1c.portals.v1.CredentialHeaderR\x0ereplaceHeaders\"\xa2\x01\n" +
+	"\x0freplace_headers\x18\x01 \x03(\v2\x1c.portals.v1.CredentialHeaderR\x0ereplaceHeaders\x12 \n" +
+	"\vbackend_url\x18\xe8\a \x01(\tR\n" +
+	"backendUrl\"\xa2\x01\n" +
 	"\x10CredentialHeader\x12\x16\n" +
 	"\x06header\x18\x01 \x01(\tR\x06header\x12\x16\n" +
 	"\x06prefix\x18\x02 \x01(\tR\x06prefix\x12%\n" +
