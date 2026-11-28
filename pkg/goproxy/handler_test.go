@@ -26,9 +26,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gke-labs/service-portals/pkg/diskcache"
 )
 
-func newTestProxyWithConfig(t *testing.T, upstream http.Handler, customize func(*Config)) (*Handler, *httptest.Server, *time.Time) {
+func newTestProxyWithConfig(t *testing.T, upstream http.Handler, customize func(*Config)) (*Handler, string, *httptest.Server, *time.Time) {
 	t.Helper()
 	up := httptest.NewServer(upstream)
 	t.Cleanup(up.Close)
@@ -50,10 +52,10 @@ func newTestProxyWithConfig(t *testing.T, upstream http.Handler, customize func(
 
 	proxySrv := httptest.NewServer(h)
 	t.Cleanup(proxySrv.Close)
-	return h, proxySrv, &now
+	return h, cfg.CacheDir, proxySrv, &now
 }
 
-func newTestProxy(t *testing.T, upstream http.Handler, mutableTTL time.Duration) (*Handler, *httptest.Server, *time.Time) {
+func newTestProxy(t *testing.T, upstream http.Handler, mutableTTL time.Duration) (*Handler, string, *httptest.Server, *time.Time) {
 	t.Helper()
 	return newTestProxyWithConfig(t, upstream, func(cfg *Config) {
 		if mutableTTL > 0 {
@@ -90,7 +92,7 @@ func TestImmutableCaching(t *testing.T) {
 		"/example.com/mod/@v/v1.0.0.mod":  "module example.com/mod",
 		"/example.com/mod/@v/v1.0.0.info": `{"Version":"v1.0.0"}`,
 	}
-	_, srv, now := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, _, srv, now := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		body, ok := payloads[r.URL.Path]
 		if !ok {
@@ -148,7 +150,7 @@ func TestMutableTTLExpiry(t *testing.T) {
 		latestV2 = `{"Version":"v1.1.0"}`
 	)
 
-	_, srv, now := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, _, srv, now := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		v := version.Load()
 		var body string
@@ -218,7 +220,7 @@ func TestConcurrentMissDeduplication(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 
-	_, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, _, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		select {
 		case started <- struct{}{}:
@@ -261,7 +263,7 @@ func TestConcurrentMissDeduplication(t *testing.T) {
 func TestRetryOnTransientUpstreamErrors(t *testing.T) {
 	t.Run("5xx recovers", func(t *testing.T) {
 		var hits atomic.Int32
-		_, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if hits.Add(1) < 3 {
 				http.Error(w, "temporary failure", http.StatusServiceUnavailable)
 				return
@@ -287,7 +289,7 @@ func TestRetryOnTransientUpstreamErrors(t *testing.T) {
 
 	t.Run("connection drop EOF recovers", func(t *testing.T) {
 		var hits atomic.Int32
-		_, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if hits.Add(1) == 1 {
 				hj, ok := w.(http.Hijacker)
 				if !ok {
@@ -320,7 +322,7 @@ func TestRetryOnTransientUpstreamErrors(t *testing.T) {
 
 	t.Run("partial body EOF recovers", func(t *testing.T) {
 		var hits atomic.Int32
-		h, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, cacheDir, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if hits.Add(1) == 1 {
 				w.Header().Set("Content-Length", "100")
 				w.WriteHeader(http.StatusOK)
@@ -344,7 +346,7 @@ func TestRetryOnTransientUpstreamErrors(t *testing.T) {
 		if got := hits.Load(); got != 2 {
 			t.Fatalf("upstream hits = %d, want 2", got)
 		}
-		entries, err := os.ReadDir(h.cacheDir)
+		entries, err := os.ReadDir(cacheDir)
 		if err != nil {
 			t.Fatalf("ReadDir: %v", err)
 		}
@@ -357,7 +359,7 @@ func TestRetryOnTransientUpstreamErrors(t *testing.T) {
 func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 	t.Run("404 not retried and not cached", func(t *testing.T) {
 		var hits atomic.Int32
-		h, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, cacheDir, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits.Add(1)
 			http.Error(w, "not found", http.StatusNotFound)
 		}), 5*time.Minute)
@@ -370,7 +372,7 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 		if code != http.StatusNotFound || hits.Load() != 2 {
 			t.Fatalf("second 404 = (%d, hits=%d), want (404, 2)", code, hits.Load())
 		}
-		entries, err := os.ReadDir(h.cacheDir)
+		entries, err := os.ReadDir(cacheDir)
 		if err != nil {
 			t.Fatalf("ReadDir: %v", err)
 		}
@@ -381,7 +383,7 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 
 	t.Run("persistent 500 not cached", func(t *testing.T) {
 		var hits atomic.Int32
-		h, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, cacheDir, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits.Add(1)
 			http.Error(w, "boom", http.StatusInternalServerError)
 		}), 5*time.Minute)
@@ -390,7 +392,7 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 		if code != http.StatusInternalServerError || hits.Load() != maxAttempts {
 			t.Fatalf("500 = (%d, hits=%d), want (500, %d)", code, hits.Load(), maxAttempts)
 		}
-		entries, err := os.ReadDir(h.cacheDir)
+		entries, err := os.ReadDir(cacheDir)
 		if err != nil {
 			t.Fatalf("ReadDir: %v", err)
 		}
@@ -401,7 +403,7 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 
 	t.Run("persistent partial body not cached", func(t *testing.T) {
 		var hits atomic.Int32
-		h, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, cacheDir, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits.Add(1)
 			w.Header().Set("Content-Length", "100")
 			w.WriteHeader(http.StatusOK)
@@ -418,7 +420,7 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 		if code != http.StatusBadGateway || hits.Load() != maxAttempts {
 			t.Fatalf("truncated = (%d, hits=%d), want (502, %d)", code, hits.Load(), maxAttempts)
 		}
-		entries, err := os.ReadDir(h.cacheDir)
+		entries, err := os.ReadDir(cacheDir)
 		if err != nil {
 			t.Fatalf("ReadDir: %v", err)
 		}
@@ -429,7 +431,7 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 
 	t.Run("POST is neither cached nor retried", func(t *testing.T) {
 		var hits atomic.Int32
-		h, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, cacheDir, srv, _ := newTestProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits.Add(1)
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		}), 5*time.Minute)
@@ -438,7 +440,7 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 		if code != http.StatusServiceUnavailable || hits.Load() != 1 {
 			t.Fatalf("POST = (%d, hits=%d), want (503, 1)", code, hits.Load())
 		}
-		entries, err := os.ReadDir(h.cacheDir)
+		entries, err := os.ReadDir(cacheDir)
 		if err != nil {
 			t.Fatalf("ReadDir: %v", err)
 		}
@@ -480,7 +482,7 @@ func TestLRUEviction(t *testing.T) {
 		return hits[p]
 	}
 
-	h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, cacheDir, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hitsMu.Lock()
 		hits[r.URL.Path]++
 		hitsMu.Unlock()
@@ -515,7 +517,7 @@ func TestLRUEviction(t *testing.T) {
 	if code != http.StatusOK || body != payloads[pathC] {
 		t.Fatalf("GET %s = (%d, %q), want (200, %q)", pathC, code, body, payloads[pathC])
 	}
-	if got := cacheDirBytes(t, h.cacheDir); got > 20 {
+	if got := cacheDirBytes(t, cacheDir); got > 20 {
 		t.Fatalf("cacheDirBytes = %d, want <= 20", got)
 	}
 
@@ -532,7 +534,7 @@ func TestLRUEviction(t *testing.T) {
 	if code != http.StatusOK || body != payloads[pathD] {
 		t.Fatalf("GET %s = (%d, %q), want (200, %q)", pathD, code, body, payloads[pathD])
 	}
-	if got := cacheDirBytes(t, h.cacheDir); got > 20 {
+	if got := cacheDirBytes(t, cacheDir); got > 20 {
 		t.Fatalf("cacheDirBytes = %d, want <= 20", got)
 	}
 
@@ -548,7 +550,7 @@ func TestCacheHitDoesNotExtendMutableTTL(t *testing.T) {
 	var version atomic.Int32
 	version.Store(1)
 
-	h, srv, now := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h, _, srv, now := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		v := version.Load()
 		var body string
@@ -580,7 +582,7 @@ func TestCacheHitDoesNotExtendMutableTTL(t *testing.T) {
 		if code != http.StatusOK || body != tc.want1 {
 			t.Fatalf("initial GET %s = (%d, %q), want (200, %q)", tc.path, code, body, tc.want1)
 		}
-		infoBefore, err := os.Stat(filepath.Join(h.cacheDir, cacheFileName(tc.path)))
+		infoBefore, err := h.cache.Stat(tc.path)
 		if err != nil {
 			t.Fatalf("Stat(%s): %v", tc.path, err)
 		}
@@ -594,7 +596,7 @@ func TestCacheHitDoesNotExtendMutableTTL(t *testing.T) {
 				t.Fatalf("cached GET %s = (%d, %q), want (200, %q)", tc.path, code, body, tc.want1)
 			}
 		}
-		infoAfter, err := os.Stat(filepath.Join(h.cacheDir, cacheFileName(tc.path)))
+		infoAfter, err := h.cache.Stat(tc.path)
 		if err != nil {
 			t.Fatalf("Stat after hits(%s): %v", tc.path, err)
 		}
@@ -614,9 +616,6 @@ func TestCacheHitDoesNotExtendMutableTTL(t *testing.T) {
 		if got := hits.Load() - before; got != 2 {
 			t.Fatalf("hits after expiry for %s = %d, want 2", tc.path, got)
 		}
-		if got, want := h.totalBytes, cacheDirBytes(t, h.cacheDir); got != want {
-			t.Fatalf("totalBytes after overwrite = %d, want %d", got, want)
-		}
 	}
 }
 
@@ -627,29 +626,24 @@ func TestStartupScanAndTempCleanup(t *testing.T) {
 		pathNew := "/example.com/new/@v/v1.0.0.zip"
 		pathFresh := "/example.com/fresh/@v/v1.0.0.zip"
 
-		oldFile := filepath.Join(cacheDir, cacheFileName(pathOld))
-		newFile := filepath.Join(cacheDir, cacheFileName(pathNew))
+		seed, err := diskcache.New(diskcache.Config{Dir: cacheDir})
+		if err != nil {
+			t.Fatalf("diskcache.New: %v", err)
+		}
+		baseTime := time.Now().Add(-time.Hour).Truncate(time.Second)
+		if err := seed.Write(pathOld, strings.NewReader("0123456789"), 10, baseTime); err != nil {
+			t.Fatalf("seed old: %v", err)
+		}
+		if err := seed.Write(pathNew, strings.NewReader("abcdefghij"), 10, baseTime.Add(time.Minute)); err != nil {
+			t.Fatalf("seed new: %v", err)
+		}
 		tmpFile := filepath.Join(cacheDir, ".tmp-crashed-12345")
-
-		if err := os.WriteFile(oldFile, []byte("0123456789"), 0644); err != nil {
-			t.Fatalf("WriteFile old: %v", err)
-		}
-		if err := os.WriteFile(newFile, []byte("abcdefghij"), 0644); err != nil {
-			t.Fatalf("WriteFile new: %v", err)
-		}
 		if err := os.WriteFile(tmpFile, []byte("partial-garbage"), 0644); err != nil {
 			t.Fatalf("WriteFile tmp: %v", err)
 		}
-		baseTime := time.Now().Add(-time.Hour).Truncate(time.Second)
-		if err := os.Chtimes(oldFile, baseTime, baseTime); err != nil {
-			t.Fatalf("Chtimes old: %v", err)
-		}
-		if err := os.Chtimes(newFile, baseTime.Add(time.Minute), baseTime.Add(time.Minute)); err != nil {
-			t.Fatalf("Chtimes new: %v", err)
-		}
 
 		var hits atomic.Int32
-		h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, _, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits.Add(1)
 			if _, err := io.WriteString(w, "ZZZZZZZZZZ"); err != nil {
 				t.Errorf("upstream write: %v", err)
@@ -669,13 +663,13 @@ func TestStartupScanAndTempCleanup(t *testing.T) {
 		if code != http.StatusOK || body != "ZZZZZZZZZZ" {
 			t.Fatalf("GET %s = (%d, %q), want (200, ZZZZZZZZZZ)", pathFresh, code, body)
 		}
-		if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		if _, err := h.cache.Stat(pathOld); !os.IsNotExist(err) {
 			t.Fatalf("expected oldest pre-existing file to be evicted, stat err=%v", err)
 		}
-		if _, err := os.Stat(newFile); err != nil {
+		if _, err := h.cache.Stat(pathNew); err != nil {
 			t.Fatalf("expected newer pre-existing file to survive, stat err=%v", err)
 		}
-		if got := cacheDirBytes(t, h.cacheDir); got != 20 {
+		if got := cacheDirBytes(t, cacheDir); got != 20 {
 			t.Fatalf("cacheDirBytes = %d, want 20", got)
 		}
 
@@ -689,35 +683,33 @@ func TestStartupScanAndTempCleanup(t *testing.T) {
 
 	t.Run("evicts pre-existing excess on startup", func(t *testing.T) {
 		cacheDir := t.TempDir()
-		oldFile := filepath.Join(cacheDir, cacheFileName("/example.com/old/@v/v1.0.0.zip"))
-		newFile := filepath.Join(cacheDir, cacheFileName("/example.com/new/@v/v1.0.0.zip"))
-		if err := os.WriteFile(oldFile, []byte("0123456789"), 0644); err != nil {
-			t.Fatalf("WriteFile old: %v", err)
-		}
-		if err := os.WriteFile(newFile, []byte("abcdefghij"), 0644); err != nil {
-			t.Fatalf("WriteFile new: %v", err)
+		pathOld := "/example.com/old/@v/v1.0.0.zip"
+		pathNew := "/example.com/new/@v/v1.0.0.zip"
+		seed, err := diskcache.New(diskcache.Config{Dir: cacheDir})
+		if err != nil {
+			t.Fatalf("diskcache.New: %v", err)
 		}
 		baseTime := time.Now().Add(-time.Hour).Truncate(time.Second)
-		if err := os.Chtimes(oldFile, baseTime, baseTime); err != nil {
-			t.Fatalf("Chtimes old: %v", err)
+		if err := seed.Write(pathOld, strings.NewReader("0123456789"), 10, baseTime); err != nil {
+			t.Fatalf("seed old: %v", err)
 		}
-		if err := os.Chtimes(newFile, baseTime.Add(time.Minute), baseTime.Add(time.Minute)); err != nil {
-			t.Fatalf("Chtimes new: %v", err)
+		if err := seed.Write(pathNew, strings.NewReader("abcdefghij"), 10, baseTime.Add(time.Minute)); err != nil {
+			t.Fatalf("seed new: %v", err)
 		}
 
-		h, _, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, _, _, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 		}), func(cfg *Config) {
 			cfg.CacheDir = cacheDir
 			cfg.MaxCacheBytes = 10
 		})
-		if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+		if _, err := h.cache.Stat(pathOld); !os.IsNotExist(err) {
 			t.Fatalf("expected old pre-existing file evicted on startup, err=%v", err)
 		}
-		if _, err := os.Stat(newFile); err != nil {
+		if _, err := h.cache.Stat(pathNew); err != nil {
 			t.Fatalf("expected newer pre-existing file kept on startup, err=%v", err)
 		}
-		if got := cacheDirBytes(t, h.cacheDir); got != 10 {
+		if got := cacheDirBytes(t, cacheDir); got != 10 {
 			t.Fatalf("cacheDirBytes = %d, want 10", got)
 		}
 	})
@@ -727,8 +719,10 @@ func TestMaxCacheBytesConfig(t *testing.T) {
 	t.Run("InitDefaults sets positive default", func(t *testing.T) {
 		var cfg Config
 		cfg.InitDefaults()
-		if cfg.MaxCacheBytes != defaultMaxCacheBytes {
-			t.Fatalf("InitDefaults().MaxCacheBytes = %d, want %d", cfg.MaxCacheBytes, defaultMaxCacheBytes)
+		var cacheCfg diskcache.Config
+		cacheCfg.InitDefaults()
+		if cfg.MaxCacheBytes != cacheCfg.MaxBytes || cfg.MaxCacheBytes <= 0 {
+			t.Fatalf("InitDefaults().MaxCacheBytes = %d, want %d", cfg.MaxCacheBytes, cacheCfg.MaxBytes)
 		}
 	})
 
@@ -742,19 +736,6 @@ func TestMaxCacheBytesConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("zero without InitDefaults stays unbounded", func(t *testing.T) {
-		h, err := NewHandler(Config{
-			UpstreamURL: "https://proxy.golang.org",
-			CacheDir:    t.TempDir(),
-		})
-		if err != nil {
-			t.Fatalf("NewHandler: %v", err)
-		}
-		if h.maxCacheBytes != 0 {
-			t.Fatalf("maxCacheBytes = %d, want 0 (unbounded)", h.maxCacheBytes)
-		}
-	})
-
 	t.Run("zero disables eviction and still cleans stale temp files", func(t *testing.T) {
 		cacheDir := t.TempDir()
 		tmpFile := filepath.Join(cacheDir, ".tmp-stale")
@@ -763,7 +744,7 @@ func TestMaxCacheBytesConfig(t *testing.T) {
 		}
 
 		var hits atomic.Int32
-		h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits.Add(1)
 			if _, err := io.WriteString(w, strings.Repeat("x", 64)); err != nil {
 				t.Errorf("upstream write: %v", err)
@@ -787,7 +768,7 @@ func TestMaxCacheBytesConfig(t *testing.T) {
 				t.Fatalf("GET %s = %d, want 200", p, code)
 			}
 		}
-		if got := cacheDirBytes(t, h.cacheDir); got != 3*64 {
+		if got := cacheDirBytes(t, cacheDir); got != 3*64 {
 			t.Fatalf("cacheDirBytes = %d, want %d", got, 3*64)
 		}
 		// All three must remain cached.
@@ -812,7 +793,7 @@ func TestOversizedArtifact(t *testing.T) {
 	bigBody := strings.Repeat("B", 50)
 
 	var smallHits atomic.Int32
-	h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, cacheDir, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case smallPath:
 			smallHits.Add(1)
@@ -849,12 +830,12 @@ func TestOversizedArtifact(t *testing.T) {
 		}
 	}
 
-	entries, err := os.ReadDir(h.cacheDir)
+	entries, err := os.ReadDir(cacheDir)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
-	if len(entries) != 1 || cacheDirBytes(t, h.cacheDir) != int64(len(smallBody)) {
-		t.Fatalf("unexpected cache state after oversized fetch: entries=%d bytes=%d", len(entries), cacheDirBytes(t, h.cacheDir))
+	if len(entries) != 1 || cacheDirBytes(t, cacheDir) != int64(len(smallBody)) {
+		t.Fatalf("unexpected cache state after oversized fetch: entries=%d bytes=%d", len(entries), cacheDirBytes(t, cacheDir))
 	}
 	// Small entry must still be served from cache.
 	code, _, body = doReq(t, http.MethodGet, srv.URL+smallPath)
@@ -864,7 +845,7 @@ func TestOversizedArtifact(t *testing.T) {
 }
 
 func TestConcurrentReadsAndEvictions(t *testing.T) {
-	h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	_, cacheDir, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.WriteString(w, r.URL.Path); err != nil {
 			t.Errorf("upstream write: %v", err)
 		}
@@ -893,7 +874,7 @@ func TestConcurrentReadsAndEvictions(t *testing.T) {
 	for msg := range errs {
 		t.Fatal(msg)
 	}
-	if got := cacheDirBytes(t, h.cacheDir); got > 128 {
+	if got := cacheDirBytes(t, cacheDir); got > 128 {
 		t.Fatalf("cacheDirBytes = %d, want <= 128", got)
 	}
 }

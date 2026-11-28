@@ -15,9 +15,7 @@
 package goproxy
 
 import (
-	"container/list"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -26,19 +24,17 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gke-labs/service-portals/pkg/diskcache"
 )
 
 const (
-	maxAttempts          = 3
-	maxErrorBodyBytes    = 64 << 10
-	defaultMaxCacheBytes = 1 << 30 // 1 GiB
+	maxAttempts       = 3
+	maxErrorBodyBytes = 64 << 10
 )
-
-var errTooLarge = errors.New("response exceeds max cache size")
 
 // Config configures the Go module proxy pull-through cache handler.
 type Config struct {
@@ -50,9 +46,11 @@ type Config struct {
 
 // InitDefaults sets default configuration values.
 func (c *Config) InitDefaults() {
+	var cacheCfg diskcache.Config
+	cacheCfg.InitDefaults()
 	c.UpstreamURL = "https://proxy.golang.org"
 	c.MutableTTL = 5 * time.Minute
-	c.MaxCacheBytes = defaultMaxCacheBytes
+	c.MaxCacheBytes = cacheCfg.MaxBytes
 }
 
 type flight struct {
@@ -63,29 +61,18 @@ type flight struct {
 	err         error
 }
 
-type cacheEntry struct {
-	name string
-	size int64
-}
-
 // Handler is an HTTP pull-through cache for a Go module proxy.
 type Handler struct {
-	upstream      string
-	cacheDir      string
-	mutableTTL    time.Duration
-	maxCacheBytes int64
-	client        *http.Client
-	now           func() time.Time
-	retryDelay    time.Duration
-	fetchTimeout  time.Duration
+	upstream     string
+	cache        *diskcache.Cache
+	mutableTTL   time.Duration
+	client       *http.Client
+	now          func() time.Time
+	retryDelay   time.Duration
+	fetchTimeout time.Duration
 
 	mu       sync.Mutex
 	inflight map[string]*flight
-
-	cacheMu    sync.Mutex
-	lru        *list.List
-	lruIndex   map[string]*list.Element
-	totalBytes int64
 }
 
 // NewHandler creates a new Go module proxy cache handler.
@@ -95,87 +82,23 @@ func NewHandler(cfg Config) (*Handler, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("invalid upstream URL %q", cfg.UpstreamURL)
 	}
-	if cfg.CacheDir == "" {
-		return nil, errors.New("cache directory is required")
-	}
-	if cfg.MaxCacheBytes < 0 {
-		return nil, fmt.Errorf("max cache bytes must be non-negative, got %d", cfg.MaxCacheBytes)
-	}
-	if err := os.MkdirAll(cfg.CacheDir, 0755); err != nil {
-		return nil, fmt.Errorf("creating cache directory %q: %w", cfg.CacheDir, err)
-	}
-	h := &Handler{
-		upstream:      strings.TrimRight(u.String(), "/"),
-		cacheDir:      cfg.CacheDir,
-		mutableTTL:    cfg.MutableTTL,
-		maxCacheBytes: cfg.MaxCacheBytes,
-		client:        &http.Client{},
-		now:           time.Now,
-		retryDelay:    200 * time.Millisecond,
-		fetchTimeout:  5 * time.Minute,
-		inflight:      make(map[string]*flight),
-		lru:           list.New(),
-		lruIndex:      make(map[string]*list.Element),
-	}
-	if err := h.scanCacheDir(); err != nil {
+	cache, err := diskcache.New(diskcache.Config{
+		Dir:      cfg.CacheDir,
+		MaxBytes: cfg.MaxCacheBytes,
+	})
+	if err != nil {
 		return nil, err
 	}
-	return h, nil
-}
-
-func (h *Handler) scanCacheDir() error {
-	entries, err := os.ReadDir(h.cacheDir)
-	if err != nil {
-		return fmt.Errorf("scanning cache directory %q: %w", h.cacheDir, err)
-	}
-	type diskEntry struct {
-		name    string
-		size    int64
-		modTime time.Time
-	}
-	var found []diskEntry
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasPrefix(name, ".tmp-") {
-			logErr("removing stale temp file", os.Remove(filepath.Join(h.cacheDir, name)))
-			continue
-		}
-		if h.maxCacheBytes == 0 {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("stat cache entry %q: %w", name, err)
-		}
-		found = append(found, diskEntry{name: name, size: info.Size(), modTime: info.ModTime()})
-	}
-	if h.maxCacheBytes == 0 {
-		return nil
-	}
-	// Seed LRU order from ModTime so oldest entries sit at the back for eviction.
-	slices.SortFunc(found, func(a, b diskEntry) int {
-		if c := a.modTime.Compare(b.modTime); c != 0 {
-			return c
-		}
-		return strings.Compare(a.name, b.name)
-	})
-	h.cacheMu.Lock()
-	defer h.cacheMu.Unlock()
-	for _, e := range found {
-		if e.size > h.maxCacheBytes {
-			logErr("evicting oversized cache file", os.Remove(filepath.Join(h.cacheDir, e.name)))
-			continue
-		}
-		h.addEntryLocked(e.name, e.size)
-	}
-	h.evictLocked()
-	return nil
+	return &Handler{
+		upstream:     strings.TrimRight(u.String(), "/"),
+		cache:        cache,
+		mutableTTL:   cfg.MutableTTL,
+		client:       &http.Client{},
+		now:          time.Now,
+		retryDelay:   200 * time.Millisecond,
+		fetchTimeout: 5 * time.Minute,
+		inflight:     make(map[string]*flight),
+	}, nil
 }
 
 func classifyPath(p string) (cacheable, mutable bool, contentType string) {
@@ -201,47 +124,6 @@ func classifyPath(p string) (cacheable, mutable bool, contentType string) {
 	return false, false, ""
 }
 
-func cacheFileName(key string) string {
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(key)))
-}
-
-func (h *Handler) touchCache(name string) {
-	if h.maxCacheBytes == 0 {
-		return
-	}
-	h.cacheMu.Lock()
-	if elem, ok := h.lruIndex[name]; ok {
-		h.lru.MoveToFront(elem)
-	}
-	h.cacheMu.Unlock()
-}
-
-func (h *Handler) addEntryLocked(name string, size int64) {
-	if elem, ok := h.lruIndex[name]; ok {
-		entry := elem.Value.(*cacheEntry)
-		h.totalBytes += size - entry.size
-		entry.size = size
-		h.lru.MoveToFront(elem)
-		return
-	}
-	h.lruIndex[name] = h.lru.PushFront(&cacheEntry{name: name, size: size})
-	h.totalBytes += size
-}
-
-func (h *Handler) evictLocked() {
-	for h.totalBytes > h.maxCacheBytes {
-		elem := h.lru.Back()
-		if elem == nil {
-			break
-		}
-		entry := elem.Value.(*cacheEntry)
-		h.lru.Remove(elem)
-		delete(h.lruIndex, entry.name)
-		h.totalBytes -= entry.size
-		logErr("evicting cache file", os.Remove(filepath.Join(h.cacheDir, entry.name)))
-	}
-}
-
 func (h *Handler) isFresh(info os.FileInfo, mutable bool) bool {
 	return !mutable || (h.mutableTTL > 0 && h.now().Sub(info.ModTime()) < h.mutableTTL)
 }
@@ -262,7 +144,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := h.doFlight(r.Context(), path, mutable)
 	if err != nil {
-		if errors.Is(err, errTooLarge) {
+		if errors.Is(err, diskcache.ErrTooLarge) {
 			h.proxyDirect(w, r, idempotent)
 			return
 		}
@@ -288,18 +170,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveCached(w http.ResponseWriter, r *http.Request, key string, mutable bool, contentType string, ignoreTTL bool) bool {
-	name := cacheFileName(key)
-	f, err := os.Open(filepath.Join(h.cacheDir, name))
+	f, info, err := h.cache.Open(key)
 	if err != nil {
 		return false
 	}
 	defer func() { logErr("closing cache file", f.Close()) }()
-	info, err := f.Stat()
-	if err != nil || (!ignoreTTL && !h.isFresh(info, mutable)) {
+	if !ignoreTTL && !h.isFresh(info, mutable) {
 		return false
 	}
-	// Update LRU in memory only; never touch ModTime so mutable TTL is not extended.
-	h.touchCache(name)
 	w.Header().Set("Content-Type", contentType)
 	http.ServeContent(w, r, "", info.ModTime(), f)
 	return true
@@ -349,9 +227,7 @@ func (h *Handler) send(ctx context.Context, method, target string, body io.Reade
 }
 
 func (h *Handler) fetchAndCache(ctx context.Context, path string, mutable bool) (int, string, []byte, error) {
-	name := cacheFileName(path)
-	dst := filepath.Join(h.cacheDir, name)
-	if info, err := os.Stat(dst); err == nil && h.isFresh(info, mutable) {
+	if info, err := h.cache.Stat(path); err == nil && h.isFresh(info, mutable) {
 		return http.StatusOK, "", nil, nil
 	}
 	var lastErr error
@@ -377,17 +253,13 @@ func (h *Handler) fetchAndCache(ctx context.Context, path string, mutable bool) 
 			}
 			return resp.StatusCode, resp.Header.Get("Content-Type"), body, nil
 		}
-		if h.maxCacheBytes > 0 && resp.ContentLength > h.maxCacheBytes {
-			logErr("closing upstream body", resp.Body.Close())
-			return 0, "", nil, errTooLarge
-		}
-		err = h.writeCacheFile(name, dst, resp)
+		err = h.cache.Write(path, resp.Body, resp.ContentLength, h.now())
 		logErr("closing upstream body", resp.Body.Close())
 		if err == nil {
 			return http.StatusOK, "", nil, nil
 		}
-		if errors.Is(err, errTooLarge) {
-			return 0, "", nil, errTooLarge
+		if errors.Is(err, diskcache.ErrTooLarge) {
+			return 0, "", nil, diskcache.ErrTooLarge
 		}
 		lastErr = err
 		if ctx.Err() != nil {
@@ -395,40 +267,6 @@ func (h *Handler) fetchAndCache(ctx context.Context, path string, mutable bool) 
 		}
 	}
 	return 0, "", nil, lastErr
-}
-
-func (h *Handler) writeCacheFile(name, dst string, resp *http.Response) error {
-	tmp, err := os.CreateTemp(h.cacheDir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	var body io.Reader = resp.Body
-	if h.maxCacheBytes > 0 {
-		body = io.LimitReader(resp.Body, h.maxCacheBytes+1)
-	}
-	n, err := io.Copy(tmp, body)
-	if err == nil && h.maxCacheBytes > 0 && n > h.maxCacheBytes {
-		err = errTooLarge
-	} else if err == nil && resp.ContentLength >= 0 && n != resp.ContentLength {
-		err = io.ErrUnexpectedEOF
-	}
-	err = errors.Join(err, tmp.Close())
-	if err == nil {
-		now := h.now()
-		logErr("setting mtime", os.Chtimes(tmpName, now, now))
-		h.cacheMu.Lock()
-		err = os.Rename(tmpName, dst)
-		if err == nil && h.maxCacheBytes > 0 {
-			h.addEntryLocked(name, n)
-			h.evictLocked()
-		}
-		h.cacheMu.Unlock()
-	}
-	if err != nil {
-		logErr("removing temp file", os.Remove(tmpName))
-	}
-	return err
 }
 
 func (h *Handler) proxyDirect(w http.ResponseWriter, r *http.Request, idempotent bool) {
