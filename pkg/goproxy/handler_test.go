@@ -15,17 +15,20 @@
 package goproxy
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func newTestProxy(t *testing.T, upstream http.Handler, mutableTTL time.Duration) (*Handler, *httptest.Server, *time.Time) {
+func newTestProxyWithConfig(t *testing.T, upstream http.Handler, customize func(*Config)) (*Handler, *httptest.Server, *time.Time) {
 	t.Helper()
 	up := httptest.NewServer(upstream)
 	t.Cleanup(up.Close)
@@ -35,8 +38,8 @@ func newTestProxy(t *testing.T, upstream http.Handler, mutableTTL time.Duration)
 	cfg.InitDefaults()
 	cfg.UpstreamURL = up.URL
 	cfg.CacheDir = t.TempDir()
-	if mutableTTL > 0 {
-		cfg.MutableTTL = mutableTTL
+	if customize != nil {
+		customize(&cfg)
 	}
 	h, err := NewHandler(cfg)
 	if err != nil {
@@ -48,6 +51,15 @@ func newTestProxy(t *testing.T, upstream http.Handler, mutableTTL time.Duration)
 	proxySrv := httptest.NewServer(h)
 	t.Cleanup(proxySrv.Close)
 	return h, proxySrv, &now
+}
+
+func newTestProxy(t *testing.T, upstream http.Handler, mutableTTL time.Duration) (*Handler, *httptest.Server, *time.Time) {
+	t.Helper()
+	return newTestProxyWithConfig(t, upstream, func(cfg *Config) {
+		if mutableTTL > 0 {
+			cfg.MutableTTL = mutableTTL
+		}
+	})
 }
 
 func doReq(t *testing.T, method, url string) (int, http.Header, string) {
@@ -434,4 +446,454 @@ func TestPartialAndFailedResponsesNotCached(t *testing.T) {
 			t.Fatalf("cache dir entries = %d, want 0", len(entries))
 		}
 	})
+}
+
+func cacheDirBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var total int64
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			t.Fatalf("Info(%s): %v", e.Name(), err)
+		}
+		total += info.Size()
+	}
+	return total
+}
+
+func TestLRUEviction(t *testing.T) {
+	var hitsMu sync.Mutex
+	hits := make(map[string]int)
+	payloads := map[string]string{
+		"/example.com/a/@v/v1.0.0.zip": strings.Repeat("a", 10),
+		"/example.com/b/@v/v1.0.0.zip": strings.Repeat("b", 10),
+		"/example.com/c/@v/v1.0.0.zip": strings.Repeat("c", 10),
+		"/example.com/d/@v/v1.0.0.zip": strings.Repeat("d", 10),
+	}
+	hitCount := func(p string) int {
+		hitsMu.Lock()
+		defer hitsMu.Unlock()
+		return hits[p]
+	}
+
+	h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitsMu.Lock()
+		hits[r.URL.Path]++
+		hitsMu.Unlock()
+		if _, err := io.WriteString(w, payloads[r.URL.Path]); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}), func(cfg *Config) {
+		cfg.MaxCacheBytes = 20
+	})
+
+	pathA := "/example.com/a/@v/v1.0.0.zip"
+	pathB := "/example.com/b/@v/v1.0.0.zip"
+	pathC := "/example.com/c/@v/v1.0.0.zip"
+	pathD := "/example.com/d/@v/v1.0.0.zip"
+
+	// Populate a (10B) and b (10B); total = 20B (within cap).
+	for _, p := range []string{pathA, pathB} {
+		code, _, body := doReq(t, http.MethodGet, srv.URL+p)
+		if code != http.StatusOK || body != payloads[p] {
+			t.Fatalf("GET %s = (%d, %q), want (200, %q)", p, code, body, payloads[p])
+		}
+	}
+
+	// Read a so b becomes the least-recently-used entry.
+	code, _, body := doReq(t, http.MethodGet, srv.URL+pathA)
+	if code != http.StatusOK || body != payloads[pathA] || hitCount(pathA) != 1 {
+		t.Fatalf("cached GET %s = (%d, %q, hits=%d), want cached hit", pathA, code, body, hitCount(pathA))
+	}
+
+	// Fetch c (10B): total would be 30B > 20B, so colder entry b must be evicted while a survives.
+	code, _, body = doReq(t, http.MethodGet, srv.URL+pathC)
+	if code != http.StatusOK || body != payloads[pathC] {
+		t.Fatalf("GET %s = (%d, %q), want (200, %q)", pathC, code, body, payloads[pathC])
+	}
+	if got := cacheDirBytes(t, h.cacheDir); got > 20 {
+		t.Fatalf("cacheDirBytes = %d, want <= 20", got)
+	}
+
+	// a and c must still be cached (no new upstream hit).
+	for _, p := range []string{pathA, pathC} {
+		code, _, body := doReq(t, http.MethodGet, srv.URL+p)
+		if code != http.StatusOK || body != payloads[p] || hitCount(p) != 1 {
+			t.Fatalf("GET %s after eviction = (%d, %q, hits=%d), want cached", p, code, body, hitCount(p))
+		}
+	}
+
+	// Fetch d (10B): a was read before c, so a is now colder and evicted; c and d remain.
+	code, _, body = doReq(t, http.MethodGet, srv.URL+pathD)
+	if code != http.StatusOK || body != payloads[pathD] {
+		t.Fatalf("GET %s = (%d, %q), want (200, %q)", pathD, code, body, payloads[pathD])
+	}
+	if got := cacheDirBytes(t, h.cacheDir); got > 20 {
+		t.Fatalf("cacheDirBytes = %d, want <= 20", got)
+	}
+
+	// b was evicted earlier so requesting it must hit upstream again.
+	code, _, body = doReq(t, http.MethodGet, srv.URL+pathB)
+	if code != http.StatusOK || body != payloads[pathB] || hitCount(pathB) != 2 {
+		t.Fatalf("re-fetch evicted %s = (%d, %q, hits=%d), want 2 upstream hits", pathB, code, body, hitCount(pathB))
+	}
+}
+
+func TestCacheHitDoesNotExtendMutableTTL(t *testing.T) {
+	var hits atomic.Int32
+	var version atomic.Int32
+	version.Store(1)
+
+	h, srv, now := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		v := version.Load()
+		var body string
+		if strings.HasSuffix(r.URL.Path, "/@latest") {
+			body = fmt.Sprintf(`{"Version":"v1.%d.0"}`, v)
+		} else {
+			body = fmt.Sprintf("v1.%d.0\n", v)
+		}
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}), func(cfg *Config) {
+		cfg.MutableTTL = 10 * time.Second
+		cfg.MaxCacheBytes = 1024
+	})
+
+	for _, tc := range []struct {
+		path  string
+		want1 string
+		want2 string
+	}{
+		{"/example.com/mod/@v/list", "v1.1.0\n", "v1.2.0\n"},
+		{"/example.com/mod/@latest", `{"Version":"v1.1.0"}`, `{"Version":"v1.2.0"}`},
+	} {
+		version.Store(1)
+		before := hits.Load()
+
+		code, _, body := doReq(t, http.MethodGet, srv.URL+tc.path)
+		if code != http.StatusOK || body != tc.want1 {
+			t.Fatalf("initial GET %s = (%d, %q), want (200, %q)", tc.path, code, body, tc.want1)
+		}
+		infoBefore, err := os.Stat(filepath.Join(h.cacheDir, cacheFileName(tc.path)))
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", tc.path, err)
+		}
+
+		// Repeated cache hits before TTL expiry must not modify ModTime or extend TTL.
+		version.Store(2)
+		for _, step := range []time.Duration{4 * time.Second, 4 * time.Second} {
+			*now = now.Add(step)
+			code, _, body = doReq(t, http.MethodGet, srv.URL+tc.path)
+			if code != http.StatusOK || body != tc.want1 {
+				t.Fatalf("cached GET %s = (%d, %q), want (200, %q)", tc.path, code, body, tc.want1)
+			}
+		}
+		infoAfter, err := os.Stat(filepath.Join(h.cacheDir, cacheFileName(tc.path)))
+		if err != nil {
+			t.Fatalf("Stat after hits(%s): %v", tc.path, err)
+		}
+		if !infoAfter.ModTime().Equal(infoBefore.ModTime()) {
+			t.Fatalf("ModTime changed on cache hit: before=%v after=%v", infoBefore.ModTime(), infoAfter.ModTime())
+		}
+		if got := hits.Load() - before; got != 1 {
+			t.Fatalf("hits before expiry for %s = %d, want 1", tc.path, got)
+		}
+
+		// 11s since initial write (only 3s since last read): must expire and re-fetch.
+		*now = now.Add(3 * time.Second)
+		code, _, body = doReq(t, http.MethodGet, srv.URL+tc.path)
+		if code != http.StatusOK || body != tc.want2 {
+			t.Fatalf("post-TTL GET %s = (%d, %q), want (200, %q)", tc.path, code, body, tc.want2)
+		}
+		if got := hits.Load() - before; got != 2 {
+			t.Fatalf("hits after expiry for %s = %d, want 2", tc.path, got)
+		}
+		if got, want := h.totalBytes, cacheDirBytes(t, h.cacheDir); got != want {
+			t.Fatalf("totalBytes after overwrite = %d, want %d", got, want)
+		}
+	}
+}
+
+func TestStartupScanAndTempCleanup(t *testing.T) {
+	t.Run("accounts for pre-existing files and removes stale temp files", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		pathOld := "/example.com/old/@v/v1.0.0.zip"
+		pathNew := "/example.com/new/@v/v1.0.0.zip"
+		pathFresh := "/example.com/fresh/@v/v1.0.0.zip"
+
+		oldFile := filepath.Join(cacheDir, cacheFileName(pathOld))
+		newFile := filepath.Join(cacheDir, cacheFileName(pathNew))
+		tmpFile := filepath.Join(cacheDir, ".tmp-crashed-12345")
+
+		if err := os.WriteFile(oldFile, []byte("0123456789"), 0644); err != nil {
+			t.Fatalf("WriteFile old: %v", err)
+		}
+		if err := os.WriteFile(newFile, []byte("abcdefghij"), 0644); err != nil {
+			t.Fatalf("WriteFile new: %v", err)
+		}
+		if err := os.WriteFile(tmpFile, []byte("partial-garbage"), 0644); err != nil {
+			t.Fatalf("WriteFile tmp: %v", err)
+		}
+		baseTime := time.Now().Add(-time.Hour).Truncate(time.Second)
+		if err := os.Chtimes(oldFile, baseTime, baseTime); err != nil {
+			t.Fatalf("Chtimes old: %v", err)
+		}
+		if err := os.Chtimes(newFile, baseTime.Add(time.Minute), baseTime.Add(time.Minute)); err != nil {
+			t.Fatalf("Chtimes new: %v", err)
+		}
+
+		var hits atomic.Int32
+		h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			if _, err := io.WriteString(w, "ZZZZZZZZZZ"); err != nil {
+				t.Errorf("upstream write: %v", err)
+			}
+		}), func(cfg *Config) {
+			cfg.CacheDir = cacheDir
+			cfg.MaxCacheBytes = 20
+		})
+
+		// Stale .tmp-* file must be deleted on startup.
+		if _, err := os.Stat(tmpFile); !os.IsNotExist(err) {
+			t.Fatalf("stale temp file still exists: err=%v", err)
+		}
+
+		// Writing a 10B fresh entry pushes total to 30B > 20B, evicting older pre-existing file.
+		code, _, body := doReq(t, http.MethodGet, srv.URL+pathFresh)
+		if code != http.StatusOK || body != "ZZZZZZZZZZ" {
+			t.Fatalf("GET %s = (%d, %q), want (200, ZZZZZZZZZZ)", pathFresh, code, body)
+		}
+		if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+			t.Fatalf("expected oldest pre-existing file to be evicted, stat err=%v", err)
+		}
+		if _, err := os.Stat(newFile); err != nil {
+			t.Fatalf("expected newer pre-existing file to survive, stat err=%v", err)
+		}
+		if got := cacheDirBytes(t, h.cacheDir); got != 20 {
+			t.Fatalf("cacheDirBytes = %d, want 20", got)
+		}
+
+		// Newer pre-existing file must still be served from cache without upstream hit.
+		before := hits.Load()
+		code, _, body = doReq(t, http.MethodGet, srv.URL+pathNew)
+		if code != http.StatusOK || body != "abcdefghij" || hits.Load() != before {
+			t.Fatalf("GET %s = (%d, %q, deltaHits=%d), want cached abcdefghij", pathNew, code, body, hits.Load()-before)
+		}
+	})
+
+	t.Run("evicts pre-existing excess on startup", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		oldFile := filepath.Join(cacheDir, cacheFileName("/example.com/old/@v/v1.0.0.zip"))
+		newFile := filepath.Join(cacheDir, cacheFileName("/example.com/new/@v/v1.0.0.zip"))
+		if err := os.WriteFile(oldFile, []byte("0123456789"), 0644); err != nil {
+			t.Fatalf("WriteFile old: %v", err)
+		}
+		if err := os.WriteFile(newFile, []byte("abcdefghij"), 0644); err != nil {
+			t.Fatalf("WriteFile new: %v", err)
+		}
+		baseTime := time.Now().Add(-time.Hour).Truncate(time.Second)
+		if err := os.Chtimes(oldFile, baseTime, baseTime); err != nil {
+			t.Fatalf("Chtimes old: %v", err)
+		}
+		if err := os.Chtimes(newFile, baseTime.Add(time.Minute), baseTime.Add(time.Minute)); err != nil {
+			t.Fatalf("Chtimes new: %v", err)
+		}
+
+		h, _, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		}), func(cfg *Config) {
+			cfg.CacheDir = cacheDir
+			cfg.MaxCacheBytes = 10
+		})
+		if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+			t.Fatalf("expected old pre-existing file evicted on startup, err=%v", err)
+		}
+		if _, err := os.Stat(newFile); err != nil {
+			t.Fatalf("expected newer pre-existing file kept on startup, err=%v", err)
+		}
+		if got := cacheDirBytes(t, h.cacheDir); got != 10 {
+			t.Fatalf("cacheDirBytes = %d, want 10", got)
+		}
+	})
+}
+
+func TestMaxCacheBytesConfig(t *testing.T) {
+	t.Run("InitDefaults sets positive default", func(t *testing.T) {
+		var cfg Config
+		cfg.InitDefaults()
+		if cfg.MaxCacheBytes != defaultMaxCacheBytes {
+			t.Fatalf("InitDefaults().MaxCacheBytes = %d, want %d", cfg.MaxCacheBytes, defaultMaxCacheBytes)
+		}
+	})
+
+	t.Run("negative MaxCacheBytes rejected", func(t *testing.T) {
+		var cfg Config
+		cfg.InitDefaults()
+		cfg.CacheDir = t.TempDir()
+		cfg.MaxCacheBytes = -1
+		if _, err := NewHandler(cfg); err == nil {
+			t.Fatal("NewHandler accepted negative MaxCacheBytes, want error")
+		}
+	})
+
+	t.Run("zero without InitDefaults stays unbounded", func(t *testing.T) {
+		h, err := NewHandler(Config{
+			UpstreamURL: "https://proxy.golang.org",
+			CacheDir:    t.TempDir(),
+		})
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+		if h.maxCacheBytes != 0 {
+			t.Fatalf("maxCacheBytes = %d, want 0 (unbounded)", h.maxCacheBytes)
+		}
+	})
+
+	t.Run("zero disables eviction and still cleans stale temp files", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		tmpFile := filepath.Join(cacheDir, ".tmp-stale")
+		if err := os.WriteFile(tmpFile, []byte("stale"), 0644); err != nil {
+			t.Fatalf("WriteFile tmp: %v", err)
+		}
+
+		var hits atomic.Int32
+		h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			if _, err := io.WriteString(w, strings.Repeat("x", 64)); err != nil {
+				t.Errorf("upstream write: %v", err)
+			}
+		}), func(cfg *Config) {
+			cfg.CacheDir = cacheDir
+			cfg.MaxCacheBytes = 0
+		})
+
+		if _, err := os.Stat(tmpFile); !os.IsNotExist(err) {
+			t.Fatalf("stale temp file still exists: err=%v", err)
+		}
+		paths := []string{
+			"/example.com/p1/@v/v1.0.0.zip",
+			"/example.com/p2/@v/v1.0.0.zip",
+			"/example.com/p3/@v/v1.0.0.zip",
+		}
+		for _, p := range paths {
+			code, _, _ := doReq(t, http.MethodGet, srv.URL+p)
+			if code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200", p, code)
+			}
+		}
+		if got := cacheDirBytes(t, h.cacheDir); got != 3*64 {
+			t.Fatalf("cacheDirBytes = %d, want %d", got, 3*64)
+		}
+		// All three must remain cached.
+		before := hits.Load()
+		for _, p := range paths {
+			code, _, _ := doReq(t, http.MethodGet, srv.URL+p)
+			if code != http.StatusOK {
+				t.Fatalf("cached GET %s = %d, want 200", p, code)
+			}
+		}
+		if hits.Load() != before {
+			t.Fatalf("unexpected upstream hits %d with eviction disabled", hits.Load()-before)
+		}
+	})
+}
+
+func TestOversizedArtifact(t *testing.T) {
+	smallPath := "/example.com/small/@v/v1.0.0.zip"
+	bigPath := "/example.com/big/@v/v1.0.0.zip"
+	chunkedBigPath := "/example.com/chunked/@v/v1.0.0.zip"
+	smallBody := "small"
+	bigBody := strings.Repeat("B", 50)
+
+	var smallHits atomic.Int32
+	h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case smallPath:
+			smallHits.Add(1)
+			_, _ = io.WriteString(w, smallBody)
+		case bigPath:
+			_, _ = io.WriteString(w, bigBody)
+		case chunkedBigPath:
+			w.WriteHeader(http.StatusOK)
+			for i := 0; i < len(bigBody); i += 10 {
+				_, _ = io.WriteString(w, bigBody[i:i+10])
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}), func(cfg *Config) {
+		cfg.MaxCacheBytes = 20
+	})
+
+	// Cache a small entry first.
+	code, _, body := doReq(t, http.MethodGet, srv.URL+smallPath)
+	if code != http.StatusOK || body != smallBody {
+		t.Fatalf("GET %s = (%d, %q), want (200, %q)", smallPath, code, body, smallBody)
+	}
+
+	// Both Content-Length and chunked oversized artifacts must be served cleanly without
+	// evicting existing cache entries or leaving temp files behind.
+	for _, p := range []string{bigPath, chunkedBigPath} {
+		code, _, body = doReq(t, http.MethodGet, srv.URL+p)
+		if code != http.StatusOK || body != bigBody {
+			t.Fatalf("GET %s = (%d, len=%d), want (200, len=%d)", p, code, len(body), len(bigBody))
+		}
+	}
+
+	entries, err := os.ReadDir(h.cacheDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 || cacheDirBytes(t, h.cacheDir) != int64(len(smallBody)) {
+		t.Fatalf("unexpected cache state after oversized fetch: entries=%d bytes=%d", len(entries), cacheDirBytes(t, h.cacheDir))
+	}
+	// Small entry must still be served from cache.
+	code, _, body = doReq(t, http.MethodGet, srv.URL+smallPath)
+	if code != http.StatusOK || body != smallBody || smallHits.Load() != 1 {
+		t.Fatalf("GET %s after oversized = (%d, %q, hits=%d), want cached", smallPath, code, body, smallHits.Load())
+	}
+}
+
+func TestConcurrentReadsAndEvictions(t *testing.T) {
+	h, srv, _ := newTestProxyWithConfig(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.WriteString(w, r.URL.Path); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}), func(cfg *Config) {
+		cfg.MaxCacheBytes = 128
+	})
+
+	var wg sync.WaitGroup
+	errs := make(chan string, 200)
+	for g := range 10 {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for i := range 20 {
+				p := fmt.Sprintf("/example.com/m%d/@v/v1.0.%d.zip", id, i%5)
+				code, _, body := doReq(t, http.MethodGet, srv.URL+p)
+				if code != http.StatusOK || body != p {
+					errs <- fmt.Sprintf("GET %s = (%d, %q)", p, code, body)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for msg := range errs {
+		t.Fatal(msg)
+	}
+	if got := cacheDirBytes(t, h.cacheDir); got > 128 {
+		t.Fatalf("cacheDirBytes = %d, want <= 128", got)
+	}
 }

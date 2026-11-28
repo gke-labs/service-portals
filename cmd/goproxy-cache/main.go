@@ -37,6 +37,7 @@ func main() {
 	flag.StringVar(&cfg.UpstreamURL, "upstream-url", cfg.UpstreamURL, "Upstream Go module proxy URL")
 	flag.StringVar(&cfg.CacheDir, "cache-dir", filepath.Join(os.TempDir(), "goproxy-cache"), "On-disk cache directory")
 	flag.DurationVar(&cfg.MutableTTL, "mutable-ttl", cfg.MutableTTL, "Cache TTL for mutable endpoints (/@v/list, /@latest)")
+	flag.Int64Var(&cfg.MaxCacheBytes, "max-cache-bytes", cfg.MaxCacheBytes, "Maximum on-disk cache size in bytes (0 disables eviction)")
 	flag.Parse()
 
 	handler, err := goproxy.NewHandler(cfg)
