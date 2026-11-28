@@ -69,6 +69,13 @@ func runServer() {
 			}
 			return
 		}
+		if r.URL.Path == "/example.com/mod/@v/v1.0.0.info" {
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write([]byte(`{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`)); err != nil {
+				log.Printf("Failed to write goproxy info response: %v", err)
+			}
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		headers := make(map[string][]string)
