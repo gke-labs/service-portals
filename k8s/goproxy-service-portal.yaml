@@ -1,0 +1,95 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Reference manifest for the in-cluster Go module proxy pull-through cache.
+# Reachable at http://goproxy-service-portal.service-portal-system.svc.cluster.local:8080.
+# `ap deploy` builds and sets the placeholder image automatically; plain `kubectl apply`
+# users must point `image` at a published image.
+
+# Also declared in k8s/controller.yaml and k8s/node-agent.yaml; the privileged label is needed by the node agent.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: service-portal-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: goproxy-service-portal
+  namespace: service-portal-system
+  labels:
+    app: goproxy-service-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: goproxy-service-portal
+  template:
+    metadata:
+      labels:
+        app: goproxy-service-portal
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: goproxy-service-portal
+        image: goproxy-service-portal:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+        args:
+        - "--listen-addr=:8080"
+        - "--cache-dir=/cache"
+        volumeMounts:
+        - name: cache
+          mountPath: /cache
+      volumes:
+      # Swap emptyDir for a PersistentVolumeClaim to persist the cache across restarts.
+      - name: cache
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: goproxy-service-portal
+  namespace: service-portal-system
+  labels:
+    app: goproxy-service-portal
+spec:
+  selector:
+    app: goproxy-service-portal
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP

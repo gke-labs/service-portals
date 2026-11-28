@@ -1,0 +1,46 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Cross-compile on the build platform so multi-arch builds need no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /app
+
+# Copy the Go module files
+COPY go.mod go.sum ./
+
+# Download the Go module dependencies
+RUN go mod download
+
+# Copy the source code
+COPY . .
+
+RUN git config --global --add safe.directory /app && git status
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /goproxy-service-portal ./cmd/goproxy-cache
+
+# Use a minimal base image to package the application
+FROM gcr.io/distroless/static:nonroot
+
+WORKDIR /
+
+COPY --from=builder /goproxy-service-portal /goproxy-service-portal
+
+# Run as non-root user
+USER 65532:65532
+
+ENTRYPOINT ["/goproxy-service-portal"]
