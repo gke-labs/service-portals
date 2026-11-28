@@ -141,25 +141,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if parseErr == nil && len(fetchReq.Wants) > 0 && repoStore.HasAllCommits(fetchReq.Wants) {
 			objects, acks, err := repoStore.CollectObjectsForCommits(fetchReq.Wants, fetchReq.Haves)
 			if err == nil && len(objects) > 0 {
-				packfile, err := BuildPackfile(objects)
-				if err == nil {
-					respBytes := FormatSidebandPackfile(packfile, fetchReq.IsV2, acks, len(fetchReq.Haves) > 0)
-					w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
-					w.Header().Set("X-Git-Cache", "HIT")
-					w.Header().Set("Cache-Control", "no-cache")
-					w.Header().Del("Content-Length")
-					w.WriteHeader(http.StatusOK)
-					if _, err := w.Write(respBytes); err != nil {
-						log.Printf("Failed to write upload-pack response for %s: %v", targetURL.Path, err)
-					}
-					log.Printf("Git upload-pack cache HIT for %s (%d wants, %d haves -> %d objects)",
-						targetURL.Path, len(fetchReq.Wants), len(fetchReq.Haves), len(objects))
-					return
+				resp := newPackfileResponse(objects, fetchReq.IsV2, acks, len(fetchReq.Haves) > 0)
+				w.Header().Set("Content-Type", "application/x-git-upload-pack-result")
+				w.Header().Set("X-Git-Cache", "HIT")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Del("Content-Length")
+				w.WriteHeader(http.StatusOK)
+				if _, err := io.Copy(w, resp); err != nil {
+					log.Printf("Failed to write upload-pack response for %s: %v", targetURL.Path, err)
 				}
-				log.Printf("Failed to build packfile from cache for %s: %v", targetURL.Path, err)
-			} else {
-				log.Printf("Failed to collect objects from cache for %s: %v", targetURL.Path, err)
+				log.Printf("Git upload-pack cache HIT for %s (%d wants, %d haves -> %d objects)",
+					targetURL.Path, len(fetchReq.Wants), len(fetchReq.Haves), len(objects))
+				return
 			}
+			log.Printf("Failed to collect objects from cache for %s: %v", targetURL.Path, err)
 		}
 	}
 
@@ -287,7 +282,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// If upstream request was modified with extra haves, generate client response from repo store
 			if !bytes.Equal(upstreamReqBody, reqBody) {
-				clientRespBytes, err := buildFetchFromStore(repoStore, reqBody)
+				clientResp, err := buildFetchFromStore(repoStore, reqBody)
 				if err != nil {
 					log.Printf("Failed to serve cache-assisted fetch for %s: %v", targetURL.Path, err)
 					http.Error(w, "cache-assisted fetch failed", http.StatusBadGateway)
@@ -295,7 +290,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				w.Header().Del("Content-Length")
 				w.WriteHeader(http.StatusOK)
-				if _, err := w.Write(clientRespBytes); err != nil {
+				if _, err := io.Copy(w, clientResp); err != nil {
 					log.Printf("Failed to write cache-assisted fetch response for %s: %v", targetURL.Path, err)
 				}
 				return
@@ -348,7 +343,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Proxied %s %s -> %s [%s]", r.Method, r.URL.Path, resp.Status, targetURL.String())
 }
 
-func buildFetchFromStore(repoStore *RepoStore, reqBody []byte) ([]byte, error) {
+func buildFetchFromStore(repoStore *RepoStore, reqBody []byte) (*packfileResponse, error) {
 	if repoStore == nil {
 		return nil, fmt.Errorf("repo store is nil")
 	}
@@ -369,12 +364,7 @@ func buildFetchFromStore(repoStore *RepoStore, reqBody []byte) ([]byte, error) {
 	if len(objects) == 0 {
 		return nil, fmt.Errorf("no objects collected for commits")
 	}
-	packfile, err := BuildPackfile(objects)
-	if err != nil {
-		return nil, fmt.Errorf("building packfile from cache: %w", err)
-	}
-	clientRespBytes := FormatSidebandPackfile(packfile, fetchReq.IsV2, acks, len(fetchReq.Haves) > 0)
-	return clientRespBytes, nil
+	return newPackfileResponse(objects, fetchReq.IsV2, acks, len(fetchReq.Haves) > 0), nil
 }
 
 func removeHopByHopHeaders(h http.Header) {
