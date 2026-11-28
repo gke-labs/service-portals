@@ -202,6 +202,18 @@ message HttpRuleEffects {
   // +k8s:customUnique # case-insensitive
   // +k8s:customValidation # for duplicate headers
   repeated CredentialHeader replace_headers = 1;
+
+  // Forwards matched requests to the configured backend service URL (for
+  // example, "http://goproxy-cache.service-portal-system.svc:8080") instead of
+  // dialing the original destination. Client-side TLS interception remains
+  // transparent to the Actor.
+  //
+  // Must use the http or https scheme with a non-empty host, and must not
+  // contain userinfo, query strings, fragments, or a non-root path.
+  //
+  // +k8s:optional
+  // +k8s:customValidation # format
+  string backend_url = 1000;
 }
 
 // CredentialHeader replaces the value of an HTTP request header with a

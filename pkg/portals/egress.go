@@ -489,17 +489,31 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dialHost, err := h.resolveUpstreamHost(targetHost, pod)
+	var dialScheme, dialHost string
+	backendURL, err := rule.BackendURL()
 	if err != nil {
-		log.Printf("Request: %s %s:%d | Caller: %s | Action: denied (resolve error: %v)", r.Method, targetHost, port, caller, err)
-		http.Error(w, "Access Denied: cannot resolve host for caller", http.StatusForbidden)
+		log.Printf("Request: %s %s:%d | Caller: %s | Action: denied (invalid backend URL: %v)", r.Method, targetHost, port, caller, err)
+		http.Error(w, "Access Denied: invalid backend URL", http.StatusForbidden)
 		return
+	}
+	if backendURL != nil {
+		dialScheme = backendURL.Scheme
+		dialHost = backendURL.Host
+	} else {
+		resolvedHost, err := h.resolveUpstreamHost(targetHost, pod)
+		if err != nil {
+			log.Printf("Request: %s %s:%d | Caller: %s | Action: denied (resolve error: %v)", r.Method, targetHost, port, caller, err)
+			http.Error(w, "Access Denied: cannot resolve host for caller", http.StatusForbidden)
+			return
+		}
+		dialScheme = string(proto)
+		dialHost = net.JoinHostPort(resolvedHost, strconv.Itoa(int(port)))
 	}
 
 	outReq := r.Clone(r.Context())
 	outReq.RequestURI = ""
-	outReq.URL.Scheme = string(proto)
-	outReq.URL.Host = net.JoinHostPort(dialHost, strconv.Itoa(int(port)))
+	outReq.URL.Scheme = dialScheme
+	outReq.URL.Host = dialHost
 	outReq.Host = r.Host
 
 	err = rule.ApplyEffects(outReq.Header, func(name string) ([]byte, error) {
@@ -515,7 +529,11 @@ func (h *EgressHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Request: %s %s:%d | Caller: %s | Action: proxy", r.Method, targetHost, port, caller)
+	if backendURL != nil {
+		log.Printf("Request: %s %s:%d | Caller: %s | Action: proxy (backend: %s://%s)", r.Method, targetHost, port, caller, dialScheme, dialHost)
+	} else {
+		log.Printf("Request: %s %s:%d | Caller: %s | Action: proxy", r.Method, targetHost, port, caller)
+	}
 	proxy.Forward(w, outReq, h.transport)
 }
 

@@ -17,7 +17,9 @@ package portalsv1
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -258,9 +260,14 @@ func validatePorts(i int, member string, ports *Ports, errs *[]error) []portKey 
 }
 
 func validateEffects(i int, member string, effects *HttpRuleEffects, errs *[]error) {
-	if len(effects.ReplaceHeaders) == 0 {
-		*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects: at least one replace_headers entry is required", i, member))
+	if len(effects.ReplaceHeaders) == 0 && effects.BackendUrl == "" {
+		*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects: at least one of replace_headers or backend_url is required", i, member))
 		return
+	}
+	if effects.BackendUrl != "" {
+		if _, err := parseBackendURL(effects.BackendUrl); err != nil {
+			*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects.backend_url: %w", i, member, err))
+		}
 	}
 	if len(effects.ReplaceHeaders) > 16 {
 		*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects.replace_headers: at most 16 replace_headers allowed, got %d", i, member, len(effects.ReplaceHeaders)))
@@ -296,6 +303,54 @@ func validateEffects(i int, member string, effects *HttpRuleEffects, errs *[]err
 			*errs = append(*errs, fmt.Errorf("rules[%d].%s.effects.replace_headers[%d].credential_uri: %w", i, member, j, err))
 		}
 	}
+}
+
+func parseBackendURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, errors.New("backend_url cannot be empty")
+	}
+	if strings.TrimSpace(raw) != raw {
+		return nil, fmt.Errorf("invalid backend_url %q: must not have leading or trailing whitespace", raw)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid backend_url %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("invalid backend_url %q: scheme must be http or https", raw)
+	}
+	if u.Opaque != "" {
+		return nil, fmt.Errorf("invalid backend_url %q: opaque URLs are not allowed", raw)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("invalid backend_url %q: userinfo is not allowed", raw)
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return nil, fmt.Errorf("invalid backend_url %q: host is required", raw)
+	}
+	hostname := u.Hostname()
+	if net.ParseIP(hostname) == nil && !isValidHostname(strings.ToLower(strings.TrimSuffix(hostname, "."))) {
+		return nil, fmt.Errorf("invalid backend_url %q: invalid host %q", raw, hostname)
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return nil, fmt.Errorf("invalid backend_url %q: invalid port \"\"", raw)
+	}
+	if portStr := u.Port(); portStr != "" {
+		p, err := strconv.ParseUint(portStr, 10, 16)
+		if err != nil || p == 0 {
+			return nil, fmt.Errorf("invalid backend_url %q: invalid port %q", raw, portStr)
+		}
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return nil, fmt.Errorf("invalid backend_url %q: query string is not allowed", raw)
+	}
+	if u.Fragment != "" || u.RawFragment != "" || strings.Contains(raw, "#") {
+		return nil, fmt.Errorf("invalid backend_url %q: fragment is not allowed", raw)
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawPath != "" {
+		return nil, fmt.Errorf("invalid backend_url %q: path is not supported", raw)
+	}
+	return u, nil
 }
 
 func parseCredentialURI(raw string) (string, error) {
