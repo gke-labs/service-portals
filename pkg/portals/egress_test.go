@@ -2533,3 +2533,371 @@ func TestEgressHandler_EvaluateQuery_SearchDomainExpansion(t *testing.T) {
 		})
 	}
 }
+
+func TestEgressHandler_BackendURLForwarding(t *testing.T) {
+	t.Run("http rule forwards to http backend and applies header effects", func(t *testing.T) {
+		var receivedPath, receivedQuery, receivedHost, receivedAuth string
+		var backendCalls atomic.Int32
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			backendCalls.Add(1)
+			receivedPath = r.URL.Path
+			receivedQuery = r.URL.RawQuery
+			receivedHost = r.Host
+			receivedAuth = r.Header.Get("Authorization")
+			w.Header().Set("X-Cache", "HIT")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("from-http-backend"))
+		}))
+		defer backend.Close()
+
+		var dialedAddrs []string
+		transport := &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				dialedAddrs = append(dialedAddrs, addr)
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			},
+		}
+
+		pm, store := newTestEnv(t)
+		podIP := "10.244.9.1"
+		podUID := "pod-backend-http"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, Namespace: "default", Name: "pod-http", IPs: []string{podIP}})
+
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Http: &portalsv1.HttpRule{
+							Hostnames: []string{"deb.debian.org"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+							Effects: &portalsv1.HttpRuleEffects{
+								BackendUrl: backend.URL,
+								ReplaceHeaders: []*portalsv1.CredentialHeader{
+									{
+										Header:        "Authorization",
+										Prefix:        "Bearer ",
+										CredentialUri: "secret://mirror-token",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+		if _, err := store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+			PodUid:  podUID,
+			Secrets: map[string][]byte{"mirror-token": []byte("real-mirror-secret")},
+		}); err != nil {
+			t.Fatalf("InjectSecrets failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, transport, nil)
+		req := httptest.NewRequest("GET", "http://deb.debian.org/debian/dists/stable/Release?arch=amd64", nil)
+		req.RemoteAddr = podIP + ":41000"
+		req.Header.Set("Authorization", "placeholder")
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		if backendCalls.Load() != 1 {
+			t.Fatalf("expected 1 backend call, got %d", backendCalls.Load())
+		}
+		if receivedPath != "/debian/dists/stable/Release" {
+			t.Errorf("path = %q, want %q", receivedPath, "/debian/dists/stable/Release")
+		}
+		if receivedQuery != "arch=amd64" {
+			t.Errorf("query = %q, want %q", receivedQuery, "arch=amd64")
+		}
+		if receivedHost != "deb.debian.org" {
+			t.Errorf("Host = %q, want %q", receivedHost, "deb.debian.org")
+		}
+		if receivedAuth != "Bearer real-mirror-secret" {
+			t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer real-mirror-secret")
+		}
+		if resp.Header.Get("X-Cache") != "HIT" {
+			t.Errorf("X-Cache = %q, want HIT", resp.Header.Get("X-Cache"))
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != "from-http-backend" {
+			t.Errorf("body = %q, want %q", string(body), "from-http-backend")
+		}
+		if len(dialedAddrs) != 1 || dialedAddrs[0] != backend.Listener.Addr().String() {
+			t.Errorf("dialed = %v, want [%s]", dialedAddrs, backend.Listener.Addr().String())
+		}
+	})
+
+	t.Run("https rule forwards transparently to http backend", func(t *testing.T) {
+		var receivedPath, receivedQuery, receivedHost, receivedAuth string
+		var receivedTLS bool
+		var backendCalls atomic.Int32
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			backendCalls.Add(1)
+			receivedPath = r.URL.Path
+			receivedQuery = r.URL.RawQuery
+			receivedHost = r.Host
+			receivedAuth = r.Header.Get("Authorization")
+			receivedTLS = r.TLS != nil
+			w.Header().Set("X-Backend", "goproxy-cache")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"Version":"v0.9.1"}`))
+		}))
+		defer backend.Close()
+
+		caCertPath, caKeyPath := createTestCA(t)
+		signer, err := proxy.NewCertSigner(caCertPath, caKeyPath)
+		if err != nil {
+			t.Fatalf("NewCertSigner failed: %v", err)
+		}
+		caCertPEM, err := os.ReadFile(caCertPath)
+		if err != nil {
+			t.Fatalf("read CA cert failed: %v", err)
+		}
+		caPool := x509.NewCertPool()
+		caPool.AppendCertsFromPEM(caCertPEM)
+
+		pm, store := newTestEnv(t)
+		podIP := "127.0.0.1"
+		podUID := "pod-https-to-http"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, Namespace: "default", Name: "pod-go", IPs: []string{podIP}})
+
+		_, err = store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Https: &portalsv1.HttpsRule{
+							Hostnames: []string{"proxy.golang.org"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{443}},
+							Effects: &portalsv1.HttpRuleEffects{
+								BackendUrl: backend.URL,
+								ReplaceHeaders: []*portalsv1.CredentialHeader{
+									{
+										Header:        "Authorization",
+										Prefix:        "Bearer ",
+										CredentialUri: "secret://goproxy-token",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+		if _, err := store.InjectSecrets(t.Context(), &portalsv1.PodSecrets{
+			PodUid:  podUID,
+			Secrets: map[string][]byte{"goproxy-token": []byte("cache-auth-secret")},
+		}); err != nil {
+			t.Fatalf("InjectSecrets failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, nil, signer)
+
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen failed: %v", err)
+		}
+		defer listener.Close()
+
+		tlsListener := tls.NewListener(listener, &tls.Config{
+			GetCertificate: handler.GetCertificate,
+		})
+		srv := &http.Server{Handler: handler}
+		go func() {
+			_ = srv.Serve(tlsListener)
+		}()
+		defer srv.Close()
+
+		client := &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
+				},
+				TLSClientConfig: &tls.Config{
+					RootCAs: caPool,
+				},
+			},
+		}
+
+		req, err := http.NewRequestWithContext(t.Context(), "GET", "https://proxy.golang.org/github.com/pkg/errors/@v/v0.9.1.info?go-get=1", nil)
+		if err != nil {
+			t.Fatalf("NewRequest failed: %v", err)
+		}
+		req.Header.Set("Authorization", "placeholder-token")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("HTTPS request through proxy failed: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+			t.Fatal("expected transparent TLS connection to client")
+		}
+		if resp.TLS.PeerCertificates[0].Subject.CommonName != "proxy.golang.org" {
+			t.Errorf("peer cert CN = %q, want proxy.golang.org", resp.TLS.PeerCertificates[0].Subject.CommonName)
+		}
+		if backendCalls.Load() != 1 {
+			t.Fatalf("expected 1 backend call, got %d", backendCalls.Load())
+		}
+		if receivedTLS {
+			t.Error("expected backend to receive plain HTTP, got TLS")
+		}
+		if receivedPath != "/github.com/pkg/errors/@v/v0.9.1.info" {
+			t.Errorf("path = %q, want %q", receivedPath, "/github.com/pkg/errors/@v/v0.9.1.info")
+		}
+		if receivedQuery != "go-get=1" {
+			t.Errorf("query = %q, want %q", receivedQuery, "go-get=1")
+		}
+		if receivedHost != "proxy.golang.org" {
+			t.Errorf("Host = %q, want %q", receivedHost, "proxy.golang.org")
+		}
+		if receivedAuth != "Bearer cache-auth-secret" {
+			t.Errorf("Authorization = %q, want %q", receivedAuth, "Bearer cache-auth-secret")
+		}
+		if resp.Header.Get("X-Backend") != "goproxy-cache" {
+			t.Errorf("X-Backend = %q, want goproxy-cache", resp.Header.Get("X-Backend"))
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != `{"Version":"v0.9.1"}` {
+			t.Errorf("body = %q, want %q", string(body), `{"Version":"v0.9.1"}`)
+		}
+	})
+
+	t.Run("http rule forwards to https backend", func(t *testing.T) {
+		var receivedTLS bool
+		backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedTLS = r.TLS != nil
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("from-https-backend"))
+		}))
+		defer backend.Close()
+
+		pm, store := newTestEnv(t)
+		podIP := "10.244.9.2"
+		podUID := "pod-http-to-https"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Http: &portalsv1.HttpRule{
+							Hostnames: []string{"registry.example.com"},
+							Ports:     &portalsv1.Ports{Numbers: []int32{80}},
+							Effects: &portalsv1.HttpRuleEffects{
+								BackendUrl: backend.URL,
+							},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, backend.Client().Transport, nil)
+		req := httptest.NewRequest("GET", "http://registry.example.com/pkg.tgz", nil)
+		req.RemoteAddr = podIP + ":42000"
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", resp.StatusCode)
+		}
+		if !receivedTLS {
+			t.Error("expected backend to receive HTTPS")
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if string(body) != "from-https-backend" {
+			t.Errorf("body = %q, want %q", string(body), "from-https-backend")
+		}
+	})
+
+	t.Run("deciding rule backend takes precedence over wildcard rule", func(t *testing.T) {
+		var wildcardCalls, exactCalls atomic.Int32
+		wildcardBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			wildcardCalls.Add(1)
+			_, _ = w.Write([]byte("wildcard"))
+		}))
+		defer wildcardBackend.Close()
+
+		exactBackend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			exactCalls.Add(1)
+			_, _ = w.Write([]byte("exact"))
+		}))
+		defer exactBackend.Close()
+
+		pm, store := newTestEnv(t)
+		podIP := "10.244.9.3"
+		podUID := "pod-precedence"
+		pm.AddOrUpdatePod(&PodInfo{UID: podUID, IPs: []string{podIP}})
+
+		_, err := store.Bind(t.Context(), &portalsv1.PodPolicy{
+			PodUid: podUID,
+			Policy: &portalsv1.EgressPolicy{
+				Rules: []*portalsv1.EgressRule{
+					{
+						Https: &portalsv1.HttpsRule{
+							Hostnames: []string{"*.golang.org"},
+							Effects:   &portalsv1.HttpRuleEffects{BackendUrl: wildcardBackend.URL},
+						},
+					},
+					{
+						Https: &portalsv1.HttpsRule{
+							Hostnames: []string{"proxy.golang.org"},
+							Effects:   &portalsv1.HttpRuleEffects{BackendUrl: exactBackend.URL},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind failed: %v", err)
+		}
+
+		handler := NewEgressHandler(pm, store, nil, nil)
+
+		req1 := httptest.NewRequest("GET", "https://proxy.golang.org/a", nil)
+		req1.RemoteAddr = podIP + ":43001"
+		w1 := httptest.NewRecorder()
+		handler.ServeHTTP(w1, req1)
+		if w1.Result().StatusCode != http.StatusOK || w1.Body.String() != "exact" {
+			t.Fatalf("proxy.golang.org got status=%d body=%q, want 200/exact", w1.Result().StatusCode, w1.Body.String())
+		}
+
+		req2 := httptest.NewRequest("GET", "https://sum.golang.org/b", nil)
+		req2.RemoteAddr = podIP + ":43002"
+		w2 := httptest.NewRecorder()
+		handler.ServeHTTP(w2, req2)
+		if w2.Result().StatusCode != http.StatusOK || w2.Body.String() != "wildcard" {
+			t.Fatalf("sum.golang.org got status=%d body=%q, want 200/wildcard", w2.Result().StatusCode, w2.Body.String())
+		}
+
+		if exactCalls.Load() != 1 || wildcardCalls.Load() != 1 {
+			t.Errorf("calls exact=%d wildcard=%d, want 1 and 1", exactCalls.Load(), wildcardCalls.Load())
+		}
+	})
+}
