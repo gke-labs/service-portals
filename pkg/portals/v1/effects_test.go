@@ -890,3 +890,73 @@ func TestApplyEffects_MalformedCredentialURI(t *testing.T) {
 		}
 	})
 }
+
+func TestBackendURL(t *testing.T) {
+	t.Run("nil rule returns nil", func(t *testing.T) {
+		var r *EgressRule
+		u, err := r.BackendURL()
+		if err != nil || u != nil {
+			t.Fatalf("got (%v, %v), want (nil, nil)", u, err)
+		}
+	})
+
+	t.Run("rule without effects returns nil", func(t *testing.T) {
+		r := &EgressRule{Https: &HttpsRule{Hostnames: []string{"proxy.golang.org"}}}
+		u, err := r.BackendURL()
+		if err != nil || u != nil {
+			t.Fatalf("got (%v, %v), want (nil, nil)", u, err)
+		}
+	})
+
+	t.Run("tls passthrough rule returns nil", func(t *testing.T) {
+		r := &EgressRule{TlsPassthrough: &TlsPassthroughRule{Hostnames: []string{"example.com"}}}
+		u, err := r.BackendURL()
+		if err != nil || u != nil {
+			t.Fatalf("got (%v, %v), want (nil, nil)", u, err)
+		}
+	})
+
+	t.Run("http rule with valid backend URL", func(t *testing.T) {
+		r := &EgressRule{
+			Http: &HttpRule{
+				Hostnames: []string{"deb.debian.org"},
+				Effects:   &HttpRuleEffects{BackendUrl: "http://apt-cache.service-portal-system.svc:3142"},
+			},
+		}
+		u, err := r.BackendURL()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if u == nil || u.Scheme != "http" || u.Host != "apt-cache.service-portal-system.svc:3142" {
+			t.Fatalf("got %v, want http://apt-cache.service-portal-system.svc:3142", u)
+		}
+	})
+
+	t.Run("https rule with valid backend URL", func(t *testing.T) {
+		r := &EgressRule{
+			Https: &HttpsRule{
+				Hostnames: []string{"proxy.golang.org"},
+				Effects:   &HttpRuleEffects{BackendUrl: "http://goproxy-cache.service-portal-system.svc:8080"},
+			},
+		}
+		u, err := r.BackendURL()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if u == nil || u.Scheme != "http" || u.Host != "goproxy-cache.service-portal-system.svc:8080" {
+			t.Fatalf("got %v, want http://goproxy-cache.service-portal-system.svc:8080", u)
+		}
+	})
+
+	t.Run("malformed backend URL returns error", func(t *testing.T) {
+		r := &EgressRule{
+			Https: &HttpsRule{
+				Hostnames: []string{"proxy.golang.org"},
+				Effects:   &HttpRuleEffects{BackendUrl: "ftp://bad.example.com"},
+			},
+		}
+		if u, err := r.BackendURL(); err == nil {
+			t.Fatalf("expected error, got URL %v", u)
+		}
+	})
+}

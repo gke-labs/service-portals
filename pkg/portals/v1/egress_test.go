@@ -168,6 +168,71 @@ func TestLoadPolicy_Accepted(t *testing.T) {
 				]
 			}`,
 		},
+		{
+			name: "effects with backendUrl only on https rule",
+			json: `{
+				"rules": [
+					{"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {
+							"backendUrl": "http://goproxy-cache.service-portal-system.svc:8080"
+						}
+					}}
+				]
+			}`,
+		},
+		{
+			name: "effects with https backendUrl and trailing slash",
+			json: `{
+				"rules": [
+					{"http": {
+						"hostnames": ["pypi.org"],
+						"effects": {
+							"backendUrl": "https://pypi-cache.service-portal-system.svc.cluster.local/"
+						}
+					}}
+				]
+			}`,
+		},
+		{
+			name: "effects with IPv4 and IPv6 backendUrl",
+			json: `{
+				"rules": [
+					{"https": {
+						"hostnames": ["a.example.com"],
+						"effects": {
+							"backendUrl": "http://127.0.0.1:8080"
+						}
+					}},
+					{"https": {
+						"hostnames": ["b.example.com"],
+						"effects": {
+							"backendUrl": "http://[::1]:8080"
+						}
+					}}
+				]
+			}`,
+		},
+		{
+			name: "effects with both backendUrl and replaceHeaders",
+			json: `{
+				"rules": [
+					{"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {
+							"backendUrl": "http://goproxy-cache.service-portal-system.svc:8080",
+							"replaceHeaders": [
+								{
+									"header": "Authorization",
+									"prefix": "Bearer ",
+									"credentialUri": "secret://proxy-token"
+								}
+							]
+						}
+					}}
+				]
+			}`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -483,7 +548,223 @@ func TestLoadPolicy_Rejected(t *testing.T) {
 					}
 				}]
 			}`,
-			wantErr: "at least one replace_headers entry is required",
+			wantErr: "at least one of replace_headers or backend_url is required",
+		},
+		{
+			name: "effects with unsupported backendUrl scheme",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "ftp://cache.internal:21"}
+					}
+				}]
+			}`,
+			wantErr: "scheme must be http or https",
+		},
+		{
+			name: "effects with missing backendUrl scheme",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "cache.internal:8080"}
+					}
+				}]
+			}`,
+			wantErr: "scheme must be http or https",
+		},
+		{
+			name: "effects with opaque backendUrl",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http:cache.internal"}
+					}
+				}]
+			}`,
+			wantErr: "opaque URLs are not allowed",
+		},
+		{
+			name: "effects with empty backendUrl host",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://"}
+					}
+				}]
+			}`,
+			wantErr: "host is required",
+		},
+		{
+			name: "effects with port-only backendUrl host",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://:8080"}
+					}
+				}]
+			}`,
+			wantErr: "host is required",
+		},
+		{
+			name: "effects with wildcard backendUrl host",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://*.cache.internal:8080"}
+					}
+				}]
+			}`,
+			wantErr: "invalid host",
+		},
+		{
+			name: "effects with encoded slash in backendUrl host",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://foo%2fbar:8080"}
+					}
+				}]
+			}`,
+			wantErr: "invalid URL escape",
+		},
+		{
+			name: "effects with consecutive dots in backendUrl host",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://foo..bar:8080"}
+					}
+				}]
+			}`,
+			wantErr: "invalid host",
+		},
+		{
+			name: "effects with empty backendUrl port",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:"}
+					}
+				}]
+			}`,
+			wantErr: "invalid port",
+		},
+		{
+			name: "effects with zero backendUrl port",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:0"}
+					}
+				}]
+			}`,
+			wantErr: "invalid port",
+		},
+		{
+			name: "effects with out of range backendUrl port",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:65536"}
+					}
+				}]
+			}`,
+			wantErr: "invalid port",
+		},
+		{
+			name: "effects with backendUrl userinfo",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://user:pass@cache.internal:8080"}
+					}
+				}]
+			}`,
+			wantErr: "userinfo is not allowed",
+		},
+		{
+			name: "effects with backendUrl query string",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:8080?foo=bar"}
+					}
+				}]
+			}`,
+			wantErr: "query string is not allowed",
+		},
+		{
+			name: "effects with backendUrl empty query mark",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:8080?"}
+					}
+				}]
+			}`,
+			wantErr: "query string is not allowed",
+		},
+		{
+			name: "effects with backendUrl fragment",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:8080#section"}
+					}
+				}]
+			}`,
+			wantErr: "fragment is not allowed",
+		},
+		{
+			name: "effects with backendUrl empty fragment mark",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:8080#"}
+					}
+				}]
+			}`,
+			wantErr: "fragment is not allowed",
+		},
+		{
+			name: "effects with backendUrl non-root path",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": "http://cache.internal:8080/prefix"}
+					}
+				}]
+			}`,
+			wantErr: "path is not supported",
+		},
+		{
+			name: "effects with backendUrl leading whitespace",
+			json: `{
+				"rules": [{
+					"https": {
+						"hostnames": ["proxy.golang.org"],
+						"effects": {"backendUrl": " http://cache.internal:8080"}
+					}
+				}]
+			}`,
+			wantErr: "whitespace",
 		},
 		{
 			name: "effects with invalid header name",

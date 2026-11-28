@@ -18,12 +18,36 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
 // SecretResolver resolves a secret name to its token bytes.
 // If the secret cannot be resolved, it returns a non-nil error.
 type SecretResolver func(name string) ([]byte, error)
+
+func ruleEffects(r *EgressRule) *HttpRuleEffects {
+	if r == nil {
+		return nil
+	}
+	if r.Http != nil {
+		return r.Http.Effects
+	}
+	if r.Https != nil {
+		return r.Https.Effects
+	}
+	return nil
+}
+
+// BackendURL returns the parsed backend forwarding URL configured on the
+// rule's effects, or (nil, nil) if no backend URL is configured.
+func (r *EgressRule) BackendURL() (*url.URL, error) {
+	effects := ruleEffects(r)
+	if effects == nil || effects.BackendUrl == "" {
+		return nil, nil
+	}
+	return parseBackendURL(effects.BackendUrl)
+}
 
 // ApplyEffects applies the EgressRule's effects to the request headers.
 // Credentials are retrieved using the provided SecretResolver.
@@ -32,12 +56,7 @@ func (r *EgressRule) ApplyEffects(headers http.Header, resolve SecretResolver) e
 	if r == nil || headers == nil {
 		return nil
 	}
-	var effects *HttpRuleEffects
-	if r.Http != nil {
-		effects = r.Http.Effects
-	} else if r.Https != nil {
-		effects = r.Https.Effects
-	}
+	effects := ruleEffects(r)
 	if effects == nil || len(effects.ReplaceHeaders) == 0 {
 		return nil
 	}
