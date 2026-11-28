@@ -2882,6 +2882,164 @@ spec:
 			fetchService(seqPod2, "seq-pod-2-np")
 		})
 	})
+
+	// 17. Transparent HTTPS interception -> backend_url forwarding -> in-cluster
+	// goproxy-service-portal -> fake Go module proxy upstream, verifying both TLS and caching.
+	t.Run("BackendURL_GoproxyCache", func(t *testing.T) {
+		const (
+			goproxyNS       = "goproxy-e2e"
+			goproxyPodName  = "test-client-goproxy"
+			modulePath      = "/example.com/mod/@v/v1.0.0.info"
+			expectedPayload = `{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`
+		)
+
+		upstreamManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: goproxy-upstream
+  namespace: %s
+  labels:
+    app: goproxy-upstream
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: goproxy-upstream
+  template:
+    metadata:
+      labels:
+        app: goproxy-upstream
+    spec:
+      containers:
+      - name: toolbox
+        image: toolbox:e2e
+        imagePullPolicy: Never
+        args: ["server"]
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          tcpSocket:
+            port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: goproxy-upstream
+  namespace: %s
+spec:%s
+  selector:
+    app: goproxy-upstream
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+`, goproxyNS, goproxyNS, goproxyNS, serviceIPFamilies)
+		h.KubectlApplyContent(upstreamManifest)
+		t.Cleanup(func() {
+			h.RunCommand("kubectl", "delete", "namespace", goproxyNS, "--ignore-not-found")
+		})
+		h.WaitForDeploymentInNamespace(goproxyNS, "goproxy-upstream", 2*time.Minute)
+
+		// Deploy goproxy-service-portal from the shipped manifest via ap deploy, then point it
+		// at the in-cluster fake upstream so the test has no public internet dependency.
+		h.ApDeploy("k8s/goproxy-service-portal.yaml")
+		t.Cleanup(func() {
+			h.RunCommand("kubectl", "-n", "service-portal-system", "delete", "deployment,service", "goproxy-service-portal", "--ignore-not-found")
+		})
+		upstreamURL := fmt.Sprintf("http://goproxy-upstream.%s.svc.cluster.local:8080", goproxyNS)
+		patchJSON := fmt.Sprintf(`[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--upstream-url=%s"}]`, upstreamURL)
+		h.RunCommand("kubectl", "-n", "service-portal-system", "patch", "deployment", "goproxy-service-portal", "--type=json", "-p", patchJSON)
+		h.WaitForDeploymentInNamespace("service-portal-system", "goproxy-service-portal", 2*time.Minute)
+
+		clientManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    app: %s
+    service-portal.gke.io/intercept: "true"
+spec:
+%s  containers:
+  - name: workload
+    image: toolbox:e2e
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 1000
+      allowPrivilegeEscalation: false
+    command: ["/bin/sh", "-c", "sleep 3600"]
+`, goproxyPodName, goproxyNS, goproxyPodName, runtimeClassField)
+		h.KubectlApplyContent(clientManifest)
+		h.WaitForPodReady("app="+goproxyPodName, 2*time.Minute)
+
+		outUID, err := exec.Command("kubectl", "get", "pod", goproxyPodName, "-n", goproxyNS, "-o", "jsonpath={.metadata.uid}").CombinedOutput()
+		if err != nil {
+			t.Fatalf("failed to get pod UID for %s: %v (output: %s)", goproxyPodName, err, outUID)
+		}
+		goproxyPodUID := strings.TrimSpace(string(outUID))
+
+		goproxyPolicy := &portalsv1.EgressPolicy{
+			Rules: []*portalsv1.EgressRule{
+				{
+					Https: &portalsv1.HttpsRule{
+						Hostnames: []string{"proxy.golang.org"},
+						Effects: &portalsv1.HttpRuleEffects{
+							BackendUrl: "http://goproxy-service-portal.service-portal-system.svc.cluster.local:8080",
+						},
+					},
+				},
+			},
+		}
+		bindResp, err := bindClient.Bind(authCtx, &portalsv1.PodPolicy{
+			PodUid:   goproxyPodUID,
+			Identity: "test-user-goproxy",
+			Policy:   goproxyPolicy,
+			Wait:     true,
+		})
+		if err != nil {
+			t.Fatalf("Bind with wait failed for %s: %v", goproxyPodName, err)
+		}
+		if bindResp.GetStatus() != portalsv1.AcceptanceStatus_ACCEPTANCE_STATUS_ACCEPTED {
+			t.Fatalf("expected Bind for %s to end in ACCEPTED, got %v (refusal: %s)", goproxyPodName, bindResp.GetStatus(), bindResp.GetRefusalReason())
+		}
+		t.Cleanup(func() {
+			if _, err := bindClient.Unbind(authCtx, &portalsv1.UnbindRequest{PodUid: goproxyPodUID, Wait: true}); err != nil {
+				t.Logf("failed to unbind %s during cleanup: %v", goproxyPodName, err)
+			}
+		})
+
+		// Issue two transparent HTTPS requests using only the portal's injected CA (no GOPROXY or proxy env vars).
+		for attempt := 1; attempt <= 2; attempt++ {
+			cmd := exec.Command("kubectl", "exec", goproxyPodName, "-n", goproxyNS, "-c", "workload", "--",
+				"wget", "--ca-certificate=/etc/service-portal/ca/tls.crt", "-T", "10", "-S", "-O-",
+				"https://proxy.golang.org"+modulePath)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("attempt %d: HTTPS request to proxy.golang.org failed: %v\nstdout: %s\nstderr: %s", attempt, err, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "200 OK") {
+				t.Fatalf("attempt %d: expected 200 OK status, got stderr:\n%s", attempt, stderr.String())
+			}
+			if got := strings.TrimSpace(stdout.String()); got != expectedPayload {
+				t.Fatalf("attempt %d: expected payload %q, got %q", attempt, expectedPayload, got)
+			}
+		}
+
+		upstreamLogs := h.GetPodLogsByNamespaceAndLabel(goproxyNS, "app=goproxy-upstream", "toolbox")
+		if count := strings.Count(upstreamLogs, "Received request: GET "+modulePath); count != 1 {
+			t.Fatalf("expected fake upstream to receive exactly 1 request for %s, got %d\nlogs:\n%s", modulePath, count, upstreamLogs)
+		}
+		t.Logf("verified transparent HTTPS forwarding to goproxy-service-portal served 2 requests with 1 upstream hit")
+	})
 }
 
 func runNRIDualStackAssertions(t *testing.T, h *Harness, clientPodName, backendIPv6ClusterIP string) {
